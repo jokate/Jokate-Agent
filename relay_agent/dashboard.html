@@ -411,7 +411,7 @@ const EV = {
   run_created: ["🏁", "릴레이 출발"], stage_started: ["🏃", "단계 시작"], tool_use: ["🛠️", "도구 사용"],
   tool_error: ["⚠️", "도구 오류"], note: ["💬", "메모"], stage_finished: ["✅", "단계 완료"],
   sent_back: ["↩️", "되돌림"], awaiting_approval: ["✋", "승인 대기"], approved: ["👍", "승인됨"],
-  run_done: ["🏆", "릴레이 완주"], run_failed: ["💥", "실패"], budget_exceeded: ["💸", "예산 도달"],
+  run_done: ["🏆", "릴레이 완주"], run_failed: ["💥", "실패"], budget_exceeded: ["💸", "예산 도달"], stage_budget_exceeded: ["💸", "단계 한도 도달"],
   model_fallback: ["🔀", "모델 전환"], mcp_call: ["🔌", "MCP 호출"], tool_result_large: ["🐘", "큰 도구 결과"], provider_switch: ["🔁", "AI 교체"], provider_exhausted: ["🪫", "사용량 소진"],
   providers_skipped: ["⏭️", "건너뛴 AI"], stage_skipped: ["⏭️", "단계 건너뜀"], run_cancelled: ["⛔", "취소됨"],
   workspace_ready: ["📦", "작업 공간 준비"], changes_ready: ["🧾", "변경 사항 준비"], changes_applied: ["✅", "원본에 적용"],
@@ -533,6 +533,7 @@ function describe(e) {
     case "mcp_call": return `<code>${esc(d.server)}.${esc(d.tool)}</code> ${esc(d.target || "")}<span class="mcp-size"></span>`;
     case "tool_result_large": return `<code>${esc(d.tool)}</code> ${esc(d.target || "")} · 결과 ${fmtN(d.chars)}자 (토큰 소모 큼)`;
     case "run_failed": return esc(d.error);
+    case "stage_budget_exceeded": return `${esc(d.reason)} — 승인하면 이 단계 한도를 2배로 올려 다시 실행`;
     case "budget_exceeded": return `${fmt$(d.spent_usd)} 사용 / 한도 ${fmt$(d.limit_usd)} — 승인하면 <code>${esc(d.next)}</code> 부터 계속`;
     case "tool_error": return esc(d.message);
     case "note": return esc(d.text);

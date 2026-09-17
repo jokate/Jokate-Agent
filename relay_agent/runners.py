@@ -321,7 +321,19 @@ class ClaudeCliRunner:
             raise RunnerError(f"claude -p ended without a result (exit {code}): {text}",
                               "quota" if rejected or looks_like_quota(text) else "error")
         if data.get("is_error") or "structured_output" not in data:
-            text = str(data.get("result"))[:500]
+            subtype = data.get("subtype") or ""
+            # error results often carry no "result" text: the reason is in subtype / errors / terminal_reason
+            detail = data.get("result") or " · ".join(str(x) for x in (data.get("errors") or [])) or data.get("terminal_reason") or ""
+            text = f"{subtype}: {detail}"[:500] if subtype and subtype != "success" else str(detail)[:500]
+            cost = data.get("total_cost_usd")
+            if subtype == "error_max_budget_usd" or data.get("terminal_reason") == "budget_exhausted":
+                err = RunnerError(f"단계 예산 ${call.max_budget_usd} 도달 (사용 ${cost or 0:.2f}, {data.get('num_turns')}턴)", "budget")
+                err.cost_usd = cost
+                raise err
+            if subtype == "error_max_turns":
+                raise RunnerError(f"최대 턴 수 도달 ({data.get('num_turns')}턴): {detail}"[:500])
+            if not text.strip() or text == "None":
+                text = f"결과 없음 (subtype={subtype or '?'}, stop={data.get('stop_reason')}, turns={data.get('num_turns')})"
             # Only an error result can be a limit message; a normal answer that merely mentions "limit" is not.
             quota = rejected or data.get("api_error_status") == 429 or (data.get("is_error") and looks_like_quota(text))
             raise RunnerError(f"claude -p failed: {text}", "quota" if quota else "error")

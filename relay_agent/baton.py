@@ -77,7 +77,7 @@ class Baton(BaseModel):
         if self.stop:
             st = self.stop
             label = {"cancelled": "취소로 중단", "failed": "실패로 중단", "awaiting_approval": "승인 대기",
-                     "budget": "예산 도달로 대기"}.get(st.kind, st.kind)
+                     "budget": "예산 도달로 대기", "stage_budget": "단계 비용 한도 도달로 대기"}.get(st.kind, st.kind)
             lines.append(f"## 중단 지점 — {label} ({st.at})")
             lines.append(f"- 멈춘 단계: `{st.stage}` · 사유: {st.reason}")
             if st.done_stages:

@@ -29,7 +29,7 @@ from pydantic import BaseModel, Field
 from .baton import Baton, StopNote
 from .history import HistoryStore
 from .providers import LEGACY_RUNNER, ProviderRegistry
-from .runners import Runner, RunnerError, StageCall, make_runner
+from .runners import Runner, RunnerError, StageCall, Usage, make_runner
 from .usage import UsageStore
 from .repos import RepoRegistry, RepoSpec
 from .journal import JournalWorkspace
@@ -121,6 +121,8 @@ class RunState(BaseModel):
     history: list[StageRecord] = []
     error: str | None = None
     budget_extra_usd: float = 0.0  # raised each time the user approves past the run budget
+    stage_budget_boost: dict[str, float] = {}  # stage -> multiplier on max_budget_usd, doubled per approval
+    pending_budget_stage: str | None = None  # stage paused because it hit its own budget
     repo: str | None = None  # registered repository name, if the run targets one
     workspace_mode: Literal["none", "copy", "inplace"] = "none"
     changes: dict | None = None  # {files, insertions, deletions, stat}
@@ -296,6 +298,10 @@ class RelayEngine:
         if spec.max_run_cost_usd and run.cost_usd >= spec.max_run_cost_usd + run.budget_extra_usd:
             # approved past the budget: allow one more full budget on top of what is already spent
             run.budget_extra_usd = run.cost_usd
+        if run.pending_budget_stage:
+            stage = run.pending_budget_stage
+            run.stage_budget_boost[stage] = run.stage_budget_boost.get(stage, 1.0) * 2
+            run.pending_budget_stage = None
         run.status = "pending"
         self._event(run, "-", "approved")
         self.save(run)
@@ -592,6 +598,7 @@ class RelayEngine:
             "failed": f"원인을 해결한 뒤 재개하면 `{stage}` 단계부터 다시 실행합니다 (relay resume {run.id})",
             "awaiting_approval": f"승인하면 `{remaining[0] if remaining else stage}` 단계부터 진행합니다 (relay approve {run.id})",
             "budget": f"승인하면 예산 1회분을 더 허용하고 `{stage}` 단계부터 진행합니다 (relay approve {run.id})",
+            "stage_budget": f"승인하면 `{stage}` 단계의 비용 한도를 2배로 올려 다시 실행합니다 (relay approve {run.id})",
         }.get(kind, "")
         run.baton.stop = StopNote(kind=kind, stage=stage, reason=reason[:300], at=_now(), done_stages=done,
                                   remaining_stages=remaining, partial_actions=partial, resume_hint=hint)
@@ -754,7 +761,8 @@ class RelayEngine:
                 timeout_s=stage.timeout_s,
                 system_mode=stage.system_mode,
                 isolate=stage.isolate,
-                max_budget_usd=stage.max_budget_usd,
+                max_budget_usd=(stage.max_budget_usd * run.stage_budget_boost.get(stage.name, 1.0)
+                                if stage.max_budget_usd is not None else None),
                 fallback_model=stage.fallback_model,
                 on_event=self._on_stage_event(run.id, stage.name),
                 cancel_event=cancel,
@@ -764,6 +772,18 @@ class RelayEngine:
             except RunnerError as e:
                 if e.kind == "cancelled" or cancel.is_set():
                     return self._fail(run, stage.name, "사용자가 취소함", status="cancelled")
+                if e.kind == "budget":
+                    # a stage that ran out of its own budget waits for approval instead of failing the run
+                    spent = getattr(e, "cost_usd", None)
+                    if spent:
+                        self.usage.record(run.id, stage.name, Usage(stage.primary, call.model or "?", cost_usd=spent))
+                    run.status, run.pending_budget_stage = "awaiting_approval", stage.name
+                    self._event(run, stage.name, "stage_budget_exceeded", limit_usd=call.max_budget_usd,
+                                spent_usd=spent, reason=str(e))
+                    self._write_stop(run, "stage_budget", stage.name, str(e))
+                    self._settle_workspace(run)
+                    self.save(run)
+                    return run
                 if e.kind == "unavailable" and stage.optional:
                     self._event(run, stage.name, "stage_skipped", reason=str(e)[:200])
                     run.index += 1

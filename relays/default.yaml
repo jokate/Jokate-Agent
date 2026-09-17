@@ -16,7 +16,7 @@ stages:
     prompt: ../prompts/scout.md
     tools: [Read, Grep, Glob]
     system_mode: replace
-    max_budget_usd: 0.2
+    max_budget_usd: 0.4          # 큰 게임 프로젝트는 탐색이 길다 — 넘으면 실패가 아니라 승인 대기(승인 시 2배)
     timeout_s: 600
 
   - name: plan
