@@ -42,6 +42,10 @@ class ProviderSpec(BaseModel):
     daily_usd: float | None = Field(None, description="stop using this provider after this spend in 24h")
     cooldown_min: int = 60  # how long to skip after a usage-limit error
     switch_at_utilization: float = 0.95  # reported subscription window usage at which to switch away
+    # Only these windows decide switching to another AI: overall usage. Model-specific or overage windows
+    # (e.g. a Fable-only 7-day window) are shown but don't bench the whole provider — the stage's own
+    # model fallback (Fable -> Opus) handles those.
+    gate_windows: list[str] = ["five_hour", "seven_day"]
     tools: bool = False  # can edit files / run commands (needed by build stages)
     # cli login check: usable if any auth file holds credentials or any env var is set (both empty = no check)
     auth_files: list[str] = []
@@ -153,8 +157,10 @@ class ProviderRegistry:
             for row in self.history.limits(name):
                 resets = row["resets_at"]
                 fresh = resets is None or resets > now  # a window past its reset time no longer applies
-                limits.append({**row, "utilization": row["utilization"] if fresh else 0.0, "stale": not fresh})
-                if ok and state["available"] and fresh and (row["utilization"] or 0) >= spec.switch_at_utilization:
+                gating = not spec.gate_windows or row["window"] in spec.gate_windows
+                limits.append({**row, "utilization": row["utilization"] if fresh else 0.0, "stale": not fresh,
+                               "gating": gating})
+                if ok and state["available"] and fresh and gating and (row["utilization"] or 0) >= spec.switch_at_utilization:
                     reset_txt = datetime.fromtimestamp(resets).strftime("%m-%d %H:%M") if resets else "?"
                     state.update(available=False,
                                  reason=f"{row['window']} 사용률 {row['utilization']:.0%} — {reset_txt} 초기화")

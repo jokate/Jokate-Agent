@@ -794,11 +794,11 @@ async function loadProviders() {
   try { list = await api("/providers"); } catch { return; }
   $("quota").innerHTML = list.map((p) => {
     const wins = (p.limits || []).filter((w) => w.utilization != null);
-    const hot = wins.some((w) => w.utilization >= 0.8);
+    const hot = wins.some((w) => w.gating !== false && w.utilization >= 0.8);
     const winHtml = wins.length ? `<div class="wins">${wins.map((w) => {
       const pct = Math.round(w.utilization * 100);
       const reset = w.resets_at ? new Date(w.resets_at * 1000).toLocaleString("ko-KR", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "";
-      return `<div class="win" title="초기화 ${reset}"><span>${WINDOW_LABEL[w.window] || esc(w.window)}</span><span class="meter"><i style="width:${pct}%;background-position:${-pct}px 0"></i></span><b>${pct}%</b></div>`;
+      return `<div class="win" style="${w.gating === false ? "opacity:.55" : ""}" title="초기화 ${reset}${w.gating === false ? " · 참고용 (전체 사용량이 아니라 AI 교체 기준에서 제외)" : ""}"><span>${WINDOW_LABEL[w.window] || esc(w.window.replace("seven_day", "7d").replace("five_hour", "5h"))}</span><span class="meter"><i style="width:${pct}%;background-position:${-pct}px 0"></i></span><b>${pct}%</b></div>`;
     }).join("")}</div>` : "";
     const spent = p.usage_24h?.cost_usd ? ` · 24h ${fmt$(p.usage_24h.cost_usd)}` : "";
     const sub = p.available ? (wins.length ? `남은 사용량${spent}` : `사용 가능${spent}`) : esc(p.reason);

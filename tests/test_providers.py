@@ -73,6 +73,24 @@ stages:
     assert run.status == "done" and not claude.calls and codex.calls
 
 
+def test_model_specific_or_overage_windows_do_not_bench_the_provider(tmp_path):
+    engine, _ = engine_with(tmp_path, "name: r\nstages: []\n", {}, {"claude": MOCKISH})
+    reset = (datetime.now(timezone.utc) + timedelta(days=3)).timestamp()
+    engine.history.record_limits("claude", "allowed", [
+        {"window": "five_hour", "utilization": 0.30, "resets_at": reset},
+        {"window": "seven_day", "utilization": 0.60, "resets_at": reset},
+        {"window": "seven_day_overage", "utilization": 1.0, "resets_at": reset},
+        {"window": "seven_day_fable", "utilization": 0.99, "resets_at": reset},
+    ])
+    status = engine.providers.status("claude")
+    assert status["available"] is True
+    assert {w["window"]: w["gating"] for w in status["limits"]} == {
+        "five_hour": True, "seven_day": True, "seven_day_overage": False, "seven_day_fable": False}
+
+    engine.history.record_limits("claude", "allowed", [{"window": "seven_day", "utilization": 0.97, "resets_at": reset}])
+    assert engine.providers.status("claude")["available"] is False  # overall usage still switches
+
+
 def test_expired_window_no_longer_blocks(tmp_path):
     engine, _ = engine_with(tmp_path, "name: r\nstages: []\n", {}, {"claude": MOCKISH})
     past = (datetime.now(timezone.utc) - timedelta(minutes=1)).timestamp()
