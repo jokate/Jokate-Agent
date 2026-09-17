@@ -176,7 +176,12 @@ textarea.field { resize: vertical; min-height: 84px; }
 @keyframes pulse { 50% { box-shadow: 0 6px 36px rgba(244,114,182,.7); } }
 
 /* sessions */
-.new-session { display: grid; gap: 8px; margin-bottom: 14px; }
+.new-session { display: grid; gap: 8px; }
+.new-session > *, .new-session .btn { width: 100%; min-width: 0; }
+.new-session .btn { overflow: hidden; text-overflow: ellipsis; }
+.new-session .btn small { font-weight: 500; opacity: .6; }
+.new-session .picked { padding: 0 4px; }
+.new-session .sub-actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; margin-top: 4px; padding-top: 10px; border-top: 1px solid rgba(255,255,255,.06); }
 .session { position: relative; padding: 12px 14px; border-radius: 13px; border: 1px solid transparent; cursor: pointer; transition: .2s; margin-bottom: 6px; }
 .session:hover { background: var(--glass-strong); border-color: var(--line); transform: translateX(2px); }
 .session.active { background: var(--glass-strong); border-color: transparent; }
@@ -249,9 +254,9 @@ textarea.field { resize: vertical; min-height: 84px; }
 .baton.hide { opacity: 0; }
 
 /* tabs */
-.tabs { display: flex; gap: 4px; padding: 4px; border-radius: 12px; background: rgba(0,0,0,.2); border: 1px solid var(--line); width: fit-content; }
+.tabs { display: flex; gap: 4px; padding: 4px; border-radius: 12px; background: rgba(0,0,0,.2); border: 1px solid var(--line); width: fit-content; max-width: 100%; overflow-x: auto; scrollbar-width: none; }
 :root[data-theme="light"] .tabs { background: rgba(255,255,255,.6); }
-.tab { border: 0; background: transparent; padding: 7px 14px; border-radius: 9px; cursor: pointer; font-weight: 700; color: var(--muted); transition: .2s; }
+.tab { flex: 0 0 auto; white-space: nowrap; border: 0; background: transparent; padding: 7px 14px; border-radius: 9px; cursor: pointer; font-weight: 700; color: var(--muted); transition: .2s; }
 .tab.on { background: var(--glass-strong); color: var(--ink); box-shadow: inset 0 0 0 1px var(--line-strong); }
 
 /* timeline */
@@ -298,7 +303,7 @@ textarea.field { resize: vertical; min-height: 84px; }
   .stage-models label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted, #9aa); }
   .stage-models label b { font-weight: 600; }
   .stage-models select { width: 100%; }
-  .stage-models select.picked { border-color: var(--accent, #7cf); }
+  .stage-models select.chosen { border-color: var(--accent, #7cf); }
 </style>
 </head>
 <body>
@@ -323,15 +328,15 @@ textarea.field { resize: vertical; min-height: 84px; }
       <form class="new-session" id="newSession">
         <input class="field" name="title" placeholder="예) HON 캐릭터 작업" required>
         <select class="field" name="repo" id="repoSelect"><option value="">📁 등록된 저장소 선택…</option></select>
-        <div class="row" style="display:flex;gap:8px">
-          <button type="button" class="btn btn-ghost" id="pickWorkdir">📂 폴더 선택</button>
-          <span class="picked" id="workdirLabel">또는 등록 안 된 폴더 고르기</span>
-        </div>
+        <button type="button" class="btn btn-ghost" id="pickWorkdir">📂 폴더 직접 선택 <small>(등록 안 된 폴더)</small></button>
+        <span class="picked" id="workdirLabel" hidden></span>
         <input type="hidden" name="workdir" id="workdirValue">
         <button class="btn btn-primary">＋ 세션 시작</button>
-        <button type="button" class="btn btn-ghost" id="addRepo">＋ 저장소 등록</button>
+        <div class="sub-actions">
+          <button type="button" class="btn btn-ghost" id="addRepo">＋ 저장소 등록</button>
+          <button type="button" class="btn btn-ghost" id="ccImport">⤵ Claude Code 가져오기</button>
+        </div>
       </form>
-      <button class="btn btn-ghost" id="ccImport" style="width:100%">⤵ Claude Code 대화 가져오기</button>
     </div>
     <div class="glass panel scroll" style="flex:1">
       <p class="label">세션 <span class="count" id="sessionCount">0</span></p>
@@ -638,11 +643,11 @@ async function openSession(id) {
         <select class="field" data-stage="${esc(st.name)}"><option value="">${esc(def)}</option>${groups}</select></label>`;
     }).join("");
     $("stageModels").querySelectorAll("select").forEach((sel) => {
-      sel.classList.toggle("picked", !!sel.value);
+      sel.classList.toggle("chosen", !!sel.value);
       sel.onchange = () => {
         const all = picks(); all[r.name] = { ...(all[r.name] || {}), [sel.dataset.stage]: sel.value };
         try { localStorage.setItem("katae-stage-models", JSON.stringify(all)); } catch {}
-        sel.classList.toggle("picked", !!sel.value);
+        sel.classList.toggle("chosen", !!sel.value);
       };
     });
   };
@@ -934,12 +939,17 @@ function pickFolder(start) {
   });
 }
 
+$("repoSelect").onchange = () => {
+  if (!$("repoSelect").value) return;
+  $("workdirValue").value = ""; $("workdirLabel").textContent = ""; $("workdirLabel").hidden = true;
+};
 $("pickWorkdir").onclick = async () => {
   const path = await pickFolder($("workdirValue").value);
   if (!path) return;
   $("workdirValue").value = path;
-  $("workdirLabel").textContent = path;
+  $("workdirLabel").textContent = "📂 " + path;
   $("workdirLabel").title = path;
+  $("workdirLabel").hidden = false;
   $("repoSelect").value = "";
 };
 
@@ -1081,7 +1091,7 @@ $("newSession").onsubmit = async (ev) => {
   for (const k of ["repo", "workdir"]) if (!body[k]) delete body[k];
   try {
     const s = await api("/sessions", { method: "POST", body: JSON.stringify(body) });
-    ev.target.reset(); $("workdirValue").value = ""; $("workdirLabel").textContent = "또는 등록 안 된 폴더 고르기";
+    ev.target.reset(); $("workdirValue").value = ""; $("workdirLabel").textContent = ""; $("workdirLabel").hidden = true;
     toast("🌱 세션 시작"); openSession(s.id);
   } catch (e) { toast(e.message, true); }
 };
