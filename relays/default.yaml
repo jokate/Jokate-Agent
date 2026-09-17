@@ -1,0 +1,66 @@
+name: default
+description: 큰 작업용 — 정찰(Haiku) → 설계(Fable, 승인) → 구현(Sonnet, 되돌아오면 Fable) → 검토(Sonnet) · 복사본 작업 후 패치 반환
+workspace: copy          # copy: 원본은 그대로, 결과를 result.patch 로 돌려받음 | inplace: 원본 수정 + 되돌리기
+max_run_cost_usd: 2.0    # 넘으면 다음 단계 전에 승인 대기로 멈춤(실패 아님)
+
+# 토큰 정책 (측정 근거는 README "토큰 절약")
+# - 모든 단계 system_mode: replace (build 118K → 46K 측정)
+# - 설계만 Fable, 나머지는 Haiku/Sonnet. 비싼 모델·effort 는 되돌림(retry) 때만 올린다.
+# - 교차 검토 같은 추가 단계는 기본에 넣지 않는다(단계 하나 = 바통 + 도구 정의 + 왕복 전체 비용).
+# Claude 사용량이 한도에 가까우면(95%+) 또는 한도 오류가 나면 alternates 로 자동 교체.
+stages:
+  - name: scout
+    provider: claude
+    model: haiku
+    alternates: [{provider: codex}, {provider: opencode}, {provider: gemini}]
+    prompt: ../prompts/scout.md
+    tools: [Read, Grep, Glob]
+    system_mode: replace
+    max_budget_usd: 0.2
+    timeout_s: 600
+
+  - name: plan
+    provider: claude
+    model: fable
+    fallback_model: opus
+    effort: medium
+    alternates: [{provider: codex}, {provider: opencode}, {provider: gemini}]
+    prompt: ../prompts/plan.md
+    tools: [Read, Grep, Glob]
+    system_mode: replace
+    reads_outputs: [scout]
+    gate: human
+    max_budget_usd: 1.0
+
+  - name: build
+    provider: claude
+    model: sonnet
+    effort: medium
+    retry_model: fable
+    retry_effort: high
+    fallback_model: opus
+    alternates: [{provider: codex}, {provider: opencode}, {provider: gemini}]
+    prompt: ../prompts/build.md
+    tools: [Read, Grep, Glob, Edit, Write, Bash]
+    # headless 실행은 권한 질문에 답할 수 없다 — 검증 명령만 미리 허용 (프로젝트에 맞게 추가)
+    allowed_tools: ["Bash(uv run:*)", "Bash(pytest:*)", "Bash(python:*)", "Bash(python3:*)", "Bash(py:*)", "Bash(node:*)",
+                    "Bash(npm test:*)", "Bash(npm run test:*)", "Bash(git diff:*)", "Bash(git status:*)"]
+    permission_mode: acceptEdits
+    system_mode: replace
+    reads_outputs: [plan, review]
+    max_budget_usd: 1.0
+
+  - name: review
+    provider: claude
+    model: sonnet
+    effort: low
+    alternates: [{provider: codex}, {provider: opencode}, {provider: gemini}]
+    prompt: ../prompts/review.md
+    tools: [Read, Grep, Glob, Bash]
+    allowed_tools: ["Bash(uv run:*)", "Bash(pytest:*)", "Bash(python:*)", "Bash(python3:*)", "Bash(py:*)", "Bash(node:*)",
+                    "Bash(npm test:*)", "Bash(npm run test:*)", "Bash(git diff:*)"]
+    system_mode: replace
+    reads_outputs: [plan, build]
+    on_retry: build
+    max_retries: 1
+    max_budget_usd: 0.4

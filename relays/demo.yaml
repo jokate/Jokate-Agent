@@ -1,0 +1,8 @@
+name: demo
+description: 비용 0 — mock 러너로 흐름 확인(승인 대기 포함, 작업 공간 없음)
+
+stages:
+  - {name: scout, provider: mock, model: haiku, prompt: ../prompts/scout.md}
+  - {name: plan, provider: mock, model: fable, prompt: ../prompts/plan.md, reads_outputs: [scout], gate: human}
+  - {name: build, provider: mock, model: sonnet, prompt: ../prompts/build.md, reads_outputs: [plan]}
+  - {name: review, provider: mock, model: fable, prompt: ../prompts/review.md, reads_outputs: [plan, build], on_retry: build}

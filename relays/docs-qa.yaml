@@ -1,0 +1,15 @@
+name: docs-qa
+description: 문서 질의 — 단일 주자(Sonnet low)가 docs-read MCP 로 필요한 섹션만 읽고 답한다
+max_run_cost_usd: 0.3
+
+# 측정: 정찰(Haiku)+답변(Sonnet) 2단계 63K 토큰 $0.09 → 단일 단계 31K $0.047, 같은 답.
+stages:
+  - name: answer
+    provider: claude
+    model: sonnet
+    effort: low
+    prompt: ../prompts/answer.md
+    tools: []
+    mcp: [docs_read]
+    system_mode: replace
+    max_budget_usd: 0.3

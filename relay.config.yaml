@@ -1,0 +1,23 @@
+# Shared settings (commit this). Put machine-specific paths/secrets in relay.config.local.yaml (git-ignored).
+# Relative paths are relative to this folder.
+runs_dir: runs
+usage_db: runs/usage.sqlite
+history_db: runs/history.sqlite
+relays_dir: relays
+docs_root: docs            # docs-read MCP root; override per machine in relay.config.local.yaml
+server_url: http://127.0.0.1:8020
+auth_token: ""             # set via env KATAE_TOKEN or the local file; required for non-localhost access
+
+# Tried after a stage's own alternates when its AI can't run (usage limit, not installed, budget).
+fallback_chain: []
+
+# Provider overrides. Example:
+# providers:
+#   claude: {switch_at_utilization: 0.9}
+#   opencode: {model_map: {sonnet: "anthropic/claude-sonnet-5", fable: "anthropic/claude-fable-5-1"}, daily_usd: 3}
+#   codex: {model_map: {sonnet: "<model id>"}}
+providers: {}
+
+# Extra MCP servers a stage can opt into with `mcp: [name]`. Built-ins: docs_read, handoff.
+# Nothing here is loaded unless a stage names it (claude -p runs with --strict-mcp-config).
+mcp_servers: {}

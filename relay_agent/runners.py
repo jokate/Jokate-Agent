@@ -1,0 +1,708 @@
+"""Runners execute one stage on one provider: (role prompt, baton prompt) -> StageResult + usage.
+
+- mock:       no model call; tests and dry runs.
+- claude_cli: headless Claude Code (`claude -p`), subscription login, file/bash tools.
+              MCP off unless listed (measured 184K -> 7.5K), system prompt replaced (7.5K -> 0.6K).
+              Reports subscription usage (5-hour / 7-day utilization) from `rate_limit_event`.
+- api:        Anthropic Messages API (per-token billing).
+- cli:        other agent CLIs (Codex, OpenCode, Gemini, ...) from a command template.
+- openai:     any OpenAI-compatible HTTP endpoint (OpenAI, OpenRouter, Ollama, ...).
+
+Errors carry a kind so the engine can switch providers: quota (usage/rate limit), unavailable,
+cancelled, or error.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import subprocess
+import tempfile
+import threading
+import time
+from dataclasses import dataclass, field, replace
+from pathlib import Path
+from typing import Callable, Protocol
+
+from .baton import StageResult, result_schema
+from .providers import ProviderRegistry, ProviderSpec, looks_like_quota
+
+
+@dataclass
+class Usage:
+    runner: str
+    model: str
+    input_tokens: int = 0
+    cache_creation_input_tokens: int = 0
+    cache_read_input_tokens: int = 0
+    output_tokens: int = 0
+    cost_usd: float | None = None
+    duration_ms: int = 0
+    estimated: bool = False  # token counts guessed from text length (provider did not report them)
+
+    @property
+    def total_input(self) -> int:
+        return self.input_tokens + self.cache_creation_input_tokens + self.cache_read_input_tokens
+
+
+@dataclass
+class StageCall:
+    stage: str
+    model: str | None
+    effort: str | None
+    system: str
+    prompt: str
+    cwd: Path
+    tools: list[str] | None = None  # claude_cli only; None = no tools
+    mcp_servers: list[str] = field(default_factory=list)  # claude_cli only
+    allowed_tools: list[str] = field(default_factory=list)  # claude_cli only
+    mcp_overrides: dict[str, dict] = field(default_factory=dict)  # per-run MCP entries (e.g. repo docs root)
+    permission_mode: str = "default"
+    timeout_s: int = 1800
+    # claude_cli token controls
+    system_mode: str = "replace"  # replace: our prompt only; append: keep Claude Code's default prompt
+    isolate: bool = False  # skip CLAUDE.md / skills / hooks of the target folder
+    max_budget_usd: float | None = None
+    fallback_model: str | None = None
+    # (kind, detail) activity callback, e.g. ("tool_use", {"tool": "Read", "target": "a.py"})
+    on_event: Callable[[str, dict], None] | None = None
+    cancel_event: threading.Event | None = None
+
+    def emit(self, kind: str, detail: dict) -> None:
+        if self.on_event:
+            self.on_event(kind, detail)
+
+    @property
+    def cancelled(self) -> bool:
+        return bool(self.cancel_event and self.cancel_event.is_set())
+
+
+class RunnerError(RuntimeError):
+    def __init__(self, message: str, kind: str = "error"):
+        super().__init__(message)
+        self.kind = kind  # error | quota | unavailable | cancelled
+
+
+class Runner(Protocol):
+    name: str
+
+    def run(self, call: StageCall) -> tuple[StageResult, Usage]: ...
+
+
+def describe_tool(name: str, tool_input: dict) -> str:
+    """Short human-readable target of a tool call."""
+    for key in ("file_path", "command", "pattern", "path", "url", "query"):
+        if key in tool_input:
+            value = str(tool_input[key])
+            if key == "pattern" and "path" in tool_input:
+                value += f"  @ {tool_input['path']}"
+            return value[:200]
+    return json.dumps(tool_input, ensure_ascii=False)[:200]
+
+
+def run_process(args: list[str], call: StageCall, stdin_text: str | None,
+                on_line: Callable[[str], None]) -> tuple[int, str]:
+    """Stream stdout lines to on_line. stderr is drained on a thread (no pipe deadlock).
+    Kills the whole process tree on timeout, cancellation, or a callback error."""
+    # npm installs CLIs as .cmd shims that CreateProcess can't find by bare name; resolve the full path.
+    args = [shutil.which(args[0]) or args[0], *args[1:]]
+    if os.name == "nt" and sum(len(a) + 3 for a in args) > 30000:
+        raise RunnerError("명령줄이 Windows 한도(~32K)를 넘습니다 — stdin 으로 프롬프트를 받는 CLI 를 쓰거나 바통을 줄이세요")
+    if call.cancelled:
+        raise RunnerError("사용자가 취소함", "cancelled")
+    try:
+        proc = subprocess.Popen(
+            args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="replace", cwd=call.cwd,
+        )
+    except FileNotFoundError as e:
+        raise RunnerError(f"{Path(args[0]).name} not installed", "unavailable") from e
+    stderr_chunks: list[str] = []
+    drain = threading.Thread(target=lambda: stderr_chunks.append(proc.stderr.read()), daemon=True)
+    drain.start()
+    stop = threading.Event()
+    reason: list[str] = []
+
+    def watch():
+        deadline = time.monotonic() + call.timeout_s
+        while not stop.is_set():
+            if call.cancelled or time.monotonic() > deadline:
+                reason.append("cancelled" if call.cancelled else "timeout")
+                kill_tree(proc)
+                return
+            stop.wait(0.3)
+
+    watcher = threading.Thread(target=watch, daemon=True)
+    watcher.start()
+    try:
+        if stdin_text is not None:
+            proc.stdin.write(stdin_text)
+        proc.stdin.close()
+        for line in proc.stdout:
+            on_line(line)
+        proc.wait()
+    except BaseException:
+        kill_tree(proc)  # e.g. the event callback failed: don't leave the AI editing files
+        raise
+    finally:
+        stop.set()
+        drain.join(timeout=5)
+    if reason and reason[0] == "cancelled":
+        raise RunnerError("사용자가 취소함", "cancelled")
+    if reason and reason[0] == "timeout":
+        raise RunnerError(f"timeout after {call.timeout_s}s", "timeout")
+    return proc.returncode, "".join(stderr_chunks)
+
+
+def kill_tree(proc: subprocess.Popen) -> None:
+    """Kill a process and its children (claude.exe spawns shells and tools)."""
+    if proc.poll() is not None:
+        return
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True)
+    if proc.poll() is None:
+        proc.kill()
+
+
+class MockRunner:
+    """Deterministic runner. `script` maps stage name -> list of results consumed in order."""
+
+    name = "mock"
+
+    def __init__(self, script: dict[str, list[dict]] | None = None, delay_s: float = 0.0):
+        self.script = {k: list(v) for k, v in (script or {}).items()}
+        self.calls: list[StageCall] = []
+        self.delay_s = delay_s
+
+    def run(self, call: StageCall) -> tuple[StageResult, Usage]:
+        self.calls.append(call)
+        call.emit("tool_use", {"tool": "Read", "target": f"mock/{call.stage}.txt"})
+        if call.cancel_event is not None:
+            if call.cancel_event.wait(self.delay_s):
+                raise RunnerError("사용자가 취소함", "cancelled")
+        else:
+            time.sleep(self.delay_s)
+        queue = self.script.get(call.stage)
+        scripted = bool(queue)
+        data = queue.pop(0) if queue else {
+            "summary": f"{call.stage} 완료(mock)",
+            "state": f"{call.stage} 까지 진행",
+            "open_issues": [],
+            "next_steps": [],
+            "output": f"[{call.stage} mock 산출물]",
+        }
+        if not scripted and call.stage == "build":
+            # demo relay: show how key actions, user checks and a diagram look on the dashboard
+            data |= {
+                "highlights": ["로그인 폼에 비밀번호 보기 토글 추가", "토글 상태를 세션 동안 유지"],
+                "user_checks": ["브라우저에서 토글 클릭 시 비밀번호가 보이는지 확인", "스크린리더로 라벨이 읽히는지 확인"],
+                "diagram": "flowchart LR\n  U[사용자 클릭] --> T{토글 상태}\n  T -- 보기 --> V[type=text]\n  T -- 숨김 --> H[type=password]",
+            }
+        if isinstance(data, Exception):
+            raise data
+        usage = Usage(self.name, call.model or "mock", input_tokens=len(call.system + call.prompt) // 4, output_tokens=50)
+        return StageResult.model_validate(data), usage
+
+
+# --- Claude Code (headless) ------------------------------------------------------
+REPLACE_PREAMBLE = """You are one stage of an automated relay run by a programmer's agent server.
+Environment: {os_name}. Working directory: {cwd} (already the current directory; use relative paths, never `cd`).
+Rules:
+- Locate with Grep/Glob first, then Read only the needed line ranges (offset/limit). Never read whole large files.
+- Use tools directly without narration. Do not repeat file contents in your answer.
+- Edit with the Edit tool (small exact replacements). Run only the verification command you need, once.
+- If a command is denied or needs approval, do NOT retry it or a variant. Note it in open_issues and continue.
+- Finish with ONE structured output call: summary, state, open_issues, next_steps are required; add decisions_added,
+  pointers_added, output, verdict (pass|retry|fail) when relevant. Write the text fields in Korean.
+
+"""
+
+
+def os_name() -> str:
+    import platform
+
+    return {"Windows": "Windows (bash tool runs Git Bash)", "Darwin": "macOS"}.get(platform.system(), platform.system())
+
+
+class ClaudeCliRunner:
+    name = "claude"
+
+    def __init__(self, exe: str | None = None, mcp_registry: dict[str, dict] | None = None, name: str = "claude"):
+        self.exe = exe or shutil.which("claude") or "claude"
+        self.mcp_registry = mcp_registry or {}
+        self.name = name
+
+    def build_args(self, call: StageCall, mcp_config_path: Path | None) -> list[str]:
+        args = [
+            self.exe, "-p",
+            "--output-format", "stream-json", "--verbose",
+            "--json-schema", json.dumps(result_schema(), ensure_ascii=False),
+            "--no-session-persistence",
+            "--permission-mode", call.permission_mode,
+            "--strict-mcp-config",
+        ]
+        if call.model:
+            args += ["--model", call.model]
+        if call.system_mode == "replace":
+            # Replacing Claude Code's default system prompt was measured at ~7.5K -> ~0.6K input tokens.
+            # It also drops the environment/tool-usage guidance, so restate the essentials.
+            args += ["--system-prompt", REPLACE_PREAMBLE.format(cwd=call.cwd, os_name=os_name()) + call.system]
+        else:
+            # Moves cwd/git-status out of the system prompt so it caches across working directories.
+            args += ["--append-system-prompt", call.system, "--exclude-dynamic-system-prompt-sections"]
+        if call.isolate:
+            # --safe-mode also disables MCP servers, so only disable skills when MCP is needed.
+            args += ["--disable-slash-commands"] if call.mcp_servers else ["--safe-mode"]
+        if call.max_budget_usd is not None:
+            args += ["--max-budget-usd", str(call.max_budget_usd)]
+        if call.fallback_model and call.fallback_model != call.model:
+            args += ["--fallback-model", call.fallback_model]  # CLI-level switch on overload
+        if call.effort:
+            args += ["--effort", call.effort]
+        args += ["--tools", ",".join(call.tools) if call.tools else ""]
+        # Headless runs cannot answer permission prompts: pre-approve listed MCP servers and tools.
+        allowed = [f"mcp__{s}" for s in call.mcp_servers] + call.allowed_tools
+        if allowed:
+            args += ["--allowedTools", ",".join(allowed)]
+        if mcp_config_path:
+            args += ["--mcp-config", str(mcp_config_path)]
+        return args
+
+    def run(self, call: StageCall) -> tuple[StageResult, Usage]:
+        """Run on call.model; if that fails (unavailable, limit, error), retry once on fallback_model."""
+        try:
+            return self._run_once(call, call.model)
+        except RunnerError as e:
+            # A timeout would just burn the same time again (on a half-edited workspace); a cancel is final.
+            if e.kind in ("cancelled", "timeout") or not call.fallback_model or call.fallback_model == call.model:
+                raise
+            call.emit("model_fallback", {"from": call.model, "to": call.fallback_model, "reason": str(e)[:300]})
+            return self._run_once(call, call.fallback_model)
+
+    def _run_once(self, call: StageCall, model: str | None) -> tuple[StageResult, Usage]:
+        call = replace(call, model=model)
+        with tempfile.TemporaryDirectory(prefix="katae-") as tmp:  # never inside the workspace (would enter the patch)
+            cfg_path = None
+            registry = {**self.mcp_registry, **call.mcp_overrides}
+            if call.mcp_servers:
+                missing = [s for s in call.mcp_servers if s not in registry]
+                if missing:
+                    raise RunnerError(f"unknown MCP servers for stage {call.stage}: {missing}", "unavailable")
+                cfg_path = Path(tmp) / "mcp.json"
+                cfg_path.write_text(
+                    json.dumps({"mcpServers": {s: registry[s] for s in call.mcp_servers}}), encoding="utf-8"
+                )
+            started = time.monotonic()
+            box: dict = {}
+            pending: dict[str, tuple[str, str]] = {}  # tool_use_id -> (tool name, target), for result sizes
+
+            def on_line(line: str) -> None:
+                event = parse_json_line(line)
+                if event is None:
+                    return
+                if event.get("type") == "result":
+                    box["result"] = event
+                elif event.get("type") == "rate_limit_event":
+                    info = event.get("rate_limit_info") or {}
+                    box["limit_status"] = info.get("status")
+                    self._emit_limits(call, info)
+                else:
+                    self._emit_activity(call, event, pending)
+
+            code, stderr = run_process(self.build_args(call, cfg_path), call, call.prompt, on_line)
+        data = box.get("result")
+        rejected = box.get("limit_status") == "rejected"  # structured signal from Claude Code itself
+        if data is None:
+            text = stderr[-500:]
+            raise RunnerError(f"claude -p ended without a result (exit {code}): {text}",
+                              "quota" if rejected or looks_like_quota(text) else "error")
+        if data.get("is_error") or "structured_output" not in data:
+            text = str(data.get("result"))[:500]
+            # Only an error result can be a limit message; a normal answer that merely mentions "limit" is not.
+            quota = rejected or data.get("api_error_status") == 429 or (data.get("is_error") and looks_like_quota(text))
+            raise RunnerError(f"claude -p failed: {text}", "quota" if quota else "error")
+        u = data.get("usage", {})
+        served = [m for m in (data.get("modelUsage") or {}) if "haiku" not in m or "haiku" in (call.model or "")]
+        usage = Usage(
+            self.name,
+            served[0] if served else (call.model or "claude"),  # the model that actually answered
+            input_tokens=u.get("input_tokens", 0),
+            cache_creation_input_tokens=u.get("cache_creation_input_tokens", 0),
+            cache_read_input_tokens=u.get("cache_read_input_tokens", 0),
+            output_tokens=u.get("output_tokens", 0),
+            cost_usd=data.get("total_cost_usd"),
+            duration_ms=int((time.monotonic() - started) * 1000),
+        )
+        return StageResult.model_validate(data["structured_output"]), usage
+
+    def _emit_limits(self, call: StageCall, info: dict) -> None:
+        windows = [
+            {"window": name, "utilization": w.get("utilization"), "resets_at": w.get("resetsAt")}
+            for name, w in (info.get("unifiedWindows") or {}).items()
+        ]
+        call.emit("rate_limit", {"provider": self.name, "status": info.get("status"), "windows": windows})
+
+    LARGE_RESULT_CHARS = 8000
+
+    @staticmethod
+    def _emit_activity(call: StageCall, event: dict, pending: dict | None = None) -> None:
+        """tool_use / mcp_call when a tool is called; mcp_result (size) for MCP results and
+        tool_result_large for any result big enough to matter for tokens; tool_error on failures."""
+        if event.get("type") not in ("assistant", "user"):
+            return
+        pending = pending if pending is not None else {}
+        for block in event.get("message", {}).get("content", []) or []:
+            btype = block.get("type")
+            if btype == "tool_use" and block.get("name") != "StructuredOutput":
+                name = block.get("name", "")
+                target = describe_tool(name, block.get("input") or {})
+                pending[block.get("id", "")] = (name, target)
+                if name.startswith("mcp__"):
+                    server, _, tool = name[len("mcp__"):].partition("__")
+                    call.emit("mcp_call", {"server": server, "tool": tool, "target": target})
+                else:
+                    call.emit("tool_use", {"tool": name, "target": target})
+            elif btype == "tool_result":
+                content = block.get("content")
+                text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
+                name, target = pending.pop(block.get("tool_use_id", ""), ("", ""))
+                if name.startswith("mcp__"):
+                    server, _, tool = name[len("mcp__"):].partition("__")
+                    call.emit("mcp_result", {"server": server, "tool": tool, "chars": len(text),
+                                             "is_error": bool(block.get("is_error"))})
+                elif len(text) >= ClaudeCliRunner.LARGE_RESULT_CHARS:
+                    call.emit("tool_result_large", {"tool": name, "target": target, "chars": len(text)})
+                if block.get("is_error"):
+                    call.emit("tool_error", {"message": text[:300]})
+            elif btype == "text" and block.get("text", "").strip():
+                call.emit("note", {"text": block["text"].strip()[:300]})
+
+
+def probe_claude_limits(exe: str | None = None, timeout_s: int = 90) -> dict:
+    """Cheapest possible call (Haiku, no tools, one-line system prompt) just to read the
+    subscription usage windows Claude Code reports. Costs a few hundred tokens."""
+    call = StageCall(stage="probe", model="haiku", effort=None, system="", prompt="ok", cwd=Path.home(),
+                     timeout_s=timeout_s)
+    args = [exe or shutil.which("claude") or "claude", "-p", "--output-format", "stream-json", "--verbose",
+            "--model", "haiku", "--system-prompt", "Reply with OK.", "--no-session-persistence",
+            "--tools", "", "--strict-mcp-config"]
+    found: dict = {}
+
+    def on_line(line: str) -> None:
+        event = parse_json_line(line)
+        if event and event.get("type") == "rate_limit_event":
+            info = event.get("rate_limit_info") or {}
+            found["status"] = info.get("status")
+            found["windows"] = [{"window": k, "utilization": w.get("utilization"), "resets_at": w.get("resetsAt")}
+                                for k, w in (info.get("unifiedWindows") or {}).items()]
+        elif event and event.get("type") == "result":
+            found["cost_usd"] = event.get("total_cost_usd")
+
+    run_process(args, call, "ok", on_line)
+    return found
+
+
+def parse_json_line(line: str) -> dict | None:
+    line = line.strip()
+    if not line.startswith("{"):
+        return None
+    try:
+        return json.loads(line)
+    except json.JSONDecodeError:
+        return None
+
+
+# --- other agent CLIs and OpenAI-compatible APIs -----------------------------------
+JSON_INSTRUCTION = """
+
+---
+## 반환 형식 (반드시 지킬 것)
+작업을 마치면 마지막 응답으로 아래 JSON 스키마를 만족하는 JSON 객체 하나만 출력한다. 코드 블록·설명 없이 JSON 만.
+{schema}
+"""
+
+
+def compact_schema() -> str:
+    return json.dumps(result_schema(), ensure_ascii=False, separators=(",", ":"))
+
+
+def extract_result(text: str) -> StageResult:
+    """Find the last JSON object in free text that validates as a StageResult."""
+    decoder = json.JSONDecoder()
+    candidates = []
+    for i, ch in enumerate(text):
+        if ch == "{":
+            try:
+                obj, _ = decoder.raw_decode(text, i)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(obj, dict) and "summary" in obj:
+                candidates.append(obj)
+    for obj in reversed(candidates):
+        try:
+            return StageResult.model_validate(obj)
+        except ValueError:
+            continue
+    raise RunnerError("no valid result JSON in output")
+
+
+def estimate(spec: ProviderSpec, model: str | None, prompt: str, output: str) -> Usage:
+    u = Usage(spec.name, model or spec.name, input_tokens=len(prompt) // 3, output_tokens=len(output) // 3, estimated=True)
+    price = spec.prices.get(model or "")
+    if price:
+        u.cost_usd = (u.input_tokens * price[0] + u.output_tokens * price[1]) / 1_000_000
+    return u
+
+
+class ExternalCliRunner:
+    """Codex / OpenCode / Gemini CLI and similar, driven by the provider's command template."""
+
+    def __init__(self, spec: ProviderSpec):
+        self.spec = spec
+        self.name = spec.name
+
+    def build_args(self, call: StageCall, out_file: Path, schema_file: Path, prompt: str) -> list[str]:
+        fill = {"cwd": str(call.cwd), "out_file": str(out_file), "schema_file": str(schema_file)}
+        args = [part.format(**fill) for part in self.spec.command]
+        if call.model and self.spec.model_args:
+            model_args = [part.format(model=call.model, **fill) for part in self.spec.model_args]
+            at = min(2, len(args))  # after "<binary> <subcommand>"
+            args = args[:at] + model_args + args[at:]
+        if self.spec.prompt_via == "arg":
+            args.append(prompt)
+        elif self.spec.prompt_via == "arg_p":
+            args += ["-p", prompt]
+        return args
+
+    def run(self, call: StageCall) -> tuple[StageResult, Usage]:
+        prompt = f"{call.system}\n\n{call.prompt}{JSON_INSTRUCTION.format(schema=compact_schema())}"
+        started = time.monotonic()
+        lines: list[str] = []
+        with tempfile.TemporaryDirectory(prefix="katae-") as tmp:
+            out_file, schema_file = Path(tmp) / "last.txt", Path(tmp) / "schema.json"
+            schema_file.write_text(json.dumps(result_schema(), ensure_ascii=False), encoding="utf-8")
+
+            def on_line(line: str) -> None:
+                lines.append(line)
+                event = parse_json_line(line)
+                if event:
+                    self._maybe_limits(call, event)
+
+            code, stderr = run_process(self.build_args(call, out_file, schema_file, prompt), call,
+                                       prompt if self.spec.prompt_via == "stdin" else None, on_line)
+            stdout = "".join(lines)
+            final = out_file.read_text(encoding="utf-8", errors="replace") if out_file.exists() else stdout
+        try:
+            result = extract_result(final)
+        except RunnerError:
+            # Judge limits from the CLI's error stream only, not from the model's own text.
+            kind = "quota" if code != 0 and looks_like_quota(stderr[-1500:]) else "error"
+            raise RunnerError(f"{self.name} exit {code}: {(stderr or stdout)[-400:]}", kind)
+        usage = estimate(self.spec, call.model, prompt, final)
+        usage.duration_ms = int((time.monotonic() - started) * 1000)
+        return result, usage
+
+    def _maybe_limits(self, call: StageCall, event: dict) -> None:
+        # Codex JSON events may carry {"rate_limits": {"primary": {"used_percent", "window_minutes", ...}}}
+        limits = event.get("rate_limits") or (event.get("payload") or {}).get("rate_limits")
+        if not isinstance(limits, dict):
+            return
+        windows = []
+        for key, w in limits.items():
+            if isinstance(w, dict) and "used_percent" in w:
+                minutes = w.get("window_minutes")
+                reset = w.get("resets_at") or (time.time() + w["resets_in_seconds"] if w.get("resets_in_seconds") else None)
+                windows.append({"window": f"{minutes // 60}h" if minutes else key,
+                                "utilization": w["used_percent"] / 100, "resets_at": reset})
+        if windows:
+            call.emit("rate_limit", {"provider": self.name, "status": "allowed", "windows": windows})
+
+
+class OpenAICompatRunner:
+    """Text-only stages on any OpenAI-compatible chat completions endpoint."""
+
+    def __init__(self, spec: ProviderSpec, client=None):
+        import httpx
+
+        self.spec = spec
+        self.name = spec.name
+        key = os.environ.get(spec.api_key_env, "") if spec.api_key_env else ""
+        self.client = client or httpx.Client(
+            base_url=spec.base_url.rstrip("/"), timeout=600,
+            headers={"Authorization": f"Bearer {key}"} if key else {},
+        )
+
+    def run(self, call: StageCall) -> tuple[StageResult, Usage]:
+        if not call.model:
+            raise RunnerError(f"{self.name}: no model mapped for this stage (set model_map)", "unavailable")
+        body = {
+            "model": call.model,
+            "messages": [{"role": "system", "content": call.system}, {"role": "user", "content": call.prompt}],
+            "response_format": {"type": "json_schema",
+                                "json_schema": {"name": "stage_result", "schema": result_schema(all_required=True), "strict": True}},
+        }
+        started = time.monotonic()
+        if call.cancelled:
+            raise RunnerError("사용자가 취소함", "cancelled")
+        resp = self.client.post("/chat/completions", json=body, timeout=call.timeout_s)
+        if resp.status_code == 400:  # endpoint without json_schema support
+            body["response_format"] = {"type": "json_object"}
+            body["messages"][1]["content"] += JSON_INSTRUCTION.format(schema=compact_schema())
+            resp = self.client.post("/chat/completions", json=body, timeout=call.timeout_s)
+        if call.cancelled:
+            raise RunnerError("사용자가 취소함", "cancelled")
+        if resp.status_code in (402, 429) or (resp.status_code >= 400 and looks_like_quota(resp.text)):
+            raise RunnerError(f"{self.name} {resp.status_code}: {resp.text[:300]}", "quota")
+        if resp.status_code in (401, 403, 404):
+            raise RunnerError(f"{self.name} {resp.status_code}: {resp.text[:300]}", "unavailable")
+        if resp.status_code >= 400:
+            raise RunnerError(f"{self.name} {resp.status_code}: {resp.text[:300]}")
+        data = resp.json()
+        text = data["choices"][0]["message"].get("content") or ""
+        result = extract_result(text)
+        u = data.get("usage") or {}
+        usage = Usage(self.name, data.get("model") or call.model,
+                      input_tokens=u.get("prompt_tokens", 0), output_tokens=u.get("completion_tokens", 0),
+                      duration_ms=int((time.monotonic() - started) * 1000))
+        price = self.spec.prices.get(call.model)
+        if price:
+            usage.cost_usd = (usage.input_tokens * price[0] + usage.output_tokens * price[1]) / 1_000_000
+        return result, usage
+
+
+# --- Anthropic API -----------------------------------------------------------------
+# Per-MTok list prices: (input, output). Cache write 5m = 1.25x input, read = 0.1x input.
+PRICES = {
+    "claude-haiku-4-5": (1.0, 5.0),
+    "claude-sonnet-5": (2.0, 10.0),
+    "claude-opus-5": (5.0, 25.0),
+    "claude-fable-5-1": (10.0, 50.0),
+}
+MODEL_ALIASES = {"haiku": "claude-haiku-4-5", "sonnet": "claude-sonnet-5", "opus": "claude-opus-5", "fable": "claude-fable-5-1"}
+
+
+class AnthropicApiRunner:
+    name = "anthropic_api"
+
+    def __init__(self, client=None):
+        if client is None:
+            import anthropic
+
+            client = anthropic.Anthropic()
+        self.client = client
+
+    def run(self, call: StageCall) -> tuple[StageResult, Usage]:
+        """Run on call.model; on unavailability/overload/refusal, retry once on fallback_model."""
+        import anthropic
+
+        def classify(e: Exception) -> RunnerError:
+            if isinstance(e, RunnerError):
+                return e
+            if isinstance(e, anthropic.RateLimitError):
+                return RunnerError(str(e), "quota")
+            if isinstance(e, (anthropic.NotFoundError, anthropic.PermissionDeniedError)):
+                return RunnerError(str(e), "unavailable")
+            return RunnerError(str(e))
+
+        retryable = (
+            anthropic.NotFoundError, anthropic.PermissionDeniedError, anthropic.RateLimitError,
+            anthropic.InternalServerError, anthropic.APIConnectionError, RunnerError,
+        )
+        try:
+            return self._run_once(call, call.model)
+        except retryable as e:
+            if isinstance(e, RunnerError) and e.kind in ("cancelled", "timeout"):
+                raise
+            if not call.fallback_model or call.fallback_model == call.model:
+                raise classify(e) from e
+            call.emit("model_fallback", {"from": call.model, "to": call.fallback_model, "reason": str(e)[:300]})
+            try:
+                return self._run_once(call, call.fallback_model)
+            except retryable as e2:
+                raise classify(e2) from e2
+
+    def _run_once(self, call: StageCall, model: str | None) -> tuple[StageResult, Usage]:
+        model = MODEL_ALIASES.get(model or "opus", model)
+        kwargs: dict = {
+            "model": model,
+            # A backstop, not a tuning knob: hitting it wastes the whole attempt. Streaming avoids HTTP timeouts.
+            "max_tokens": 64000,
+            # Role prompt is identical across runs of this stage -> cached prefix.
+            "system": [{"type": "text", "text": call.system, "cache_control": {"type": "ephemeral"}}],
+            "messages": [{"role": "user", "content": call.prompt}],
+            "output_config": {"format": {"type": "json_schema", "schema": result_schema()}},
+        }
+        betas: list[str] = []
+        if model != "claude-haiku-4-5":
+            kwargs["thinking"] = {"type": "adaptive"}
+            if call.effort:
+                kwargs["output_config"]["effort"] = call.effort
+        # Server-side refusal fallback inside the same call: Fable -> Opus 5, Opus 5 -> Opus 4.8.
+        refusal_fallback = {"claude-fable-5-1": "claude-opus-5", "claude-opus-5": "claude-opus-4-8"}.get(model)
+        if refusal_fallback:
+            betas.append("server-side-fallback-2026-06-01")
+            kwargs["fallbacks"] = [{"model": refusal_fallback}]
+
+        started = time.monotonic()
+        client = self.client.with_options(timeout=call.timeout_s) if hasattr(self.client, "with_options") else self.client
+        opener = (lambda: client.beta.messages.stream(betas=betas, **kwargs)) if betas else (
+            lambda: client.messages.stream(**kwargs))
+        with opener() as stream:
+            for _ in stream:  # consume events so a cancel can stop generation mid-way
+                if call.cancelled:
+                    raise RunnerError("사용자가 취소함", "cancelled")
+            response = stream.get_final_message()
+        if response.stop_reason == "refusal":
+            raise RunnerError(f"stage {call.stage} refused: {getattr(response, 'stop_details', None)}")
+        if response.stop_reason == "max_tokens":
+            raise RunnerError(f"stage {call.stage} hit max_tokens")
+        text = next(b.text for b in response.content if b.type == "text")
+        u = response.usage
+        usage = Usage(
+            self.name,
+            getattr(response, "model", None) or model,  # reflects a server-side fallback
+            input_tokens=u.input_tokens,
+            cache_creation_input_tokens=u.cache_creation_input_tokens or 0,
+            cache_read_input_tokens=u.cache_read_input_tokens or 0,
+            output_tokens=u.output_tokens,
+            duration_ms=int((time.monotonic() - started) * 1000),
+        )
+        usage.cost_usd = estimate_cost(usage)
+        return StageResult.model_validate_json(text), usage
+
+
+def estimate_cost(u: Usage) -> float | None:
+    price = PRICES.get(MODEL_ALIASES.get(u.model, u.model))
+    if not price:
+        return None
+    pin, pout = price
+    return (
+        u.input_tokens * pin
+        + u.cache_creation_input_tokens * pin * 1.25
+        + u.cache_read_input_tokens * pin * 0.1
+        + u.output_tokens * pout
+    ) / 1_000_000
+
+
+def make_runner(provider: str, registry: ProviderRegistry | None = None,
+                mcp_registry: dict[str, dict] | None = None) -> Runner:
+    """Runner for a provider name. Old stage `runner:` values (claude_cli/api/mock) are accepted."""
+    registry = registry or ProviderRegistry()
+    from .providers import LEGACY_RUNNER
+
+    spec = registry.get(LEGACY_RUNNER.get(provider, provider))
+    if spec.kind == "mock":
+        return MockRunner(delay_s=float(os.environ.get("RELAY_MOCK_DELAY", "1.5")))
+    ok, reason = spec.availability()
+    if not ok:
+        raise RunnerError(f"{spec.name}: {reason}", "unavailable")
+    if spec.kind == "claude_cli":
+        return ClaudeCliRunner(mcp_registry=mcp_registry, name=spec.name)
+    if spec.kind == "api":
+        return AnthropicApiRunner()
+    if spec.kind == "cli":
+        return ExternalCliRunner(spec)
+    if spec.kind == "openai":
+        return OpenAICompatRunner(spec)
+    raise RunnerError(f"unknown provider kind: {spec.kind}", "unavailable")
