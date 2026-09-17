@@ -37,6 +37,17 @@ SKIP_DIRS = {
     ".pytest_cache", ".mypy_cache", ".ruff_cache", "runs",
 }
 TEXT_LIMIT = 2 * 1_048_576           # larger files are treated as binary (listed, not diffed)
+# Game assets are changed by editors/MCP (e.g. Unreal MCP saving .uasset): never copied or cached here.
+# They are only listed; rollback uses the VCS's own original when there is one (not for git LFS pointers).
+ASSET_EXTS = {
+    ".uasset", ".umap", ".uexp", ".ubulk", ".upk", ".pak", ".ucas", ".utoc",
+    ".fbx", ".obj", ".blend", ".psd", ".tga", ".png", ".jpg", ".jpeg", ".dds", ".exr", ".hdr", ".tif", ".tiff",
+    ".wav", ".ogg", ".mp3", ".bnk", ".wem", ".mp4", ".mov", ".unity", ".prefab", ".asset", ".mat", ".anim",
+}
+# Top-level folders not scanned at all (an engine source tree is huge): only files AI edit tools touch
+# are backed up there, by the pre-edit hook.
+HOOK_ONLY_DIRS = ["Engine"]
+LFS_POINTER = b"version https://git-lfs.github.com/spec"
 START_COPY_FILE_MB = 256             # uncommitted-at-start file bigger than this is not copied
 START_COPY_TOTAL_MB = 2048           # total budget for uncommitted-at-start copies
 
@@ -46,6 +57,10 @@ from .workspace import WorkspaceError  # noqa: E402
 
 class JournalError(WorkspaceError):
     pass
+
+
+def is_asset(rel: str) -> bool:
+    return os.path.splitext(rel)[1].lower() in ASSET_EXTS
 
 
 def is_text(data: bytes) -> bool:
@@ -203,7 +218,7 @@ def detect_vcs(source: Path):
 
 
 # --------------------------------------------------------------------------- workspace
-def scan(root: Path, skip_dirs: set[str]) -> dict[str, tuple[int, int]]:
+def scan(root: Path, skip_dirs: set[str], hook_only: set[str] = frozenset()) -> dict[str, tuple[int, int]]:
     out: dict[str, tuple[int, int]] = {}
     stack = [root]
     while stack:
@@ -213,7 +228,8 @@ def scan(root: Path, skip_dirs: set[str]) -> dict[str, tuple[int, int]]:
                 for entry in it:
                     try:
                         if entry.is_dir(follow_symlinks=False):
-                            if entry.name not in skip_dirs:
+                            top_level = folder == root
+                            if entry.name not in skip_dirs and not (top_level and entry.name in hook_only):
                                 stack.append(Path(entry.path))
                         elif entry.is_file(follow_symlinks=False):
                             st = entry.stat(follow_symlinks=False)
@@ -228,10 +244,12 @@ def scan(root: Path, skip_dirs: set[str]) -> dict[str, tuple[int, int]]:
 class JournalWorkspace:
     mode = "inplace"
 
-    def __init__(self, run_dir: Path, source: Path, extra_skip: list[str] | None = None, vcs=None):
+    def __init__(self, run_dir: Path, source: Path, extra_skip: list[str] | None = None, vcs=None,
+                 hook_only: list[str] | None = None):
         self.run_dir = run_dir
         self.source = source
         self.skip = SKIP_DIRS | {e for e in (extra_skip or []) if "*" not in e and "/" not in e}
+        self.hook_only = set(HOOK_ONLY_DIRS if hook_only is None else hook_only)
         self.journal_path = run_dir / "journal.json.gz"
         self.manifest = run_dir / "journal.meta.json"
         self.baseline_dir = run_dir / "baseline"
@@ -268,15 +286,21 @@ class JournalWorkspace:
         if self.prepared:
             return {"mode": "inplace", "tracking": "journal", "vcs": self.vcs.name}
         self.run_dir.mkdir(parents=True, exist_ok=True)
-        files = scan(self.source, self.skip)
+        files = scan(self.source, self.skip, self.hook_only)
         with gzip.open(self.journal_path, "wt", encoding="utf-8") as f:
             json.dump(files, f)
         vcs = self.vcs
         dirty = vcs.dirty(set(files)) if vcs.name != "none" else set()
+        dirty = {rel for rel in dirty if rel.split("/", 1)[0] not in self.hook_only}
         copied, skipped, total = 0, [], 0
+        assets_not_copied = 0
         for rel in sorted(dirty):
             if rel not in files:
                 continue  # deleted at start: nothing to copy
+            if is_asset(rel):
+                skipped.append(rel)  # assets are never cached (only listed); rollback can't restore this one
+                assets_not_copied += 1
+                continue
             size = files[rel][0]
             if size > START_COPY_FILE_MB * 1_048_576 or total + size > START_COPY_TOTAL_MB * 1_048_576:
                 skipped.append(rel)
@@ -296,6 +320,7 @@ class JournalWorkspace:
         self.hook_settings()
         return {"mode": "inplace", "tracking": "journal", "vcs": vcs.name, "files_tracked": len(files),
                 "uncommitted_at_start": len(dirty), "backup_mb": round(total / 1_048_576, 2),
+                "uncommitted_assets_not_cached": assets_not_copied, "hook_only": sorted(self.hook_only),
                 "not_backed_up": skipped[:10]}
 
     def _load(self) -> tuple[dict, dict, dict[str, bool]]:
@@ -322,11 +347,13 @@ class JournalWorkspace:
         if rel in meta["dirty_at_start"] or rel in meta["not_backed_up"]:
             return "unknown", None
         data = self.vcs.pristine(rel)
+        if data is not None and data.startswith(LFS_POINTER):
+            return "unknown", None  # the committed blob is only an LFS pointer, restoring it would break the asset
         return ("pristine", data) if data is not None else ("unknown", None)
 
     def _changed(self) -> tuple[list[str], dict, dict, dict]:
         journal, meta, touched = self._load()
-        now = scan(self.source, self.skip)
+        now = scan(self.source, self.skip, self.hook_only)
         changed = {rel for rel, stat in now.items() if journal.get(rel) != stat}
         changed |= {rel for rel in journal if rel not in now}
         changed |= set(touched)
@@ -354,7 +381,7 @@ class JournalWorkspace:
                 text = (before is None or is_text(before)) and (not after_exists or (after is not None and is_text(after)))
                 if not text or source == "unknown":
                     binaries.append({
-                        "path": rel, "before_bytes": len(before) if before is not None else None,
+                        "path": rel, "asset": is_asset(rel), "before_bytes": len(before) if before is not None else None,
                         "after_bytes": full.stat().st_size if after_exists else None,
                         "restorable": source != "unknown", "source": source,
                     })

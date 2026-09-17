@@ -29,6 +29,19 @@ DASHBOARD = Path(__file__).with_name("dashboard.html")
 @app.on_event("startup")
 def recover() -> None:
     engine.recover_interrupted()
+    engine.cleanup_workspaces(cfg.workspace_retention_days)
+
+    def hourly():  # expired workspaces are removed while the server keeps running, not only at start
+        import time
+
+        while True:
+            time.sleep(3600)
+            try:
+                engine.cleanup_workspaces(cfg.workspace_retention_days)
+            except Exception:  # noqa: BLE001 - cleanup must never take the server down
+                pass
+
+    threading.Thread(target=hourly, daemon=True, name="katae-cleanup").start()
 
 
 LOOPBACK = {"127.0.0.1", "::1", "localhost", "testclient"}
@@ -64,6 +77,7 @@ class CreateRun(BaseModel):
     session_id: str | None = None
     workdir: str | None = None  # defaults to the session's workdir
     workspace: str | None = None  # none | copy | inplace; defaults to the repo's, then the relay's setting
+    auto_apply: bool | None = None  # copy mode: apply automatically when done
     repo: str | None = None  # registered repository name (path, verify commands, notes come from it)
     start: bool = True
 
@@ -386,7 +400,8 @@ def create_run(body: CreateRun, request: Request) -> RunState:
     if workdir is not None:
         _check_path(request, workdir)
         repo = repo or (m.name if (m := engine.repos.match(workdir)) else None)
-    run = _conflict(engine.create, relay_path, body.goal, workdir, body.session_id, body.workspace or None, repo)
+    run = _conflict(engine.create, relay_path, body.goal, workdir, body.session_id, body.workspace or None, repo,
+                    body.auto_apply)
     if body.start:
         _advance_bg(run.id)
     return run

@@ -78,6 +78,8 @@ uv run relay repo clone mnys --url <git url>          # on a new machine: clone 
 | 6. Roll back | Restores every restorable change, deletes files created during the run, reports the rest | |
 
 - The repo itself is never written to (git status runs with `--no-optional-locks`, so even the index is untouched).
+- **Assets aren't cached here**: `.uasset .umap .fbx .png .wav …` changed by the Unreal editor/MCP are **only listed, never copied**. Rollback uses only the VCS's original (git HEAD / SVN BASE); **git LFS pointers are never written back**, and assets that were already uncommitted at run start can't be restored.
+- **The `Engine` folder isn't scanned** (touching an engine source tree would blow up the scan). There, only files the AI edits with Edit/Write are backed up by the hook, so Bash/build changes aren't tracked. Change it per repo with `hook_only: [Engine, ThirdParty]`.
 - If there's no VCS or it can't be read, only hook-backed-up files can be restored; everything else shows as "no original".
 - Roll back after closing the Unreal editor (or reload the assets) — files the editor holds open may fail to restore.
 - Real test (Claude): code edited with Edit + asset changed with Bash → hook backup, asset detected, rollback leaves `git status` clean.
@@ -92,16 +94,15 @@ uv run relay repo clone mnys --url <git url>          # on a new machine: clone 
 - **Choose paths instead of typing**: the new session and repo registration forms use a **📂 folder picker** (this PC only). Registered repos are chosen from a dropdown.
 - **Relays** are shown by role and model tier (lightweight/standard/advanced/top), not vendor names; relays that support automatic switching show "switches to another AI when usage runs low".
 
-## Getting work back (workspace)
-The target repo's own VCS is never touched. **inplace = journal + pre-edit backups + VCS originals (no snapshot, any size)**; copy = shared snapshot store (small repos only).
+## How results are applied (workspace) — default: immediate
 | Mode | Behavior | Fits |
 |---|---|---|
-| `copy` (default/quick default) | Work happens in a copy → returned as `result.patch` → you **apply** or **discard** | Regular code projects |
-| `inplace` | Edits the original directly → review changes, then **roll back** to pre-run state | Projects too heavy to copy, like UE |
-| `none` | Read-only | docs-qa, etc. |
-- If the original changed after the snapshot, apply refuses up front (nothing is half-applied).
-- Heavy folders are excluded: `Binaries/ Intermediate/ Saved/ DerivedDataCache/ Content/ *.uasset …` (`workspace_excludes` to change).
-- `relay patch|apply|discard|rollback <run_id>` or the dashboard "Changes" tab.
+| **`inplace` (default)** | **Changes apply to the original at each step.** Only changed files are recorded, so rollback is possible | Game projects, anything that uses MCP (Unreal editor) |
+| `copy` | Work in a copy → **applied automatically when done** (`auto_apply: true`). If the original changed meanwhile, it isn't applied and waits in the "Changes" tab | Small code repos you want isolated |
+| `none` | Read-only | docs-qa |
+
+- **Stages using an MCP that changes real state (e.g. Unreal) always run `inplace`, even if you choose `copy`.** MCP changes the real project, so a copy would split the results. (Read-only MCPs like `docs_read` are exempt.)
+- `relay patch|rollback <run_id>` or the dashboard "Changes" tab. Rollback restores both code and assets.
 
 ## Multiple AIs and automatic switching
 | Provider | Type | Status (this PC) | Remaining usage shown |

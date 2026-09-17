@@ -411,7 +411,7 @@ const EV = {
   run_created: ["🏁", "릴레이 출발"], stage_started: ["🏃", "단계 시작"], tool_use: ["🛠️", "도구 사용"],
   tool_error: ["⚠️", "도구 오류"], note: ["💬", "메모"], stage_finished: ["✅", "단계 완료"],
   sent_back: ["↩️", "되돌림"], awaiting_approval: ["✋", "승인 대기"], approved: ["👍", "승인됨"],
-  run_done: ["🏆", "릴레이 완주"], run_failed: ["💥", "실패"], budget_exceeded: ["💸", "예산 도달"], stage_budget_exceeded: ["💸", "단계 한도 도달"], model_exhausted: ["🪫", "모델 사용량 소진"], model_substituted: ["↘️", "모델 대체"],
+  run_done: ["🏆", "릴레이 완주"], run_failed: ["💥", "실패"], budget_exceeded: ["💸", "예산 도달"], stage_budget_exceeded: ["💸", "단계 한도 도달"], model_exhausted: ["🪫", "모델 사용량 소진"], workspace_forced: ["⚡", "원본에서 작업"], changes_auto_applied: ["✅", "자동 적용"], auto_apply_failed: ["⚠️", "자동 적용 보류"], model_substituted: ["↘️", "모델 대체"],
   model_fallback: ["🔀", "모델 전환"], mcp_call: ["🔌", "MCP 호출"], tool_result_large: ["🐘", "큰 도구 결과"], provider_switch: ["🔁", "AI 교체"], provider_exhausted: ["🪫", "사용량 소진"],
   providers_skipped: ["⏭️", "건너뛴 AI"], stage_skipped: ["⏭️", "단계 건너뜀"], run_cancelled: ["⛔", "취소됨"],
   workspace_ready: ["📦", "작업 공간 준비"], changes_ready: ["🧾", "변경 사항 준비"], changes_applied: ["✅", "원본에 적용"],
@@ -533,6 +533,9 @@ function describe(e) {
     case "mcp_call": return `<code>${esc(d.server)}.${esc(d.tool)}</code> ${esc(d.target || "")}<span class="mcp-size"></span>`;
     case "tool_result_large": return `<code>${esc(d.tool)}</code> ${esc(d.target || "")} · 결과 ${fmtN(d.chars)}자 (토큰 소모 큼)`;
     case "run_failed": return esc(d.error);
+    case "workspace_forced": return esc(d.reason);
+    case "changes_auto_applied": return `${d.files}개 파일을 원본에 자동 적용`;
+    case "auto_apply_failed": return `원본이 그사이 바뀌어 자동 적용하지 않음 — '변경 사항' 탭에서 확인 · ${esc(d.error)}`;
     case "model_exhausted": return `<code>${esc(d.model)}</code> 만 소진 — 같은 AI 에서 아래 모델로 계속${d.until ? ` (${esc(String(d.until).slice(5, 16).replace("T", " "))} 까지)` : ""}`;
     case "model_substituted": return `<code>${esc(d.requested)}</code> 소진 중 → <code>${esc(d.used)}</code> 사용`;
     case "stage_budget_exceeded": return `${esc(d.reason)} — 승인하면 이 단계 한도를 2배로 올려 다시 실행`;
@@ -595,10 +598,10 @@ async function openSession(id) {
       <textarea class="field" name="goal" placeholder="이 세션에 이어서 요청하세요. 이전 질문들의 요약이 자동으로 바통에 실립니다." required></textarea>
       <div class="row">
         <select class="field" name="workspace" title="작업 공간" style="flex:0 0 auto;width:auto">
-          <option value="">작업 공간: 릴레이 기본값</option>
-          <option value="copy">📦 복사본 → 패치로 받기</option>
-          <option value="inplace">✏️ 원본 수정 (되돌리기 가능)</option>
-          <option value="none">읽기 전용 / 없음</option>
+          <option value="">적용 방식: 기본값 (즉시 반영)</option>
+          <option value="inplace">⚡ 즉시 반영 — 원본에서 작업, 되돌리기 가능</option>
+          <option value="copy">📦 복사본에서 작업 → 끝나면 자동 적용</option>
+          <option value="none">👀 읽기 전용</option>
         </select>
       </div>
       <div class="row">
@@ -781,7 +784,7 @@ async function renderChanges(run) {
     ${(c.binary || []).length ? `<div class="card" style="margin-bottom:10px"><h4>🎨 바이너리·에셋 변경 <span class="count">${c.binary.length}</span></h4>
       ${c.binary.map((b) => `<div class="check" style="cursor:default"><span>${b.restorable ? "✅" : "⚠️"}</span><span><code>${esc(b.path)}</code>
         <span style="color:var(--muted)">${b.before_bytes == null ? "새 파일" : fmtN(b.before_bytes) + "B"} → ${b.after_bytes == null ? "삭제됨" : fmtN(b.after_bytes) + "B"}
-        · ${b.restorable ? `되돌리기 가능 (${{ backup: "편집 전 백업", pristine: "VCS 원본", absent: "새로 생긴 파일" }[b.source] || esc(b.source)})` : "원본 없음 — 되돌리기 불가"}</span></span></div>`).join("")}</div>` : ""}
+        · ${b.asset ? "에셋(보관 안 함) · " : ""}${b.restorable ? `되돌리기 가능 (${{ backup: "편집 전 백업", pristine: "VCS 원본", absent: "새로 생긴 파일" }[b.source] || esc(b.source)})` : "원본 보관 안 함 — VCS 로 복구"}</span></span></div>`).join("")}</div>` : ""}
     <div class="diff">${lines}</div>`;
   const act = (path, msg, ask) => () => (!ask || confirm(ask)) && api(`/runs/${run.id}/changes/${path}`, { method: "POST" })
     .then((r) => { toast(msg); renderChanges(r); }).catch((e) => toast(e.message, true));
@@ -912,8 +915,8 @@ $("addRepo").onclick = () => {
       <label>폴더<div class="row" style="display:flex;gap:8px"><button type="button" class="btn btn-ghost" id="rfPick">📂 폴더 선택</button><span class="picked" id="rfPath">선택 안 함</span></div></label>
       <label>이름 (영문·숫자·-_.)<input class="field" name="name" required maxlength="40"></label>
       <label>작업 방식<select class="field" name="workspace">
-        <option value="copy">📦 복사본에서 작업 → 패치로 받기 (일반 코드 저장소)</option>
-        <option value="inplace">✏️ 원본에서 작업 + 되돌리기 (Unreal 처럼 무거운 저장소)</option>
+        <option value="inplace">⚡ 즉시 반영 — 원본에서 작업, 되돌리기 가능 (추천 · 게임 프로젝트·MCP 사용)</option>
+        <option value="copy">📦 복사본에서 작업 → 끝나면 자동 적용 (작은 코드 저장소)</option>
         <option value="none">읽기 전용</option></select></label>
       <label>검증 명령 (한 줄에 하나, 예: uv run pytest -q)<textarea class="field" name="verify" style="min-height:60px"></textarea></label>
       <label>메모 (AI 에게 매번 전달, 짧게)<textarea class="field" name="notes" style="min-height:60px" maxlength="400"></textarea></label>

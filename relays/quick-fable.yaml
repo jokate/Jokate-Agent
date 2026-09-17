@@ -1,6 +1,7 @@
 name: quick-fable
-description: 작지만 어려운 작업 — 최상급 모델 한 주자 · 복사본 작업 후 패치 반환
-workspace: copy
+description: 작지만 어려운 작업 — 최상급 모델 한 주자 · 원본에 즉시 반영, 되돌리기 가능
+workspace: inplace        # 즉시 반영(원본에서 작업) · 바뀐 파일만 기록해 되돌리기 가능 · copy 로 바꾸면 복사본 작업
+auto_apply: true          # copy 로 돌릴 때도 끝나면 자동 적용 (충돌 시에만 대기)
 max_run_cost_usd: 2.0
 
 stages:

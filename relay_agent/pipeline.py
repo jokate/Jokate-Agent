@@ -36,6 +36,7 @@ from .journal import JournalWorkspace
 from .workspace import DEFAULT_EXCLUDES, Workspace, WorkspaceError, dir_size, gc_shadow
 
 WRITE_TOOLS = {"Edit", "Write", "Bash", "NotebookEdit"}
+READ_ONLY_MCP = {"docs_read", "handoff"}  # every other MCP server may change the real project
 VERIFY_NOISE_PREFIX = re.compile(r'^cd\s+("[^"]*"|\S+)\s*&&\s*')
 LOOKAROUND = {"ls", "dir", "pwd", "cat", "head", "tail", "echo", "find", "tree", "cd"}
 
@@ -85,6 +86,7 @@ class RelaySpec(BaseModel):
     name: str
     description: str = ""
     workspace: Literal["none", "copy", "inplace"] = "none"
+    auto_apply: bool = False  # copy mode: apply the patch to the original as soon as the run finishes
     max_run_cost_usd: float | None = Field(None, description="pause for approval once a run spends this much")
     stages: list[StageSpec]
 
@@ -124,6 +126,7 @@ class RunState(BaseModel):
     stage_budget_boost: dict[str, float] = {}  # stage -> multiplier on max_budget_usd, doubled per approval
     pending_budget_stage: str | None = None  # stage paused because it hit its own budget
     repo: str | None = None  # registered repository name, if the run targets one
+    auto_apply: bool = False
     workspace_mode: Literal["none", "copy", "inplace"] = "none"
     changes: dict | None = None  # {files, insertions, deletions, stat}
     changes_status: Literal["none", "ready", "applied", "discarded", "rolled_back"] = "none"
@@ -230,7 +233,8 @@ class RelayEngine:
             excludes += repo.excludes
         if run.workspace_mode == "inplace" and not (self._dir(run.id) / "snapshot.ready").exists():
             # any size, any VCS: journal of (size, mtime) + backups of edited/uncommitted files — never a snapshot
-            return JournalWorkspace(self._dir(run.id), Path(run.workdir), extra_skip=repo.excludes if repo else None)
+            return JournalWorkspace(self._dir(run.id), Path(run.workdir), extra_skip=repo.excludes if repo else None,
+                                    hook_only=repo.hook_only if repo else None)
         return Workspace(
             self._dir(run.id), Path(run.workdir), run.workspace_mode, excludes,
             shadow_root=self.runs_dir / "shadow",
@@ -244,7 +248,7 @@ class RelayEngine:
 
     # --- lifecycle ---------------------------------------------------------
     def create(self, relay_path: Path, goal: str, workdir: Path | None = None, session_id: str | None = None,
-               workspace: str | None = None, repo: str | None = None) -> RunState:
+               workspace: str | None = None, repo: str | None = None, auto_apply: bool | None = None) -> RunState:
         """Start a run as a new turn. Without session_id a new session is opened.
         With a registered repo, its path, default workspace mode, verify commands and notes apply."""
         spec, _ = RelaySpec.load(relay_path)
@@ -275,6 +279,13 @@ class RelayEngine:
         mode = workspace or (repo_spec.workspace if repo_spec else None) or spec.workspace
         if mode not in ("none", "copy", "inplace"):
             raise ValueError(f"workspace must be none, copy or inplace (got {mode})")
+        live_mcp = sorted({m for s in spec.stages for m in s.mcp if m not in READ_ONLY_MCP})
+        forced = None
+        if mode == "copy" and live_mcp:
+            # MCP tools (e.g. the Unreal editor) change the real project, not a copy: results would split
+            mode, forced = "inplace", f"MCP({', '.join(live_mcp)}) 가 실제 프로젝트를 바꾸므로 복사본 대신 원본에서 작업"
+        if auto_apply is None:
+            auto_apply = bool(repo_spec.auto_apply) if repo_spec and repo_spec.auto_apply is not None else spec.auto_apply
         run = RunState(
             id=datetime.now().strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6],
             session_id=session_id,
@@ -283,10 +294,13 @@ class RelayEngine:
             baton=Baton(goal=goal, session_context=self.history.session_context(session_id)),
             workspace_mode=mode,
             repo=repo,
+            auto_apply=bool(auto_apply),
         )
         self.history.add_turn(session_id, goal, spec.name, run.id)
         self._event(run, "-", "run_created", relay=spec.name, workdir=run.workdir, workspace=mode, repo=repo,
-                    stages=[s.name for s in spec.stages])
+                    auto_apply=run.auto_apply, stages=[s.name for s in spec.stages])
+        if forced:
+            self._event(run, "-", "workspace_forced", reason=forced)
         self.save(run)
         return run
 
@@ -854,6 +868,14 @@ class RelayEngine:
         run.baton.stop = None
         self._event(run, "-", "run_done")
         self._settle_workspace(run)
+        if ws is not None and run.workspace_mode == "copy" and run.auto_apply and run.changes_status == "ready":
+            try:
+                ws.apply()
+                run.changes_status, run.workspace_cleaned = "applied", True
+                self._event(run, "-", "changes_auto_applied", files=(run.changes or {}).get("files", 0))
+            except (WorkspaceError, OSError) as e:
+                # the original moved on meanwhile: keep the patch for a manual decision instead of forcing it
+                self._event(run, "-", "auto_apply_failed", error=str(e)[:300])
         if ws is not None and run.changes_status == "none" and not run.workspace_cleaned:
             try:
                 ws.cleanup()

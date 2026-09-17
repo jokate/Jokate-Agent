@@ -38,6 +38,8 @@ class RepoSpec(BaseModel):
     docs: str | None = None
     excludes: list[str] = Field(default_factory=list)
     include_ignored: bool = False  # also snapshot files the repo's .gitignore hides
+    auto_apply: bool | None = None  # copy mode: apply results automatically (None = relay default)
+    hook_only: list[str] | None = None  # top-level folders not scanned (default ["Engine"]); only hook backups there
     max_snapshot_mb: float | None = None  # override the global snapshot size limit
     notes: str = ""
 
