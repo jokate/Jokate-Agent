@@ -8,6 +8,16 @@ Recommended: quick (single Sonnet stage)      big jobs: default
 Claude near its usage limit → Codex/OpenCode/Gemini · run budget exceeded → pause for approval (not a failure)
 ```
 
+## Windows: one-click
+| File | What it does |
+|---|---|
+| `install.bat` | **New machine: grab just this file and run it** → clone to `%USERPROFILE%\Projects\Jokate-Agent`, then run setup.bat |
+| `setup.bat` | Check git/uv/Claude CLI (offers to install uv via winget) → `uv sync` → create local config → `doctor` → prompt to register repos → offer to start |
+| `start.bat [port]` | Start the server and open the dashboard (if already running, just opens the dashboard) |
+| `update.bat` | `git pull --ff-only` → `uv sync` → `doctor` (stops if there are uncommitted changes) |
+
+`KATAE_NONINTERACTIVE=1` skips the prompts; `KATAE_NO_BROWSER=1` doesn't open the browser.
+
 ## Running it (including a new machine)
 
 ```bash
