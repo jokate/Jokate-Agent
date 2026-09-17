@@ -32,8 +32,8 @@ from .providers import LEGACY_RUNNER, ProviderRegistry
 from .runners import Runner, RunnerError, StageCall, make_runner
 from .usage import UsageStore
 from .repos import RepoRegistry, RepoSpec
-from .workspace import (DEFAULT_EXCLUDES, GitBaselineWorkspace, Workspace, WorkspaceError, dir_size, gc_shadow,
-                        git_toplevel)
+from .journal import JournalWorkspace
+from .workspace import DEFAULT_EXCLUDES, Workspace, WorkspaceError, dir_size, gc_shadow
 
 WRITE_TOOLS = {"Edit", "Write", "Bash", "NotebookEdit"}
 VERIFY_NOISE_PREFIX = re.compile(r'^cd\s+("[^"]*"|\S+)\s*&&\s*')
@@ -227,11 +227,8 @@ class RelayEngine:
         if repo:
             excludes += repo.excludes
         if run.workspace_mode == "inplace" and not (self._dir(run.id) / "snapshot.ready").exists():
-            root = git_toplevel(Path(run.workdir))
-            if root is not None:
-                # git repo: HEAD is the baseline, only uncommitted files are saved — no project snapshot
-                return GitBaselineWorkspace(self._dir(run.id), Path(run.workdir), root, excludes,
-                                            max_file_mb=self.max_file_mb)
+            # any size, any VCS: journal of (size, mtime) + backups of edited/uncommitted files — never a snapshot
+            return JournalWorkspace(self._dir(run.id), Path(run.workdir), extra_skip=repo.excludes if repo else None)
         return Workspace(
             self._dir(run.id), Path(run.workdir), run.workspace_mode, excludes,
             shadow_root=self.runs_dir / "shadow",
@@ -704,6 +701,7 @@ class RelayEngine:
                 return self._fail(run, "-", f"작업 공간 준비 실패: {e}")
             self._event(run, "-", "workspace_ready", **info)
         cwd = ws.path if ws is not None else Path(run.workdir)
+        hook_settings = ws.settings_path if isinstance(ws, JournalWorkspace) and ws.settings_path.exists() else None
         repo = self._repo(run)
         repo_lines = "\n".join(repo.prompt_lines(repo.git_info().get("branch"))) + "\n" if repo else ""
         repo_tools = (repo.verify_tools() + repo.allowed_tools) if repo else []
@@ -751,6 +749,7 @@ class RelayEngine:
                 allowed_tools=stage.allowed_tools + (
                     self.extra_allowed_tools + repo_tools if "Bash" in (stage.tools or []) else []),
                 mcp_overrides=mcp_overrides,
+                settings_path=hook_settings,
                 permission_mode=stage.permission_mode,
                 timeout_s=stage.timeout_s,
                 system_mode=stage.system_mode,

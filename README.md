@@ -65,21 +65,27 @@ uv run relay repo clone mnys --url <git url>          # on a new machine: clone 
 - **MCP recording:** `mcp_call` (server.tool + arguments) and `mcp_result` (result size); oversized tool results are flagged as `tool_result_large`.
 - **Timeline:** tool calls fold into per-stage counts (click to expand). In the terminal, `relay log` is compact and `--full` shows everything.
 
-## Disk usage — why not snapshot the whole target
-**In-place work on a git repository (e.g. Unreal) takes no project snapshot.**
-- **Baseline:** git's `HEAD`. Only files that were **already modified or untracked when the run started** are saved (to restore to that point).
-  - Measured on MNYS: 50 uncommitted files, **0.57MB**, 0.2s.
-  - Assets and build folders (`Content`, `*.uasset`, `Binaries`, …) are never saved.
-- **At the end:** the diff from that baseline becomes `result.patch`. Rollback returns to that baseline, including uncommitted work that existed before the run.
-- **The repository itself is untouched:** no index, stash, ref, or object is created (tested).
-- **Other cases (copy mode, non-git folders):** a snapshot is still used, with these limits:
-  - one shared store per repo (5 runs ≈ size of 1), `.gitignore` respected;
-  - over `max_snapshot_mb` (500) it's refused before starting;
-  - files over `max_file_mb` (20) are left out.
+## Large game projects (Unreal/Unity, SVN/git, assets included) — no snapshots
+`workspace: inplace` **never copies or snapshots the project.**
 
-  **Copy mode is recommended only for small code repos. For large game projects use `inplace`.**
-- **Cleanup:** runs with no changes are cleaned right away; applied, discarded, or rolled-back runs immediately; undecided runs after 3 days. `result.patch` is kept.
-- `uv run relay disk` (where space goes), `uv run relay cleanup` (free it).
+| Step | What it does | Cost |
+|---|---|---|
+| 1. Journal | At run start, record only **size and modified time** of every file (code **and assets**). VCS metadata (`.svn` `.git`) and pure build/cache folders (`Intermediate Saved DerivedDataCache Binaries`) are skipped | Measured: **117K files / 13.6GB → 8.1s, record 1.7MB** |
+| 2. Pre-edit backup | A **PreToolUse hook** in Claude Code copies a file **right before** Edit/Write changes it | Only files that were edited |
+| 3. Uncommitted at start | Files already modified or unversioned when the run starts are copied (256MB per file / 2GB total cap) | Only uncommitted work |
+| 4. Originals | Anything else that changed (Bash, **assets saved by the Unreal editor via MCP**, builds) is restored from the VCS's own original: **git HEAD, SVN BASE (read straight from `.svn/pristine`, no svn CLI needed)** | 0 |
+| 5. Result | Text → `result.patch`; **binaries/assets → change list** (size before/after, restorable or not) | |
+| 6. Roll back | Restores every restorable change, deletes files created during the run, reports the rest | |
+
+- The repo itself is never written to (git status runs with `--no-optional-locks`, so even the index is untouched).
+- If there's no VCS or it can't be read, only hook-backed-up files can be restored; everything else shows as "no original".
+- Roll back after closing the Unreal editor (or reload the assets) — files the editor holds open may fail to restore.
+- Real test (Claude): code edited with Edit + asset changed with Bash → hook backup, asset detected, rollback leaves `git status` clean.
+
+**Copy mode** (`copy`) is only for small code repos. It uses a snapshot, with these limits:
+- one shared store per repo, `.gitignore` respected;
+- refused if over 500MB, and the error message recommends `inplace`.
+- `uv run relay disk` / `uv run relay cleanup`.
 
 ## Dashboard layout and selections
 - **Resizing**: drag the column dividers (double-click to reset), drag the divider between top and bottom panels to change height, use the header buttons to collapse the session/history columns or enlarge the result view (⛶). Sizes are remembered per browser.
@@ -87,7 +93,7 @@ uv run relay repo clone mnys --url <git url>          # on a new machine: clone 
 - **Relays** are shown by role and model tier (lightweight/standard/advanced/top), not vendor names; relays that support automatic switching show "switches to another AI when usage runs low".
 
 ## Getting work back (workspace)
-The target repo's own git is never touched, and uncommitted work is included. **inplace + git repo uses the git baseline (no snapshot)**; copy/non-git uses a shared snapshot store.
+The target repo's own VCS is never touched. **inplace = journal + pre-edit backups + VCS originals (no snapshot, any size)**; copy = shared snapshot store (small repos only).
 | Mode | Behavior | Fits |
 |---|---|---|
 | `copy` (default/quick default) | Work happens in a copy → returned as `result.patch` → you **apply** or **discard** | Regular code projects |

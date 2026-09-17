@@ -58,6 +58,7 @@ class StageCall:
     mcp_servers: list[str] = field(default_factory=list)  # claude_cli only
     allowed_tools: list[str] = field(default_factory=list)  # claude_cli only
     mcp_overrides: dict[str, dict] = field(default_factory=dict)  # per-run MCP entries (e.g. repo docs root)
+    settings_path: Path | None = None  # Claude Code --settings (pre-edit backup hook for in-place runs)
     permission_mode: str = "default"
     timeout_s: int = 1800
     # claude_cli token controls
@@ -252,8 +253,10 @@ class ClaudeCliRunner:
             # Moves cwd/git-status out of the system prompt so it caches across working directories.
             args += ["--append-system-prompt", call.system, "--exclude-dynamic-system-prompt-sections"]
         if call.isolate:
-            # --safe-mode also disables MCP servers, so only disable skills when MCP is needed.
-            args += ["--disable-slash-commands"] if call.mcp_servers else ["--safe-mode"]
+            # --safe-mode also disables MCP servers and hooks, so only disable skills when either is needed.
+            args += ["--disable-slash-commands"] if (call.mcp_servers or call.settings_path) else ["--safe-mode"]
+        if call.settings_path:
+            args += ["--settings", str(call.settings_path)]
         if call.max_budget_usd is not None:
             args += ["--max-budget-usd", str(call.max_budget_usd)]
         if call.fallback_model and call.fallback_model != call.model:

@@ -28,7 +28,7 @@ from pathlib import Path
 
 # Heavy or generated folders never snapshotted (any depth), plus file globs.
 DEFAULT_EXCLUDES = [
-    ".git", ".venv", "venv", "node_modules", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
+    ".git", ".svn", ".hg", ".venv", "venv", "node_modules", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
     ".tox", ".cache", ".gradle", ".idea", ".vs", ".vscode-test", "runs",
     "dist", "build", "out", "target", "obj", "bin", ".next", ".nuxt", ".turbo", ".parcel-cache", "coverage",
     "Binaries", "Intermediate", "Saved", "DerivedDataCache", "Content",          # Unreal
@@ -210,7 +210,8 @@ class Workspace:
         biggest = sorted(by_dir.items(), key=lambda kv: -kv[1])[:5]
         listing = ", ".join(f"{d} {s / 1_048_576:.0f}MB" for d, s in biggest)
         return (f"스냅샷 대상이 {total / 1_048_576:.0f}MB 로 한도 {self.max_snapshot_mb:.0f}MB 를 넘습니다. 큰 폴더: {listing} — "
-                "저장소 excludes 에 추가하거나(relay.config), max_snapshot_mb 를 올리거나, workspace: none 으로 실행하세요")
+                "큰 프로젝트는 workspace: inplace 로 실행하세요(복사 없이 바뀐 파일만 추적). "
+                "복사본이 꼭 필요하면 저장소 excludes 에 큰 폴더를 추가하세요")
 
     def collect(self) -> dict:
         """Write result.patch (changes since the snapshot) and return a summary."""
@@ -309,183 +310,6 @@ def gc_shadow(shadow_root: Path) -> int:
         subprocess.run(["git", *IDENTITY, f"--git-dir={store}", "gc", "--prune=now", "--quiet"], capture_output=True)
         freed += max(0, before - dir_size(store))
     return freed
-
-
-MAX_BASELINE_MB = 200
-GIT_QUIET = ["-c", "core.autocrlf=false", "-c", "core.safecrlf=false", "-c", "core.longpaths=true"]
-
-
-def git_toplevel(folder: Path) -> Path | None:
-    """Repository root if `folder` is inside a git work tree that has at least one commit."""
-    def run(*args):
-        return subprocess.run(["git", "-C", str(folder), *args], capture_output=True, text=True,
-                              encoding="utf-8", errors="replace")
-    top = run("rev-parse", "--show-toplevel")
-    if top.returncode != 0 or run("rev-parse", "--verify", "-q", "HEAD").returncode != 0:
-        return None
-    return Path(top.stdout.strip())
-
-
-class GitBaselineWorkspace:
-    """In-place work on a git repository WITHOUT snapshotting it.
-
-    Baseline for every path = its HEAD blob, except files that were already modified, deleted or
-    untracked when the run started: only those are saved (code/config sized, excludes applied).
-    A multi-GB Unreal repo therefore costs only its uncommitted work, not a copy of the project.
-    Nothing is written to the repository: no index updates, stashes, refs or objects.
-    """
-
-    mode = "inplace"
-
-    def __init__(self, run_dir: Path, source: Path, root: Path, excludes: list[str] | None = None,
-                 max_baseline_mb: float = MAX_BASELINE_MB, max_file_mb: float = MAX_FILE_MB):
-        self.run_dir = run_dir
-        self.source = source
-        self.root = root
-        sub = os.path.relpath(source, root).replace("\\", "/")
-        self.sub = "." if sub in (".", "") else sub
-        self.excludes = DEFAULT_EXCLUDES if excludes is None else excludes
-        self.baseline_dir = run_dir / "baseline"
-        self.manifest = run_dir / "baseline.json"
-        self.patch_path = run_dir / "result.patch"
-        self.max_baseline_mb = max_baseline_mb
-        self.max_file_mb = max_file_mb
-        self._excluded = Workspace._excluded.__get__(self)  # same exclude rules as snapshots
-
-    @property
-    def path(self) -> Path:
-        return self.source
-
-    @property
-    def prepared(self) -> bool:
-        return self.manifest.exists()
-
-    def _git(self, *args: str, input_bytes: bytes | None = None, ok_codes=(0,)) -> bytes:
-        proc = subprocess.run(["git", *GIT_QUIET, "-C", str(self.root), *args], capture_output=True, input=input_bytes)
-        if proc.returncode not in ok_codes:
-            raise WorkspaceError(f"git {' '.join(args[:2])} failed: {proc.stderr.decode('utf-8', 'replace')[-400:]}")
-        return proc.stdout
-
-    def _dirty_now(self) -> set[str]:
-        """Root-relative paths under the target folder that differ from HEAD or are untracked (not ignored)."""
-        spec = ["--", self.sub]
-        changed = self._git("diff", "--name-only", "-z", "--no-renames", "HEAD", *spec).decode("utf-8", "replace")
-        untracked = self._git("ls-files", "-z", "--others", "--exclude-standard", "--full-name", *spec).decode("utf-8", "replace")
-        return {p for p in (changed + "\0" + untracked).split("\0") if p and not self._excluded(p)}
-
-    def _head_blob(self, rel: str) -> bytes | None:
-        proc = subprocess.run(["git", *GIT_QUIET, "-C", str(self.root), "cat-file", "blob", f"HEAD:{rel}"], capture_output=True)
-        return proc.stdout if proc.returncode == 0 else None
-
-    def prepare(self) -> dict:
-        if self.prepared:
-            return {"mode": "inplace", "baseline": "git", "path": str(self.source)}
-        head = self._git("rev-parse", "HEAD").decode().strip()
-        saved: dict[str, bool] = {}   # path -> existed at start (True: copy saved, False: absent at start)
-        skipped, total = [], 0
-        limit = self.max_file_mb * 1_048_576
-        for rel in sorted(self._dirty_now()):
-            full = self.root / rel
-            if not full.exists():
-                saved[rel] = False
-                continue
-            size = full.stat().st_size
-            if size > limit:
-                skipped.append((rel, size))
-                continue
-            total += size
-            if total > self.max_baseline_mb * 1_048_576:
-                raise WorkspaceError(
-                    f"실행 시작 시점의 미커밋 변경이 {self.max_baseline_mb:.0f}MB 를 넘습니다 — 먼저 커밋하거나 "
-                    "저장소 excludes 에 큰 폴더를 추가하세요")
-            dest = self.baseline_dir / rel
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(full, dest)
-            saved[rel] = True
-        self.run_dir.mkdir(parents=True, exist_ok=True)
-        self.manifest.write_text(json.dumps({"head": head, "saved": saved, "skipped": [p for p, _ in skipped]},
-                                            ensure_ascii=False), encoding="utf-8")
-        return {"mode": "inplace", "baseline": "git", "path": str(self.source), "head": head[:10],
-                "saved_files": sum(saved.values()), "baseline_mb": round(total / 1_048_576, 2),
-                "skipped_large": [f"{p} ({s / 1_048_576:.0f}MB)" for p, s in skipped[:10]]}
-
-    def _load(self) -> dict:
-        return json.loads(self.manifest.read_text(encoding="utf-8"))
-
-    def _baseline(self, rel: str, man: dict) -> bytes | None:
-        if rel in man["saved"]:
-            return (self.baseline_dir / rel).read_bytes() if man["saved"][rel] else None
-        return self._head_blob(rel)
-
-    def _changes(self) -> list[tuple[str, bytes | None, bytes | None]]:
-        man = self._load()
-        candidates = self._dirty_now() | set(man["saved"])
-        out = []
-        for rel in sorted(candidates):
-            if rel in man.get("skipped", []):
-                continue
-            before = self._baseline(rel, man)
-            full = self.root / rel
-            after = full.read_bytes() if full.is_file() else None
-            if before != after:
-                out.append((rel, before, after))
-        return out
-
-    def collect(self) -> dict:
-        if not self.prepared:
-            return {"files": 0, "insertions": 0, "deletions": 0, "stat": ""}
-        patches, stat_lines, ins_total, del_total = [], [], 0, 0
-        with tempfile.TemporaryDirectory(prefix="katae-diff-") as tmp:
-            for rel, before, after in self._changes():
-                a = Path(tmp) / "a" / rel
-                b = Path(tmp) / "b" / rel
-                for p, data in ((a, before), (b, after)):
-                    if data is not None:
-                        p.parent.mkdir(parents=True, exist_ok=True)
-                        p.write_bytes(data)
-                left = f"a/{rel}" if before is not None else "/dev/null"
-                right = f"b/{rel}" if after is not None else "/dev/null"
-                base = ["git", *GIT_QUIET, "diff", "--no-index", "--no-color", "--src-prefix=", "--dst-prefix="]
-                diff = subprocess.run([*base, "--binary", left, right], capture_output=True, cwd=tmp).stdout
-                lines = diff.split(b"\n")
-                if lines and lines[0].startswith(b"diff --git"):
-                    lines[0] = f"diff --git a/{rel} b/{rel}".encode()  # normalise /dev/null and a/ b/ roots
-                patches.append(b"\n".join(lines))
-                num = subprocess.run([*base, "--numstat", left, right], capture_output=True, cwd=tmp).stdout.decode()
-                parts = num.split("\t")
-                ins = int(parts[0]) if parts and parts[0].isdigit() else 0
-                dels = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
-                ins_total, del_total = ins_total + ins, del_total + dels
-                stat_lines.append(f" {rel} | {ins + dels} {'+' * min(ins, 20)}{'-' * min(dels, 20)}")
-        self.patch_path.write_bytes(b"".join(patches))
-        return {"files": len(stat_lines), "insertions": ins_total, "deletions": del_total, "stat": "\n".join(stat_lines)}
-
-    def rollback(self) -> dict:
-        """Put every changed path back to its baseline; files created during the run are deleted."""
-        if not self.prepared:
-            raise WorkspaceError("기준선 정보가 정리되어 되돌릴 수 없습니다")
-        summary = self.collect()
-        for rel, before, _after in self._changes():
-            full = self.root / rel
-            if before is None:
-                full.unlink(missing_ok=True)
-            else:
-                full.parent.mkdir(parents=True, exist_ok=True)
-                full.write_bytes(before)
-        self.cleanup()
-        return summary
-
-    def apply(self) -> str:
-        raise WorkspaceError("apply is for copy mode; inplace changes are already in the folder")
-
-    def discard(self) -> None:
-        raise WorkspaceError("discard is for copy mode; use rollback for inplace changes")
-
-    def cleanup(self) -> int:
-        freed = dir_size(self.baseline_dir) if self.baseline_dir.exists() else 0
-        _remove(self.baseline_dir)
-        _remove(self.manifest)
-        return freed
 
 
 def _remove(path: Path) -> None:

@@ -762,7 +762,7 @@ async function renderChanges(run) {
   if (!c || !c.files) {
     box.innerHTML = `<div class="empty"><div class="big">🧾</div>${run.status === "running" ? "작업 중… 단계가 끝나면 변경 사항이 모입니다" : "변경된 파일이 없습니다"}</div>`; return;
   }
-  const status = { ready: "", applied: "✅ 원본에 적용됨", discarded: "🗑️ 폐기됨 (패치 파일은 보관)", rolled_back: "⏪ 스냅샷으로 되돌림" }[run.changes_status];
+  const status = { ready: "", applied: "✅ 원본에 적용됨", discarded: "🗑️ 폐기됨 (패치 파일은 보관)", rolled_back: "⏪ 실행 전 상태로 되돌림" }[run.changes_status];
   const actions = run.changes_status !== "ready" || !["done", "cancelled"].includes(run.status) ? `<span class="tag">${status || "릴레이가 끝나면(완료·취소) 적용할 수 있습니다"}</span>`
     : run.workspace_mode === "copy"
       ? `<button class="btn btn-primary" id="applyCh">✅ 원본에 적용</button><button class="btn btn-ghost" id="discardCh">🗑️ 폐기</button>`
@@ -774,7 +774,11 @@ async function renderChanges(run) {
   }).join("");
   box.innerHTML = `
     <div class="changes-bar"><b>${c.files}개 파일</b><span class="num-add">+${c.insertions}</span><span class="num-del">-${c.deletions}</span>
-      <span class="tag">${run.workspace_mode === "copy" ? "📦 복사본" : "✏️ 원본"}</span><span style="flex:1"></span>${actions}</div>
+      <span class="tag">${run.workspace_mode === "copy" ? "📦 복사본" : "✏️ 원본"}</span>${c.vcs ? `<span class="tag">${esc(c.vcs)}</span>` : ""}<span style="flex:1"></span>${actions}</div>
+    ${(c.binary || []).length ? `<div class="card" style="margin-bottom:10px"><h4>🎨 바이너리·에셋 변경 <span class="count">${c.binary.length}</span></h4>
+      ${c.binary.map((b) => `<div class="check" style="cursor:default"><span>${b.restorable ? "✅" : "⚠️"}</span><span><code>${esc(b.path)}</code>
+        <span style="color:var(--muted)">${b.before_bytes == null ? "새 파일" : fmtN(b.before_bytes) + "B"} → ${b.after_bytes == null ? "삭제됨" : fmtN(b.after_bytes) + "B"}
+        · ${b.restorable ? `되돌리기 가능 (${{ backup: "편집 전 백업", pristine: "VCS 원본", absent: "새로 생긴 파일" }[b.source] || esc(b.source)})` : "원본 없음 — 되돌리기 불가"}</span></span></div>`).join("")}</div>` : ""}
     <div class="diff">${lines}</div>`;
   const act = (path, msg, ask) => () => (!ask || confirm(ask)) && api(`/runs/${run.id}/changes/${path}`, { method: "POST" })
     .then((r) => { toast(msg); renderChanges(r); }).catch((e) => toast(e.message, true));
