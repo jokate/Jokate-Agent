@@ -104,6 +104,14 @@ uv run relay repo clone mnys --url <git url>          # on a new machine: clone 
 - **Stages using an MCP that changes real state (e.g. Unreal) always run `inplace`, even if you choose `copy`.** MCP changes the real project, so a copy would split the results. (Read-only MCPs like `docs_read` are exempt.)
 - `relay patch|rollback <run_id>` or the dashboard "Changes" tab. Rollback restores both code and assets.
 
+## Choosing a model per phase
+- In the dashboard, pick a relay and a model dropdown appears for each phase (scout · plan · build · review). Leave it blank to use the relay's default.
+- The list shows **only models from AIs usable right now** (installed and logged in). Models whose usage is exhausted appear as `소진` and can't be picked.
+- Phases that edit files (✏️) only list AIs that can edit files. Your last choice is remembered per relay.
+- A model you pick isn't swapped for `retry_model` on retries. When usage runs out, it falls back as usual (lower model → the relay's default AI → alternate AIs).
+- To expose other AIs' models: `providers.<name>.models: [gpt-5, ...]` in `relay.config.local.yaml`.
+- CLI: `relay run default "goal" --stage-model plan=claude:opus --stage-model build=codex:gpt-5`
+
 ## Multiple AIs and automatic switching
 | Provider | Type | Status (this PC) | Remaining usage shown |
 |---|---|---|---|

@@ -37,6 +37,8 @@ class ProviderSpec(BaseModel):
     api_key_env: str = ""
     # tier alias (haiku/sonnet/opus/fable) -> this provider's model id. Unmapped -> provider default.
     model_map: dict[str, str] = {}
+    # models a user can pick per stage (provider's own names; for Claude the tier aliases)
+    models: list[str] = []
     # model id -> [input $/MTok, output $/MTok] for cost estimates
     prices: dict[str, list[float]] = {}
     daily_usd: float | None = Field(None, description="stop using this provider after this spend in 24h")
@@ -99,8 +101,8 @@ class ProviderSpec(BaseModel):
 # and are not verified on this machine (none installed) — adjust in relay.config.yaml if they differ.
 BUILTIN: dict[str, dict] = {
     "mock": {"kind": "mock", "label": "Mock"},
-    "claude": {"kind": "claude_cli", "label": "Claude Code", "tools": True},
-    "anthropic_api": {"kind": "api", "label": "Claude API"},
+    "claude": {"kind": "claude_cli", "label": "Claude Code", "tools": True, "models": ["fable", "opus", "sonnet", "haiku"]},
+    "anthropic_api": {"kind": "api", "label": "Claude API", "models": ["fable", "opus", "sonnet", "haiku"]},
     "codex": {
         "kind": "cli", "label": "Codex CLI", "tools": True,
         "command": ["codex", "exec", "--skip-git-repo-check", "--sandbox", "workspace-write",
@@ -253,6 +255,41 @@ class ProviderRegistry:
             if until:
                 out.append({"model": tier, "until": until})
         return out
+
+    TIER_LABEL = {"fable": "최상급", "mythos": "최상급", "opus": "고급", "sonnet": "표준", "haiku": "경량"}
+
+    def catalog(self) -> list[dict]:
+        """Models selectable right now: only providers that are usable, with benched models marked."""
+        out = []
+        for name, spec in self.specs.items():
+            if spec.kind == "mock":
+                continue
+            st = self.status(name)
+            if not st["available"]:
+                continue
+            models = list(dict.fromkeys(spec.models or list(spec.model_map.values())))
+            entries = []
+            for model in models:
+                tier = self.tier(model)
+                entries.append({"model": model, "tier": self.TIER_LABEL.get(tier or "", ""),
+                                "exhausted_until": self.model_exhausted_until(name, model) if tier else None})
+            if not entries:
+                entries.append({"model": "", "tier": "", "exhausted_until": None})  # provider's own default model
+            out.append({"provider": name, "label": spec.label or name, "tools": spec.tools, "models": entries})
+        return out
+
+    def check_choice(self, provider: str, needs_tools: bool) -> str | None:
+        """Why a stage can't use this provider, or None if it can."""
+        if provider not in self.specs:
+            return f"알 수 없는 AI: {provider}"
+        spec = self.specs[provider]
+        if spec.kind != "mock":
+            ok, reason = spec.availability()
+            if not ok:
+                return f"{provider}: {reason}"
+        if needs_tools and not spec.tools:
+            return f"{provider} 는 파일을 수정할 수 없어 이 단계에 쓸 수 없습니다"
+        return None
 
     def mark_exhausted(self, name: str, reason: str) -> str | None:
         if self.history is None:

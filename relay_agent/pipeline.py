@@ -127,6 +127,7 @@ class RunState(BaseModel):
     pending_budget_stage: str | None = None  # stage paused because it hit its own budget
     repo: str | None = None  # registered repository name, if the run targets one
     auto_apply: bool = False
+    stage_models: dict[str, dict] = {}  # stage -> {"provider": ..., "model": ...} chosen for this run
     workspace_mode: Literal["none", "copy", "inplace"] = "none"
     changes: dict | None = None  # {files, insertions, deletions, stat}
     changes_status: Literal["none", "ready", "applied", "discarded", "rolled_back"] = "none"
@@ -248,7 +249,8 @@ class RelayEngine:
 
     # --- lifecycle ---------------------------------------------------------
     def create(self, relay_path: Path, goal: str, workdir: Path | None = None, session_id: str | None = None,
-               workspace: str | None = None, repo: str | None = None, auto_apply: bool | None = None) -> RunState:
+               workspace: str | None = None, repo: str | None = None, auto_apply: bool | None = None,
+               stage_models: dict[str, dict] | None = None) -> RunState:
         """Start a run as a new turn. Without session_id a new session is opened.
         With a registered repo, its path, default workspace mode, verify commands and notes apply."""
         spec, _ = RelaySpec.load(relay_path)
@@ -279,6 +281,19 @@ class RelayEngine:
         mode = workspace or (repo_spec.workspace if repo_spec else None) or spec.workspace
         if mode not in ("none", "copy", "inplace"):
             raise ValueError(f"workspace must be none, copy or inplace (got {mode})")
+        chosen: dict[str, dict] = {}
+        by_name = {s.name: s for s in spec.stages}
+        for stage_name, choice in (stage_models or {}).items():
+            if not choice or not (choice.get("provider") or choice.get("model")):
+                continue  # "default" in the picker
+            if stage_name not in by_name:
+                raise ValueError(f"이 릴레이에 없는 단계입니다: {stage_name}")
+            provider = choice.get("provider") or by_name[stage_name].primary
+            if self.providers is not None:
+                problem = self.providers.check_choice(provider, by_name[stage_name].writes)
+                if problem:
+                    raise ValueError(f"[{stage_name}] {problem}")
+            chosen[stage_name] = {"provider": provider, "model": choice.get("model") or None}
         live_mcp = sorted({m for s in spec.stages for m in s.mcp if m not in READ_ONLY_MCP})
         forced = None
         if mode == "copy" and live_mcp:
@@ -295,10 +310,11 @@ class RelayEngine:
             workspace_mode=mode,
             repo=repo,
             auto_apply=bool(auto_apply),
+            stage_models=chosen,
         )
         self.history.add_turn(session_id, goal, spec.name, run.id)
         self._event(run, "-", "run_created", relay=spec.name, workdir=run.workdir, workspace=mode, repo=repo,
-                    auto_apply=run.auto_apply, stages=[s.name for s in spec.stages])
+                    auto_apply=run.auto_apply, stages=[s.name for s in spec.stages], stage_models=chosen)
         if forced:
             self._event(run, "-", "workspace_forced", reason=forced)
         self.save(run)
@@ -638,11 +654,15 @@ class RelayEngine:
             return model
         return self.providers.get(provider).resolve_model(model)
 
-    def _run_stage(self, run: RunState, stage: StageSpec, call: StageCall):
-        """Try the primary provider, then alternates. Returns (result, usage) or raises RunnerError."""
-        options = [{"provider": stage.primary}] + [a.model_dump() for a in stage.alternates]
+    def _run_stage(self, run: RunState, stage: StageSpec, call: StageCall, primary: str | None = None):
+        """Try the primary provider (the run's pick or the relay's), then alternates."""
+        primary = primary or stage.primary
+        alternates = [a.model_dump() for a in stage.alternates if a.provider != primary]
+        if primary != stage.primary:
+            alternates.insert(0, {"provider": stage.primary})  # the relay's own AI becomes the first fallback
+        options = [{"provider": primary}] + alternates
         if self.providers is not None:
-            options, skipped = self.providers.candidates(stage.primary, options[1:], stage.writes)
+            options, skipped = self.providers.candidates(primary, options[1:], stage.writes)
             if skipped:
                 self._event(run, stage.name, "providers_skipped", skipped=skipped)
         if not options:
@@ -651,7 +671,7 @@ class RelayEngine:
         last_error: RunnerError | None = None
         for i, option in enumerate(options):
             name = option["provider"]
-            if i > 0 or name != stage.primary:
+            if i > 0 or name != primary:
                 self._event(run, stage.name, "provider_switch", to=name,
                             reason=str(last_error)[:200] if last_error else "기본 AI 사용 불가")
             is_claude = name in ("claude", "anthropic_api", "mock") or (
@@ -772,8 +792,15 @@ class RelayEngine:
             # Cheap first pass; spend more only when this stage is being redone.
             redo = any(h.stage == stage.name for h in run.history)
             effort = stage.retry_effort if redo and stage.retry_effort else stage.effort
-            model = stage.retry_model if redo and stage.retry_model else stage.model
-            self._event(run, stage.name, "stage_started", runner=stage.primary, model=model,
+            choice = run.stage_models.get(stage.name) or {}
+            primary = choice.get("provider") or stage.primary
+            if choice.get("model") or choice.get("provider"):
+                # the user's pick wins, also on retries (no silent escalation to another model)
+                model = choice.get("model") if choice.get("model") is not None else (
+                    stage.model if primary == stage.primary else None)
+            else:
+                model = stage.retry_model if redo and stage.retry_model else stage.model
+            self._event(run, stage.name, "stage_started", runner=primary, model=model, chosen=bool(choice),
                         effort=effort, reads=stage.reads_outputs, system_mode=stage.system_mode,
                         escalated=redo and bool(stage.retry_model or stage.retry_effort))
             call = StageCall(
@@ -804,7 +831,7 @@ class RelayEngine:
                 cancel_event=cancel,
             )
             try:
-                result, usage = self._run_stage(run, stage, call)
+                result, usage = self._run_stage(run, stage, call, primary)
             except RunnerError as e:
                 if e.kind == "cancelled" or cancel.is_set():
                     return self._fail(run, stage.name, "사용자가 취소함", status="cancelled")

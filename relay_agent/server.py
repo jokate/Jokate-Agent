@@ -78,6 +78,7 @@ class CreateRun(BaseModel):
     workdir: str | None = None  # defaults to the session's workdir
     workspace: str | None = None  # none | copy | inplace; defaults to the repo's, then the relay's setting
     auto_apply: bool | None = None  # copy mode: apply automatically when done
+    stage_models: dict[str, dict] | None = None  # {"plan": {"provider": "claude", "model": "opus"}}
     repo: str | None = None  # registered repository name (path, verify commands, notes come from it)
     start: bool = True
 
@@ -155,6 +156,9 @@ def list_relays() -> list[dict]:
             "workspace": spec.workspace,
             "stages": steps,
             "switchable": any(s.alternates for s in spec.stages),
+            "stage_defaults": [{"name": s.name, "label": STAGE_KO.get(s.name, s.name), "provider": s.primary,
+                                "model": s.model, "tier": TIER.get((s.model or "").lower(), ""), "writes": s.writes}
+                               for s in spec.stages],
         })
     return out
 
@@ -175,6 +179,12 @@ def list_providers() -> list[dict]:
         out.append(st)
     order = {"claude": 0, "codex": 1, "opencode": 2, "gemini": 3}
     return sorted(out, key=lambda s: (not s["available"] and not s.get("limits"), order.get(s["name"], 9)))
+
+
+@app.get("/models")
+def list_models() -> list[dict]:
+    """Per-stage model picker: models of the AIs usable right now (benched models marked)."""
+    return engine.providers.catalog()
 
 
 @app.post("/providers/{name}/probe")
@@ -401,7 +411,7 @@ def create_run(body: CreateRun, request: Request) -> RunState:
         _check_path(request, workdir)
         repo = repo or (m.name if (m := engine.repos.match(workdir)) else None)
     run = _conflict(engine.create, relay_path, body.goal, workdir, body.session_id, body.workspace or None, repo,
-                    body.auto_apply)
+                    body.auto_apply, body.stage_models)
     if body.start:
         _advance_bg(run.id)
     return run

@@ -211,6 +211,8 @@ def main() -> None:
     p_run.add_argument("--workdir")
     p_run.add_argument("--workspace", choices=["none", "copy", "inplace"])
     p_run.add_argument("--repo", help="registered repository name (relay repos)")
+    p_run.add_argument("--stage-model", action="append", default=[], metavar="STAGE=PROVIDER:MODEL",
+                       help="pick a model per stage, e.g. plan=claude:opus or build=codex:gpt-5 (repeatable)")
     sub.add_parser("repos", help="registered repositories on this machine")
     p_repo = sub.add_parser("repo", help="register or clone a repository")
     p_repo.add_argument("action", choices=["add", "clone", "remove"])
@@ -308,8 +310,13 @@ def main() -> None:
             sys.exit(f"session {args.session} not found")
         repo = args.repo or (session or {}).get("repo")
         workdir = Path(args.workdir) if args.workdir else (None if repo else Path(session["workdir"] if session else "."))
+        stage_models = {}
+        for item in args.stage_model:
+            stage_name, _, choice = item.partition("=")
+            provider, _, model = choice.partition(":") if ":" in choice else ("", "", choice)
+            stage_models[stage_name] = {"provider": provider or None, "model": model or None}
         run = engine.create(cfg.relays_dir / f"{args.relay}.yaml", args.goal, workdir, session_id=args.session,
-                            workspace=args.workspace, repo=repo)
+                            workspace=args.workspace, repo=repo, stage_models=stage_models)
         print(f"session {run.session_id} / run {run.id}")
         print_run(engine, engine.advance(run.id))
     elif args.cmd == "providers":
