@@ -63,15 +63,20 @@ def test_cleanup_removes_decided_now_and_undecided_after_retention(tmp_path):
     pending = engine.advance(engine.create(relay, "undecided", project).id)
     assert pending.changes_status == "ready"
 
+    # applying cleans up at once; both runs shared a single snapshot store for this folder
+    assert engine.load(applied.id).workspace_cleaned
+    assert not (engine.runs_dir / applied.id / "workspace").exists()
+    assert len(list((engine.runs_dir / "shadow").glob("*.git"))) == 1
+
     result = engine.cleanup_workspaces(retention_days=7)
-    assert result["cleaned"] == [applied.id]
-    assert not (engine.runs_dir / applied.id / "shadow.git").exists()
+    assert result["cleaned"] == []  # the undecided run is kept within the retention period
     assert (engine.runs_dir / pending.id / "workspace").exists()
 
     old = time.time() - 8 * 86400
     os.utime(engine.runs_dir / pending.id / "run.json", (old, old))
     assert engine.cleanup_workspaces(retention_days=7)["cleaned"] == [pending.id]
     assert (engine.runs_dir / pending.id / "result.patch").exists()
+    assert not list((engine.runs_dir / "shadow").glob("*.git"))  # no runs left -> store deleted
 
     # the saved patch can still be applied after its workspace is gone
     engine.apply_changes(pending.id)

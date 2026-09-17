@@ -131,13 +131,34 @@ header { height: 64px; display: flex; align-items: center; gap: 18px; padding: 0
 .icon-btn:hover { border-color: var(--line-strong); transform: translateY(-1px); }
 
 /* layout */
-.app { display: grid; grid-template-columns: 280px minmax(380px, 1fr) minmax(420px, 1.15fr); gap: 14px; padding: 14px; height: calc(100vh - 64px - 58px); }
+.app { display: grid; grid-template-columns: 280px 14px minmax(320px, 1fr) 14px minmax(360px, 1.15fr); padding: 14px; height: calc(100vh - 64px - 58px); }
+/* resizable layout */
+.split { position: relative; cursor: col-resize; touch-action: none; }
+.split::after { content: ""; position: absolute; top: 20%; bottom: 20%; left: 5px; width: 4px; border-radius: 4px; background: var(--line); transition: background .2s; }
+.split:hover::after, .split.drag::after { background: var(--grad); }
+.vsplit { flex: 0 0 10px; margin: -12px 0; cursor: row-resize; position: relative; touch-action: none; }
+.vsplit::after { content: ""; position: absolute; left: 30%; right: 30%; top: 3px; height: 4px; border-radius: 4px; background: var(--line); }
+.vsplit:hover::after, .vsplit.drag::after { background: var(--grad); }
+.col.collapsed { visibility: hidden; overflow: hidden; min-width: 0; padding: 0; }  /* keep the grid cell so later columns stay in place */
+body.dragging { user-select: none; cursor: col-resize; }
+body.dragging-row { user-select: none; cursor: row-resize; }
+.layout-btns { display: flex; gap: 6px; }
+.layout-btns .icon-btn.on { border-color: var(--c2); box-shadow: 0 0 0 3px rgba(34,211,238,.15); }
+select.field option, select.field optgroup { background: var(--bg2); color: var(--ink); }
+.hint { color: var(--muted); font-size: 12px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.picked { font-family: ui-monospace, Consolas, monospace; font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; align-self: center; }
+.picker-path { font-family: ui-monospace, Consolas, monospace; font-size: 12.5px; padding: 8px 10px; border-radius: 10px; background: var(--glass-strong); border: 1px solid var(--line); margin: 10px 0; word-break: break-all; }
+.picker-list { max-height: 48vh; overflow: auto; border: 1px solid var(--line); border-radius: 12px; }
+.picker-list div { padding: 8px 12px; cursor: pointer; border-bottom: 1px solid var(--line); display: flex; gap: 8px; }
+.picker-list div:hover { background: var(--glass-strong); }
+.form-grid { display: grid; gap: 10px; }
+.form-grid label { font-size: 12px; color: var(--muted); display: grid; gap: 4px; }
 .col { min-height: 0; display: flex; flex-direction: column; gap: 14px; }
 .panel { padding: 16px; min-height: 0; }
 .scroll { overflow: auto; }
 .label { font-size: 11px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); margin: 0 0 12px; display: flex; align-items: center; gap: 8px; }
 .label .count { background: var(--glass-strong); border: 1px solid var(--line); border-radius: 999px; padding: 0 8px; font-size: 10px; letter-spacing: 0; }
-@media (max-width: 1180px) { body { overflow: auto; } .app { grid-template-columns: 1fr; height: auto; } }
+@media (max-width: 1180px) { body { overflow: auto; } .app { grid-template-columns: 1fr !important; height: auto; row-gap: 14px; } .split, .vsplit, .layout-btns { display: none; } .col.collapsed { visibility: visible; } }
 
 /* forms */
 .field { width: 100%; padding: 10px 12px; border-radius: 11px; border: 1px solid var(--line); background: rgba(0,0,0,.18); outline: none; transition: .2s; }
@@ -278,20 +299,31 @@ textarea.field { resize: vertical; min-height: 84px; }
 <header>
   <div class="brand"><div class="orb"></div><div>Agent <span class="grad-text">카태</span><br><small>relay agent control room</small></div></div>
   <div class="search"><input id="search" placeholder="지금까지 한 질문 검색…  (Enter)"></div>
+  <div class="layout-btns">
+    <button class="icon-btn" id="tgLeft" title="세션 목록 접기/펴기">⇤</button>
+    <button class="icon-btn" id="tgMid" title="질문 이력 접기/펴기">☰</button>
+    <button class="icon-btn" id="tgFocus" title="결과만 크게 보기">⛶</button>
+    <button class="icon-btn" id="tgReset" title="레이아웃 초기화">↺</button>
+  </div>
   <button class="icon-btn" id="theme" title="테마 전환">◐</button>
 </header>
 <div class="quota" id="quota" title="클릭: 사용량 새로고침"></div>
 
-<div class="app">
+<div class="app" id="app">
   <!-- sessions -->
-  <div class="col">
+  <div class="col" id="colLeft">
     <div class="glass panel" style="flex:0 0 auto">
       <p class="label">새 세션</p>
       <form class="new-session" id="newSession">
         <input class="field" name="title" placeholder="예) HON 캐릭터 작업" required>
         <select class="field" name="repo" id="repoSelect"><option value="">📁 등록된 저장소 선택…</option></select>
-        <input class="field" name="workdir" placeholder="또는 작업 폴더 경로 직접 입력">
+        <div class="row" style="display:flex;gap:8px">
+          <button type="button" class="btn btn-ghost" id="pickWorkdir">📂 폴더 선택</button>
+          <span class="picked" id="workdirLabel">또는 등록 안 된 폴더 고르기</span>
+        </div>
+        <input type="hidden" name="workdir" id="workdirValue">
         <button class="btn btn-primary">＋ 세션 시작</button>
+        <button type="button" class="btn btn-ghost" id="addRepo">＋ 저장소 등록</button>
       </form>
       <button class="btn btn-ghost" id="ccImport" style="width:100%">⤵ Claude Code 대화 가져오기</button>
     </div>
@@ -301,23 +333,27 @@ textarea.field { resize: vertical; min-height: 84px; }
     </div>
   </div>
 
+  <div class="split" data-split="1" title="드래그: 너비 조절 · 더블클릭: 기본값"></div>
   <!-- session -->
-  <div class="col">
+  <div class="col" id="colMid">
     <div class="stats" id="stats"></div>
-    <div class="glass panel" id="sessionPanel" style="flex:0 0 auto">
+    <div class="glass panel scroll" id="sessionPanel" style="flex:0 0 auto">
       <div class="empty"><div class="big">🏁</div><div>왼쪽에서 세션을 고르거나 새로 만드세요</div></div>
     </div>
+    <div class="vsplit" data-target="sessionPanel" title="드래그: 높이 조절 · 더블클릭: 자동"></div>
     <div class="glass panel scroll" style="flex:1">
       <p class="label" id="turnsLabel">질문 이력 <span class="count" id="turnCount">0</span></p>
       <div id="turns"></div>
     </div>
   </div>
 
+  <div class="split" data-split="2" title="드래그: 너비 조절 · 더블클릭: 기본값"></div>
   <!-- inspector -->
-  <div class="col">
-    <div class="glass panel" id="runPanel" style="flex:0 0 auto">
+  <div class="col" id="colRight">
+    <div class="glass panel scroll" id="runPanel" style="flex:0 0 auto">
       <div class="empty"><div class="big">⚡</div><div>질문을 고르면 릴레이가 어떻게 진행됐는지 보여드립니다</div></div>
     </div>
+    <div class="vsplit" data-target="runPanel" title="드래그: 높이 조절 · 더블클릭: 자동"></div>
     <div class="glass panel scroll" style="flex:1">
       <div class="tabs" id="tabs" style="margin-bottom:14px">
         <button class="tab on" data-tab="summary">요약</button>
@@ -546,7 +582,9 @@ async function loadSessions() {
 
 async function openSession(id) {
   S.session = id;
-  const [s, relays] = await Promise.all([api(`/sessions/${id}`), S.relays || api("/relays")]);
+  const [s, relays, repos] = await Promise.all([api(`/sessions/${id}`), S.relays || api("/relays"), S.repos || api("/repos").catch(() => [])]);
+  S.repos = repos;
+  s.repo_relay = (repos.find((r) => r.name === s.repo) || {}).relay;
   S.relays = relays;
   $("sessionPanel").innerHTML = `
     <div class="session-head" style="margin-bottom:12px"><h2>${esc(s.title)}</h2><div class="wd">${s.repo ? `📁 ${esc(s.repo)} · ` : ""}${esc(s.workdir)}</div></div>
@@ -561,11 +599,17 @@ async function openSession(id) {
         </select>
       </div>
       <div class="row">
-        <select class="field" name="relay" title="릴레이 선택">${relays.map((r) => `<option value="${r.name}" ${r.name === "quick" ? "selected" : ""} title="${esc(r.description)}">${r.name} — ${esc(r.stages.join(" → "))}</option>`).join("")}</select>
+        <select class="field" name="relay" id="relaySelect" title="릴레이 선택">${relays.map((r) => `<option value="${r.name}" ${r.name === (s.repo_relay || "quick") ? "selected" : ""}>${r.name} — ${esc(r.stages.join(" → "))}</option>`).join("")}</select>
         <button class="btn btn-primary">⚡ 릴레이 출발</button>
       </div>
+      <div class="hint" id="relayHint"></div>
     </form>`;
   $("ask").onsubmit = submitAsk;
+  const hint = () => {
+    const r = relays.find((x) => x.name === $("relaySelect").value);
+    $("relayHint").innerHTML = r ? `${esc(r.description)}${r.switchable ? ' <span class="tag">사용량 부족 시 다른 AI 로 자동 교체</span>' : ""}` : "";
+  };
+  $("relaySelect").onchange = hint; hint();
   $("turnsLabel").firstChild.textContent = "질문 이력 ";
   renderTurns(s.turns.slice().reverse());
   loadSessions(); loadStats();
@@ -801,6 +845,164 @@ async function openImport() {
 }
 $("ccImport").onclick = openImport;
 
+/* folder picker (server lists this PC's folders; no typing paths) */
+function pickFolder(start) {
+  return new Promise((resolve) => {
+    const bg = document.createElement("div");
+    bg.className = "modal-bg";
+    bg.innerHTML = `<div class="glass modal"><h3>📂 폴더 선택</h3>
+      <div class="picker-path" id="pkPath">-</div>
+      <div class="row" style="display:flex;gap:8px;margin-bottom:10px">
+        <button class="btn btn-ghost" id="pkUp">⬆ 상위 폴더</button>
+        <button class="btn btn-ghost" id="pkTop">🏠 처음</button>
+        <span style="flex:1"></span>
+        <button class="btn btn-ghost" id="pkCancel">취소</button>
+        <button class="btn btn-primary" id="pkOk" disabled>이 폴더 선택</button>
+      </div>
+      <div class="picker-list" id="pkList"></div></div>`;
+    document.body.appendChild(bg);
+    let current = null, parent = null;
+    const close = (value) => { bg.remove(); resolve(value); };
+    async function go(path) {
+      let data;
+      try { data = await api("/fs/list" + (path ? `?path=${encodeURIComponent(path)}` : "")); }
+      catch (e) { return toast(e.message, true); }
+      current = data.path; parent = data.parent;
+      bg.querySelector("#pkPath").innerHTML = current
+        ? `${esc(current)} ${data.is_repo ? '<span class="tag">git</span>' : ""}${data.registered ? ` <span class="tag">등록됨: ${esc(data.registered)}</span>` : ""}`
+        : "드라이브 또는 바로가기를 고르세요";
+      bg.querySelector("#pkOk").disabled = !current;
+      bg.querySelector("#pkUp").disabled = !parent;
+      bg.querySelector("#pkList").innerHTML = data.dirs.map((d) => `<div data-p="${esc(d.path)}">📁 ${esc(d.name)}</div>`).join("")
+        || `<div style="color:var(--muted);cursor:default">하위 폴더 없음</div>`;
+      bg.querySelectorAll("#pkList [data-p]").forEach((el) => el.onclick = () => go(el.dataset.p));
+    }
+    bg.querySelector("#pkUp").onclick = () => parent && go(parent);
+    bg.querySelector("#pkTop").onclick = () => go(null);
+    bg.querySelector("#pkCancel").onclick = () => close(null);
+    bg.querySelector("#pkOk").onclick = () => close(current);
+    bg.onclick = (e) => { if (e.target === bg) close(null); };
+    go(start || null);
+  });
+}
+
+$("pickWorkdir").onclick = async () => {
+  const path = await pickFolder($("workdirValue").value);
+  if (!path) return;
+  $("workdirValue").value = path;
+  $("workdirLabel").textContent = path;
+  $("workdirLabel").title = path;
+  $("repoSelect").value = "";
+};
+
+$("addRepo").onclick = () => {
+  const bg = document.createElement("div");
+  bg.className = "modal-bg";
+  bg.innerHTML = `<div class="glass modal"><h3>＋ 저장소 등록</h3>
+    <div class="sub" style="color:var(--muted);margin-bottom:12px">한 번 등록하면 이름만 고르면 됩니다. 이 PC 전용 설정(relay.config.local.yaml)에 저장됩니다.</div>
+    <form class="form-grid" id="repoForm">
+      <label>폴더<div class="row" style="display:flex;gap:8px"><button type="button" class="btn btn-ghost" id="rfPick">📂 폴더 선택</button><span class="picked" id="rfPath">선택 안 함</span></div></label>
+      <label>이름 (영문·숫자·-_.)<input class="field" name="name" required maxlength="40"></label>
+      <label>작업 방식<select class="field" name="workspace">
+        <option value="copy">📦 복사본에서 작업 → 패치로 받기 (일반 코드 저장소)</option>
+        <option value="inplace">✏️ 원본에서 작업 + 되돌리기 (Unreal 처럼 무거운 저장소)</option>
+        <option value="none">읽기 전용</option></select></label>
+      <label>검증 명령 (한 줄에 하나, 예: uv run pytest -q)<textarea class="field" name="verify" style="min-height:60px"></textarea></label>
+      <label>메모 (AI 에게 매번 전달, 짧게)<textarea class="field" name="notes" style="min-height:60px" maxlength="400"></textarea></label>
+      <div class="row" style="display:flex;gap:8px;justify-content:flex-end">
+        <button type="button" class="btn btn-ghost" id="rfCancel">취소</button><button class="btn btn-primary">등록</button></div>
+    </form></div>`;
+  document.body.appendChild(bg);
+  let folder = null;
+  const form = bg.querySelector("#repoForm");
+  bg.querySelector("#rfCancel").onclick = () => bg.remove();
+  bg.onclick = (e) => { if (e.target === bg) bg.remove(); };
+  bg.querySelector("#rfPick").onclick = async () => {
+    const path = await pickFolder(folder);
+    if (!path) return;
+    folder = path;
+    bg.querySelector("#rfPath").textContent = path;
+    if (!form.name.value) form.name.value = path.split(/[\\/]/).filter(Boolean).pop().replace(/[^A-Za-z0-9_.-]/g, "-").slice(0, 40);
+  };
+  form.onsubmit = async (ev) => {
+    ev.preventDefault();
+    if (!folder) return toast("폴더를 선택하세요", true);
+    const f = Object.fromEntries(new FormData(form));
+    try {
+      await api("/repos", { method: "POST", body: JSON.stringify({
+        name: f.name, path: folder, workspace: f.workspace, notes: f.notes,
+        verify: f.verify.split("\n").map((v) => v.trim()).filter(Boolean) }) });
+      toast(`📁 ${f.name} 등록`); bg.remove(); await loadRepos(); $("repoSelect").value = f.name;
+    } catch (e) { toast(e.message, true); }
+  };
+};
+
+/* resizable, collapsible layout (remembered per browser) */
+const LAYOUT_KEY = "katae-layout";
+let L = { w1: 280, w2: null, h: {}, left: true, mid: true };
+try { L = { ...L, ...JSON.parse(localStorage.getItem(LAYOUT_KEY) || "{}") }; } catch {}
+function saveLayout() { try { localStorage.setItem(LAYOUT_KEY, JSON.stringify(L)); } catch {} }
+function applyLayout() {
+  const app = $("app");
+  $("colLeft").classList.toggle("collapsed", !L.left);
+  $("colMid").classList.toggle("collapsed", !L.mid);
+  const cols = [
+    L.left ? `${L.w1}px` : "0px", L.left ? "14px" : "0px",
+    L.mid ? (L.w2 ? `${L.w2}px` : "minmax(320px, 1fr)") : "0px", L.mid ? "14px" : "0px",
+    "minmax(360px, 1.15fr)",
+  ];
+  app.style.gridTemplateColumns = cols.join(" ");
+  // hide, don't remove: a display:none grid item would shift every later column into the wrong track
+  document.querySelector('[data-split="1"]').style.visibility = L.left ? "" : "hidden";
+  document.querySelector('[data-split="2"]').style.visibility = L.mid ? "" : "hidden";
+  for (const [id, h] of Object.entries(L.h)) { const el = $(id); if (el) { el.style.flex = h ? `0 0 ${h}px` : "0 0 auto"; } }
+  $("tgLeft").classList.toggle("on", !L.left);
+  $("tgMid").classList.toggle("on", !L.mid);
+  $("tgFocus").classList.toggle("on", !L.left && !L.mid);
+}
+document.querySelectorAll(".split").forEach((sp) => {
+  sp.onpointerdown = (ev) => {
+    ev.preventDefault();
+    try { sp.setPointerCapture(ev.pointerId); } catch {}
+    sp.classList.add("drag"); document.body.classList.add("dragging");
+    const which = sp.dataset.split;
+    const startX = ev.clientX;
+    const start = which === "1" ? $("colLeft").getBoundingClientRect().width : $("colMid").getBoundingClientRect().width;
+    sp.onpointermove = (m) => {
+      const w = Math.max(200, Math.min(window.innerWidth - 520, start + m.clientX - startX));
+      if (which === "1") L.w1 = Math.round(w); else L.w2 = Math.round(w);
+      applyLayout();
+    };
+    sp.onpointerup = () => {
+      sp.onpointermove = null; sp.classList.remove("drag"); document.body.classList.remove("dragging"); saveLayout();
+    };
+  };
+  sp.ondblclick = () => { if (sp.dataset.split === "1") L.w1 = 280; else L.w2 = null; applyLayout(); saveLayout(); };
+});
+document.querySelectorAll(".vsplit").forEach((sp) => {
+  sp.onpointerdown = (ev) => {
+    ev.preventDefault();
+    try { sp.setPointerCapture(ev.pointerId); } catch {}
+    const target = $(sp.dataset.target);
+    const startY = ev.clientY, start = target.getBoundingClientRect().height;
+    sp.classList.add("drag"); document.body.classList.add("dragging-row");
+    sp.onpointermove = (m) => {
+      const colH = target.parentElement.getBoundingClientRect().height;
+      L.h[sp.dataset.target] = Math.round(Math.max(80, Math.min(colH - 140, start + m.clientY - startY)));
+      applyLayout();
+    };
+    sp.onpointerup = () => {
+      sp.onpointermove = null; sp.classList.remove("drag"); document.body.classList.remove("dragging-row"); saveLayout();
+    };
+  };
+  sp.ondblclick = () => { delete L.h[sp.dataset.target]; $(sp.dataset.target).style.flex = "0 0 auto"; saveLayout(); };
+});
+$("tgLeft").onclick = () => { L.left = !L.left; applyLayout(); saveLayout(); };
+$("tgMid").onclick = () => { L.mid = !L.mid; applyLayout(); saveLayout(); };
+$("tgFocus").onclick = () => { const focus = L.left || L.mid; L.left = L.mid = !focus; applyLayout(); saveLayout(); };
+$("tgReset").onclick = () => { L = { w1: 280, w2: null, h: {}, left: true, mid: true }; ["runPanel", "sessionPanel"].forEach((id) => $(id).style.flex = "0 0 auto"); applyLayout(); saveLayout(); };
+applyLayout();
+
 /* tabs, search, new session */
 $("tabs").onclick = (ev) => {
   const b = ev.target.closest(".tab"); if (!b) return;
@@ -818,6 +1020,7 @@ $("search").onkeydown = async (ev) => {
 async function loadRepos() {
   let repos = [];
   try { repos = await api("/repos"); } catch { return; }
+  S.repos = repos;
   $("repoSelect").innerHTML = `<option value="">📁 등록된 저장소 선택…</option>` + repos.map((r) =>
     `<option value="${esc(r.name)}" ${r.exists ? "" : "disabled"}>${esc(r.name)}${r.branch ? ` · ${esc(r.branch)}` : ""}${r.dirty ? ` · 미커밋 ${r.dirty}` : ""}${r.exists ? "" : " (경로 없음)"}</option>`).join("");
 }
@@ -826,11 +1029,12 @@ loadRepos();
 $("newSession").onsubmit = async (ev) => {
   ev.preventDefault();
   const body = Object.fromEntries(new FormData(ev.target));
-  if (!body.repo && !body.workdir) return toast("저장소를 고르거나 경로를 입력하세요", true);
+  if (!body.repo && !body.workdir) return toast("저장소를 고르거나 폴더를 선택하세요", true);
   for (const k of ["repo", "workdir"]) if (!body[k]) delete body[k];
   try {
     const s = await api("/sessions", { method: "POST", body: JSON.stringify(body) });
-    ev.target.reset(); toast("🌱 세션 시작"); openSession(s.id);
+    ev.target.reset(); $("workdirValue").value = ""; $("workdirLabel").textContent = "또는 등록 안 된 폴더 고르기";
+    toast("🌱 세션 시작"); openSession(s.id);
   } catch (e) { toast(e.message, true); }
 };
 

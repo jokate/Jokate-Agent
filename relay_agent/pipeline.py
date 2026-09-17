@@ -32,7 +32,7 @@ from .providers import LEGACY_RUNNER, ProviderRegistry
 from .runners import Runner, RunnerError, StageCall, make_runner
 from .usage import UsageStore
 from .repos import RepoRegistry, RepoSpec
-from .workspace import DEFAULT_EXCLUDES, Workspace, WorkspaceError
+from .workspace import DEFAULT_EXCLUDES, Workspace, WorkspaceError, dir_size, gc_shadow
 
 WRITE_TOOLS = {"Edit", "Write", "Bash", "NotebookEdit"}
 VERIFY_NOISE_PREFIX = re.compile(r'^cd\s+("[^"]*"|\S+)\s*&&\s*')
@@ -159,7 +159,11 @@ class RelayEngine:
         extra_allowed_tools: list[str] | None = None,
         repos: RepoRegistry | None = None,
         mcp_registry: dict[str, dict] | None = None,
+        max_snapshot_mb: float = 500,
+        max_file_mb: float = 20,
     ):
+        self.max_snapshot_mb = max_snapshot_mb
+        self.max_file_mb = max_file_mb
         self.extra_allowed_tools = extra_allowed_tools or []
         self.repos = repos or RepoRegistry()
         self.mcp_registry = mcp_registry or {}
@@ -221,7 +225,13 @@ class RelayEngine:
         repo = self._repo(run)
         if repo:
             excludes += repo.excludes
-        return Workspace(self._dir(run.id), Path(run.workdir), run.workspace_mode, excludes)
+        return Workspace(
+            self._dir(run.id), Path(run.workdir), run.workspace_mode, excludes,
+            shadow_root=self.runs_dir / "shadow",
+            include_ignored=bool(repo and repo.include_ignored),
+            max_snapshot_mb=(repo.max_snapshot_mb if repo and repo.max_snapshot_mb else self.max_snapshot_mb),
+            max_file_mb=self.max_file_mb,
+        )
 
     def _repo(self, run: RunState) -> RepoSpec | None:
         return self.repos.repos.get(run.repo) if run.repo else None
@@ -379,7 +389,36 @@ class RelayEngine:
             self._event(run, "-", "workspace_cleaned", decided=decided)
             self.save(run)
             cleaned.append(run.id)
+        freed += gc_shadow(self.runs_dir / "shadow")
         return {"cleaned": cleaned, "freed_mb": round(freed / 1_048_576, 1)}
+
+    def disk_usage(self) -> dict:
+        """Where the bytes are: shared snapshot stores (per repo), working copies, patches, databases."""
+        stores = []
+        shadow = self.runs_dir / "shadow"
+        names = {}
+        for repo in self.repos.repos.values():
+            if repo.resolved:
+                from .workspace import shadow_dir_for
+                names[shadow_dir_for(shadow, repo.resolved).name] = repo.name
+        for store in sorted(shadow.glob("*.git")) if shadow.exists() else []:
+            stores.append({"store": store.name, "repo": names.get(store.name), "mb": round(dir_size(store) / 1_048_576, 1)})
+        copies, patches, runs = 0, 0, []
+        for d in self.runs_dir.iterdir() if self.runs_dir.exists() else []:
+            if not d.is_dir() or d.name in ("shadow", "locks"):
+                continue
+            size = dir_size(d)
+            copies += dir_size(d / "workspace") if (d / "workspace").exists() else 0
+            patches += (d / "result.patch").stat().st_size if (d / "result.patch").exists() else 0
+            runs.append((d.name, size))
+        dbs = sum(f.stat().st_size for f in self.runs_dir.glob("*.sqlite*")) if self.runs_dir.exists() else 0
+        total = dir_size(self.runs_dir) if self.runs_dir.exists() else 0
+        mb = lambda b: round(b / 1_048_576, 1)  # noqa: E731
+        return {
+            "total_mb": mb(total), "snapshot_stores": stores, "working_copies_mb": mb(copies),
+            "patches_mb": mb(patches), "databases_mb": mb(dbs), "runs": len(runs),
+            "largest_runs": [{"run": r, "mb": mb(s)} for r, s in sorted(runs, key=lambda x: -x[1])[:5]],
+        }
 
     def recover_interrupted(self) -> list[str]:
         """Runs left 'running' by a server stop are marked failed so they can be resumed."""
@@ -439,8 +478,10 @@ class RelayEngine:
                 run.changes_status = "rolled_back"
         except WorkspaceError as e:
             raise ValueError(str(e)) from e
+        run.workspace_cleaned = True
         self._event(run, "-", f"changes_{run.changes_status}", files=(run.changes or {}).get("files", 0))
         self.save(run)
+        gc_shadow(self.runs_dir / "shadow")
         return run
 
     def apply_changes(self, run_id: str) -> RunState:
@@ -765,5 +806,11 @@ class RelayEngine:
         run.baton.stop = None
         self._event(run, "-", "run_done")
         self._settle_workspace(run)
+        if ws is not None and run.changes_status == "none" and not run.workspace_cleaned:
+            try:
+                ws.cleanup()
+                run.workspace_cleaned = True
+            except OSError:
+                pass
         self.save(run)
         return run

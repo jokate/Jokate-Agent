@@ -1,5 +1,5 @@
 name: quick
-description: 기본 추천 — 작은 작업 단일 주자(Sonnet → 안 되면 Opus/다른 AI) · 복사본 작업 후 패치 반환
+description: 기본 추천 — 작은 작업을 한 주자가 처리 · 복사본 작업 후 패치 반환
 workspace: copy
 max_run_cost_usd: 0.8
 

@@ -65,6 +65,19 @@ uv run relay repo clone mnys --url <git url>          # on a new machine: clone 
 - **MCP recording:** `mcp_call` (server.tool + arguments) and `mcp_result` (result size); oversized tool results are flagged as `tool_result_large`.
 - **Timeline:** tool calls fold into per-stage counts (click to expand). In the terminal, `relay log` is compact and `--full` shows everything.
 
+## Disk usage (snapshot design)
+- **Snapshot store shared per repo** (`runs/shadow/<hash>.git`): each run is just a ref plus its own index, so repeated runs store only what changed. Measured: 5 snapshots of the same repo ≈ disk size of 1.
+- **`.gitignore` respected by default**: build output, caches, and Unity `Library` are excluded. Per repo you can set `include_ignored: true`.
+- **Wide default excludes**: `node_modules .venv dist build out target obj bin .next Library Temp Binaries Intermediate Saved Content *.uasset *.pak *.fbx *.mp4 …`; add more per repo with `excludes`.
+- **Size limit**: a snapshot over `max_snapshot_mb` (default 500) is **refused before starting**, naming the biggest folders; single files over `max_file_mb` (default 20) are left out and reported.
+- **Cleanup**: copies from runs with no changes are deleted right after the run; applied/discarded/rolled-back runs are cleaned immediately; undecided runs after `workspace_retention_days` (default 3). `result.patch` is kept (a patch can still be applied later). Unreferenced snapshots are removed with `git gc`.
+- Check / clean up: `uv run relay disk`, `uv run relay cleanup`.
+
+## Dashboard layout and selections
+- **Resizing**: drag the column dividers (double-click to reset), drag the divider between top and bottom panels to change height, use the header buttons to collapse the session/history columns or enlarge the result view (⛶). Sizes are remembered per browser.
+- **Choose paths instead of typing**: the new session and repo registration forms use a **📂 folder picker** (this PC only). Registered repos are chosen from a dropdown.
+- **Relays** are shown by role and model tier (lightweight/standard/advanced/top), not vendor names; relays that support automatic switching show "switches to another AI when usage runs low".
+
 ## Getting work back (workspace)
 The folder is snapshotted into a private git repo right before a run (`runs/<id>/shadow.git`). **Uncommitted work is included, and the target repo's own git is never touched.**
 | Mode | Behavior | Fits |

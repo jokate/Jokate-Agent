@@ -37,6 +37,8 @@ class RepoSpec(BaseModel):
     allowed_tools: list[str] = Field(default_factory=list)
     docs: str | None = None
     excludes: list[str] = Field(default_factory=list)
+    include_ignored: bool = False  # also snapshot files the repo's .gitignore hides
+    max_snapshot_mb: float | None = None  # override the global snapshot size limit
     notes: str = ""
 
     @property
@@ -87,6 +89,24 @@ def git_info(path: Path) -> dict:
     status = git("status", "--porcelain") or ""
     return {"git": True, "branch": git("branch", "--show-current") or "(detached)",
             "head": (git("rev-parse", "--short", "HEAD") or "")[:12], "dirty": len(status.splitlines())}
+
+
+def save_local_repo(local_file: Path, name: str, fields: dict | None, remove: bool = False) -> None:
+    """Add/update/remove a repo entry in relay.config.local.yaml (this machine only)."""
+    import yaml
+
+    data = (yaml.safe_load(local_file.read_text(encoding="utf-8")) if local_file.exists() else None) or {}
+    repos = data.setdefault("repos", {})
+    if remove:
+        repos.pop(name, None)
+    else:
+        entry = repos.setdefault(name, {})
+        entry.update({k: v for k, v in (fields or {}).items() if v not in (None, "", [])})
+    local_file.write_text("# This machine only (git-ignored).\n" + yaml.safe_dump(data, allow_unicode=True, sort_keys=False),
+                          encoding="utf-8")
+
+
+TIER = {"haiku": "경량", "sonnet": "표준", "opus": "고급", "fable": "최상급"}
 
 
 class RepoRegistry:

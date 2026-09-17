@@ -29,7 +29,11 @@ class Config(BaseModel):
     # folders/globs never snapshotted into a workspace; None = workspace.DEFAULT_EXCLUDES
     workspace_excludes: list[str] | None = None
     # Workspaces nobody decided on (patch not applied, resumable failures) are deleted after this many days.
-    workspace_retention_days: float = 7
+    workspace_retention_days: float = 3
+    # A snapshot larger than this is refused before anything is written (names the biggest folders).
+    max_snapshot_mb: float = 500
+    # Single files larger than this are left out of snapshots (reported in workspace_ready).
+    max_file_mb: float = 20
     # Registered repositories (see repos.py). Shared rules here, each machine's `path` in the local file.
     repos: dict[str, dict] = {}
     # Where `relay repo clone` puts repositories that have a url but no path on this machine.
@@ -90,6 +94,8 @@ def build_engine(cfg: Config):
         runner_factory=lambda name: make_runner(name, providers, cfg.mcp_registry),
         providers=providers,
         workspace_excludes=cfg.workspace_excludes,
+        max_snapshot_mb=cfg.max_snapshot_mb,
+        max_file_mb=cfg.max_file_mb,
         extra_allowed_tools=cfg.extra_allowed_tools,
         repos=RepoRegistry(cfg.repos),
         mcp_registry=cfg.mcp_registry,

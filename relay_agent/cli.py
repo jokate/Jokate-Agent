@@ -234,6 +234,7 @@ def main() -> None:
     p_serve.add_argument("--host", default="127.0.0.1")
     p_serve.add_argument("--port", type=int, default=8020)
     sub.add_parser("doctor", help="check this machine: git, claude login, providers, config paths")
+    sub.add_parser("disk", help="where the disk space goes (snapshots, working copies, patches)")
     p_clean = sub.add_parser("cleanup", help="delete decided/expired workspaces (result.patch is kept)")
     p_clean.add_argument("--days", type=float, default=None)
     args = parser.parse_args()
@@ -248,6 +249,16 @@ def main() -> None:
         return
     if args.cmd == "doctor":
         sys.exit(doctor(cfg))
+    if args.cmd == "disk":
+        d = build_engine(cfg).disk_usage()
+        print(f"runs 전체 {d['total_mb']} MB · 실행 {d['runs']}개")
+        print(f"  작업 복사본 {d['working_copies_mb']} MB · 패치 {d['patches_mb']} MB · DB {d['databases_mb']} MB")
+        for s in d["snapshot_stores"]:
+            print(f"  스냅샷 저장소 {s['repo'] or s['store']}: {s['mb']} MB (실행 간 공유)")
+        for r in d["largest_runs"]:
+            print(f"  큰 실행 {r['run']}: {r['mb']} MB")
+        print("정리: relay cleanup  (결정된 실행은 즉시, 미결정은 보관 기간 후. result.patch 는 남음)")
+        return
     if args.cmd == "cleanup":
         r = build_engine(cfg).cleanup_workspaces(cfg.workspace_retention_days if args.days is None else args.days)
         print(f"정리 {len(r['cleaned'])}개 실행 · {r['freed_mb']} MB 확보")

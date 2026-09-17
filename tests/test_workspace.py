@@ -63,16 +63,20 @@ def test_inplace_mode_rollback_restores_and_removes_new_files(tmp_path):
     assert src.joinpath("Content", "Hero.uasset").exists()  # excluded content never touched
 
 
-def test_snapshot_includes_uncommitted_work_of_a_git_repo(tmp_path):
+def test_snapshot_respects_gitignore_unless_opted_in(tmp_path):
     import subprocess
 
     src = make_project(tmp_path)
     subprocess.run(["git", "init", "-q"], cwd=src, check=True)
-    (src / ".gitignore").write_text("app/\n", encoding="utf-8")  # even ignored source files are captured
+    (src / ".gitignore").write_text("app/\n", encoding="utf-8")
     ws = Workspace(tmp_path / "run", src, "copy")
     ws.prepare()
-    assert (ws.path / "app" / "main.py").exists()
+    assert not (ws.path / "app" / "main.py").exists() and (ws.path / "README.md").exists()
     assert not (src / ".git" / "refs" / "heads" / "master").exists()  # target repo's git untouched
+
+    opted = Workspace(tmp_path / "run2", src, "copy", include_ignored=True)
+    opted.prepare()
+    assert (opted.path / "app" / "main.py").exists()
 
 
 def test_interrupted_prepare_is_redone(tmp_path):

@@ -115,16 +115,32 @@ def dashboard() -> str:
     return DASHBOARD.read_text(encoding="utf-8")
 
 
+STAGE_KO = {"scout": "정찰", "plan": "설계", "build": "구현", "review": "검토", "answer": "답변", "cross_review": "교차검토"}
+
+
 @app.get("/relays")
 def list_relays() -> list[dict]:
+    """Relays described by role and model tier, not by vendor: any provider may run a stage."""
+    from .repos import TIER
+
     out = []
     for p in sorted(cfg.relays_dir.glob("*.yaml")):
         spec, _ = RelaySpec.load(p)
+        steps = []
+        for s in spec.stages:
+            tier = TIER.get((s.model or "").lower(), s.model or "기본")
+            extra = ["승인"] if s.gate == "human" else []
+            if s.retry_model:
+                extra.append(f"재시도 {TIER.get(s.retry_model, s.retry_model)}")
+            if s.primary == "mock":
+                tier = "모의"
+            steps.append(f"{STAGE_KO.get(s.name, s.name)}({tier}{'·' + '·'.join(extra) if extra else ''})")
         out.append({
             "name": p.stem,
             "description": spec.description,
             "workspace": spec.workspace,
-            "stages": [f"{s.name}({s.primary}:{s.model}{', 승인' if s.gate == 'human' else ''})" for s in spec.stages],
+            "stages": steps,
+            "switchable": any(s.alternates for s in spec.stages),
         })
     return out
 
@@ -197,6 +213,89 @@ def create_session(body: CreateSession, request: Request) -> dict:
 def list_repos() -> list[dict]:
     """Registered repositories with path, git branch/dirty state and their defaults."""
     return engine.repos.status()
+
+
+class RepoIn(BaseModel):
+    name: str
+    path: str
+    workspace: str | None = None
+    verify: list[str] = []
+    docs: str | None = None
+    notes: str | None = None
+
+
+def _reload_repos() -> None:
+    from .repos import RepoRegistry
+
+    fresh = Config.load()
+    cfg.repos = fresh.repos
+    engine.repos = RepoRegistry(fresh.repos)
+
+
+@app.post("/repos")
+def register_repo(body: RepoIn, request: Request) -> list[dict]:
+    """Register (or update) a repository on this machine from the dashboard."""
+    import re
+
+    from .config import ROOT
+    from .repos import save_local_repo
+
+    if _is_remote(request):
+        raise HTTPException(403, "저장소 등록은 이 PC 에서만 할 수 있습니다")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,40}", body.name):
+        raise HTTPException(400, "이름은 영문·숫자·-_. 만 (40자 이내)")
+    folder = Path(body.path)
+    if not folder.is_dir():
+        raise HTTPException(400, f"폴더가 없습니다: {body.path}")
+    if body.workspace not in (None, "", "copy", "inplace", "none"):
+        raise HTTPException(400, "workspace 는 copy / inplace / none")
+    save_local_repo(ROOT / "relay.config.local.yaml", body.name, {
+        "path": folder.resolve().as_posix(), "workspace": body.workspace or None,
+        "verify": [v for v in body.verify if v.strip()], "docs": body.docs, "notes": body.notes,
+    })
+    _reload_repos()
+    return engine.repos.status()
+
+
+@app.delete("/repos/{name}")
+def unregister_repo(name: str, request: Request) -> list[dict]:
+    from .config import ROOT
+    from .repos import save_local_repo
+
+    if _is_remote(request):
+        raise HTTPException(403, "저장소 삭제는 이 PC 에서만 할 수 있습니다")
+    save_local_repo(ROOT / "relay.config.local.yaml", name, None, remove=True)
+    _reload_repos()
+    return engine.repos.status()
+
+
+@app.get("/fs/list")
+def fs_list(request: Request, path: str | None = None) -> dict:
+    """Folder picker for the dashboard (this PC only): drives/home at the top, sub-folders below."""
+    import os
+    import string
+
+    if _is_remote(request):
+        raise HTTPException(403, "폴더 탐색은 이 PC 에서만 할 수 있습니다")
+    home = Path.home()
+    if not path:
+        roots = [{"name": f"{d}:\\", "path": f"{d}:\\"} for d in string.ascii_uppercase
+                 if os.name == "nt" and os.path.exists(f"{d}:\\")] or [{"name": "/", "path": "/"}]
+        shortcuts = [{"name": n, "path": str(p)} for n, p in (("홈", home), ("Projects", home / "Projects"),
+                                                                 ("바탕 화면", home / "Desktop")) if p.is_dir()]
+        return {"path": None, "parent": None, "dirs": shortcuts + roots, "is_repo": False}
+    folder = Path(path).expanduser()
+    if not folder.is_dir():
+        raise HTTPException(404, f"폴더가 없습니다: {path}")
+    try:
+        entries = sorted((e for e in os.scandir(folder) if e.is_dir(follow_symlinks=False)
+                          and not e.name.startswith(("$", "."))), key=lambda e: e.name.lower())
+        dirs = [{"name": e.name, "path": e.path} for e in entries[:500]]
+    except PermissionError:
+        dirs = []
+    parent = str(folder.parent) if folder.parent != folder else ""
+    return {"path": str(folder.resolve()), "parent": parent, "dirs": dirs,
+            "is_repo": (folder / ".git").exists(), "registered": (m.name if (m := engine.repos.match(folder)) else None)}
 
 
 @app.get("/repos/match")
@@ -410,6 +509,16 @@ def discard_changes(run_id: str) -> RunState:
 def rollback_changes(run_id: str) -> RunState:
     _load(run_id)
     return _conflict(engine.rollback_changes, run_id)
+
+
+@app.get("/disk")
+def get_disk() -> dict:
+    return engine.disk_usage()
+
+
+@app.post("/disk/cleanup")
+def post_cleanup(days: float | None = None) -> dict:
+    return engine.cleanup_workspaces(cfg.workspace_retention_days if days is None else days)
 
 
 @app.get("/usage")

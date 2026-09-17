@@ -1,5 +1,5 @@
 name: demo
-description: 비용 0 — mock 러너로 흐름 확인(승인 대기 포함, 작업 공간 없음)
+description: 비용 0 — 모의 실행으로 화면·흐름 확인
 
 stages:
   - {name: scout, provider: mock, model: haiku, prompt: ../prompts/scout.md}
