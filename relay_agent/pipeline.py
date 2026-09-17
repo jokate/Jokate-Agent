@@ -642,23 +642,45 @@ class RelayEngine:
                             reason=str(last_error)[:200] if last_error else "기본 AI 사용 불가")
             is_claude = name in ("claude", "anthropic_api", "mock") or (
                 self.providers is not None and self.providers.get(name).kind in ("claude_cli", "api"))
-            attempt = replace(
-                call,
-                model=self._model_for(name, option.get("model") or call.model),
-                effort=option.get("effort") or call.effort,
-                fallback_model=call.fallback_model if is_claude else None,
-            )
-            try:
-                return self._runner(name).run(attempt)
-            except RunnerError as e:
-                if e.kind == "cancelled":
-                    raise
-                last_error = e
-                if e.kind == "quota" and self.providers is not None:
-                    until = self.providers.mark_exhausted(name, str(e)[:200])
-                    self._event(run, stage.name, "provider_exhausted", provider=name, until=until)
-                if e.kind not in ("quota", "unavailable") or i == len(options) - 1:
-                    raise
+            requested = self._model_for(name, option.get("model") or call.model)
+            while True:
+                model = requested
+                if is_claude and self.providers is not None:
+                    model = self.providers.usable_model(name, requested, call.fallback_model)
+                    if model is None:
+                        last_error = RunnerError(f"{name}: 사용할 수 있는 모델이 모두 사용량 소진", "quota")
+                        break
+                    if model != requested:
+                        self._event(run, stage.name, "model_substituted", provider=name, requested=requested, used=model,
+                                    until=self.providers.model_exhausted_until(name, requested))
+                attempt = replace(
+                    call, model=model, effort=option.get("effort") or call.effort,
+                    fallback_model=(call.fallback_model if call.fallback_model != model else None) if is_claude else None,
+                )
+                try:
+                    return self._runner(name).run(attempt)
+                except RunnerError as err:
+                    if err.kind == "cancelled":
+                        raise
+                    last_error = err
+                    if err.kind == "quota" and self.providers is not None and is_claude:
+                        hit_model = getattr(err, "model", None) or model
+                        overall = self.providers.overall_limited(name) or (
+                            getattr(err, "limit_type", None) in self.providers.get(name).gate_windows)
+                        lower = self.providers.LADDER
+                        can_step_down = self.providers.tier(hit_model) in lower[:-1]
+                        if not overall and can_step_down:
+                            # only this model is out (e.g. Fable 100% while overall usage is 8%): stay on this AI
+                            until = self.providers.mark_model_exhausted(name, hit_model, getattr(err, "resets_at", None),
+                                                                        str(err)[:200])
+                            self._event(run, stage.name, "model_exhausted", provider=name, model=hit_model, until=until)
+                            continue
+                    if err.kind == "quota" and self.providers is not None:
+                        until = self.providers.mark_exhausted(name, str(err)[:200])
+                        self._event(run, stage.name, "provider_exhausted", provider=name, until=until)
+                    break
+            if last_error is None or last_error.kind not in ("quota", "unavailable") or i == len(options) - 1:
+                raise last_error or RunnerError("no provider ran")
         raise last_error or RunnerError("no provider ran")
 
     def advance(self, run_id: str, resume: bool = False) -> RunState:

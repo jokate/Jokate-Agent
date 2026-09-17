@@ -278,7 +278,8 @@ class ClaudeCliRunner:
             return self._run_once(call, call.model)
         except RunnerError as e:
             # A timeout would just burn the same time again (on a half-edited workspace); a cancel is final.
-            if e.kind in ("cancelled", "timeout") or not call.fallback_model or call.fallback_model == call.model:
+            # A usage limit goes to the engine, which benches just that model and remembers it for later stages.
+            if e.kind in ("cancelled", "timeout", "quota") or not call.fallback_model or call.fallback_model == call.model:
                 raise
             call.emit("model_fallback", {"from": call.model, "to": call.fallback_model, "reason": str(e)[:300]})
             return self._run_once(call, call.fallback_model)
@@ -309,6 +310,8 @@ class ClaudeCliRunner:
                 elif event.get("type") == "rate_limit_event":
                     info = event.get("rate_limit_info") or {}
                     box["limit_status"] = info.get("status")
+                    box["limit_type"] = info.get("rateLimitType")
+                    box["limit_resets"] = info.get("resetsAt")
                     self._emit_limits(call, info)
                 else:
                     self._emit_activity(call, event, pending)
@@ -316,10 +319,17 @@ class ClaudeCliRunner:
             code, stderr = run_process(self.build_args(call, cfg_path), call, call.prompt, on_line)
         data = box.get("result")
         rejected = box.get("limit_status") == "rejected"  # structured signal from Claude Code itself
+
+        def error(message: str, kind: str) -> RunnerError:
+            err = RunnerError(message, kind)
+            # which model hit which limit, so the engine can bench just that model (e.g. Fable) and not all of Claude
+            err.model, err.limit_type, err.resets_at = model, box.get("limit_type"), box.get("limit_resets")
+            return err
+
         if data is None:
             text = stderr[-500:]
-            raise RunnerError(f"claude -p ended without a result (exit {code}): {text}",
-                              "quota" if rejected or looks_like_quota(text) else "error")
+            raise error(f"claude -p ended without a result (exit {code}): {text}",
+                        "quota" if rejected or looks_like_quota(text) else "error")
         if data.get("is_error") or "structured_output" not in data:
             subtype = data.get("subtype") or ""
             # error results often carry no "result" text: the reason is in subtype / errors / terminal_reason
@@ -336,7 +346,7 @@ class ClaudeCliRunner:
                 text = f"결과 없음 (subtype={subtype or '?'}, stop={data.get('stop_reason')}, turns={data.get('num_turns')})"
             # Only an error result can be a limit message; a normal answer that merely mentions "limit" is not.
             quota = rejected or data.get("api_error_status") == 429 or (data.get("is_error") and looks_like_quota(text))
-            raise RunnerError(f"claude -p failed: {text}", "quota" if quota else "error")
+            raise error(f"claude -p failed: {text}", "quota" if quota else "error")
         u = data.get("usage", {})
         served = [m for m in (data.get("modelUsage") or {}) if "haiku" not in m or "haiku" in (call.model or "")]
         usage = Usage(

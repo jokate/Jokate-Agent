@@ -91,6 +91,69 @@ def test_model_specific_or_overage_windows_do_not_bench_the_provider(tmp_path):
     assert engine.providers.status("claude")["available"] is False  # overall usage still switches
 
 
+def _quota(model, limit_type):
+    err = RunnerError(f"{model} limit reached", "quota")
+    err.model, err.limit_type, err.resets_at = model, limit_type, None
+    return err
+
+
+class ModelLimited(Named):
+    """Claude where only some models are out of usage."""
+
+    def __init__(self, out: set[str], limit_type="seven_day_fable"):
+        super().__init__("claude")
+        self.out, self.limit_type, self.models = out, limit_type, []
+
+    def run(self, call):
+        self.models.append(call.model)
+        if call.model in self.out:
+            raise _quota(call.model, self.limit_type)
+        return super().run(call)
+
+
+def test_fable_only_limit_steps_down_on_claude_and_is_remembered(tmp_path):
+    claude, codex = ModelLimited({"fable"}), Named("codex")
+    engine, relay = engine_with(tmp_path, """
+name: r
+stages:
+  - {name: plan, provider: claude, model: fable, fallback_model: opus, prompt: role.md, alternates: [{provider: codex}]}
+  - {name: review, provider: claude, model: fable, prompt: role.md, alternates: [{provider: codex}]}
+""", {"claude": claude, "codex": codex}, {"claude": MOCKISH, "codex": MOCKISH})
+    reset = (datetime.now(timezone.utc) + timedelta(days=2)).timestamp()
+    engine.history.record_limits("claude", "allowed", [{"window": "five_hour", "utilization": 0.05, "resets_at": reset},
+                                                       {"window": "seven_day", "utilization": 0.08, "resets_at": reset}])
+    run = engine.advance(engine.create(relay, "g", tmp_path).id)
+    assert run.status == "done" and not codex.calls  # never left Claude
+    assert claude.models == ["fable", "opus", "opus"]  # second stage skips Fable up front
+    kinds = [e["kind"] for e in engine.history.events(run.id)]
+    assert "model_exhausted" in kinds and "model_substituted" in kinds and "provider_exhausted" not in kinds
+    status = engine.providers.status("claude")
+    assert status["available"] and status["exhausted_models"][0]["model"] == "fable"
+
+
+def test_overall_limit_still_switches_to_another_ai(tmp_path):
+    claude, codex = ModelLimited({"fable", "opus", "sonnet"}, limit_type="seven_day"), Named("codex")
+    engine, relay = engine_with(tmp_path, """
+name: r
+stages:
+  - {name: plan, provider: claude, model: fable, prompt: role.md, alternates: [{provider: codex}]}
+""", {"claude": claude, "codex": codex}, {"claude": MOCKISH, "codex": MOCKISH})
+    run = engine.advance(engine.create(relay, "g", tmp_path).id)
+    assert run.status == "done" and claude.models == ["fable"] and codex.calls
+    assert "provider_exhausted" in [e["kind"] for e in engine.history.events(run.id)]
+
+
+def test_every_ladder_model_out_then_switches(tmp_path):
+    claude, codex = ModelLimited({"fable", "opus", "sonnet"}), Named("codex")
+    engine, relay = engine_with(tmp_path, """
+name: r
+stages:
+  - {name: plan, provider: claude, model: fable, prompt: role.md, alternates: [{provider: codex}]}
+""", {"claude": claude, "codex": codex}, {"claude": MOCKISH, "codex": MOCKISH})
+    run = engine.advance(engine.create(relay, "g", tmp_path).id)
+    assert run.status == "done" and claude.models == ["fable", "opus", "sonnet"] and codex.calls
+
+
 def test_expired_window_no_longer_blocks(tmp_path):
     engine, _ = engine_with(tmp_path, "name: r\nstages: []\n", {}, {"claude": MOCKISH})
     past = (datetime.now(timezone.utc) - timedelta(minutes=1)).timestamp()

@@ -165,6 +165,7 @@ class ProviderRegistry:
                     state.update(available=False,
                                  reason=f"{row['window']} 사용률 {row['utilization']:.0%} — {reset_txt} 초기화")
             state["limits"] = limits
+            state["exhausted_models"] = self.exhausted_models(name)
             until = self.history.provider_exhausted_until(name)
             if ok and state["available"] and until:
                 state.update(available=False, reason=f"사용량 한도 — {until} 까지 대기", exhausted_until=until)
@@ -193,6 +194,65 @@ class ProviderRegistry:
             else:
                 usable.append(option)
         return usable, skipped
+
+    # model tiers, strongest first; a benched model steps down only within this ladder (never to haiku for real work)
+    LADDER = ["fable", "opus", "sonnet"]
+
+    @staticmethod
+    def tier(model: str | None) -> str | None:
+        low = (model or "").lower()
+        return next((t for t in ("fable", "mythos", "opus", "sonnet", "haiku") if t in low), None)
+
+    def overall_limited(self, name: str) -> bool:
+        """True when an overall usage window (gate_windows) is at/over the switch threshold."""
+        if self.history is None or name not in self.specs:
+            return False
+        spec = self.specs[name]
+        now = datetime.now(timezone.utc).timestamp()
+        for row in self.history.limits(name):
+            gating = not spec.gate_windows or row["window"] in spec.gate_windows
+            fresh = row["resets_at"] is None or row["resets_at"] > now
+            if gating and fresh and (row["utilization"] or 0) >= spec.switch_at_utilization:
+                return True
+        return False
+
+    def model_exhausted_until(self, name: str, model: str | None) -> str | None:
+        tier = self.tier(model)
+        return self.history.provider_exhausted_until(f"{name}:{tier}") if self.history and tier else None
+
+    def mark_model_exhausted(self, name: str, model: str | None, resets_at: float | None, reason: str) -> str | None:
+        tier = self.tier(model)
+        if self.history is None or not tier:
+            return None
+        if resets_at and resets_at > datetime.now(timezone.utc).timestamp():
+            until = datetime.fromtimestamp(resets_at, timezone.utc).isoformat(timespec="seconds")
+        else:
+            minutes = self.specs[name].cooldown_min if name in self.specs else 60
+            until = (datetime.now(timezone.utc) + timedelta(minutes=minutes)).isoformat(timespec="seconds")
+        self.history.set_provider_exhausted(f"{name}:{tier}", until, reason)
+        return until
+
+    def usable_model(self, name: str, model: str | None, fallback: str | None = None) -> str | None:
+        """The requested model, or the next weaker ladder model that isn't benched. None = none left."""
+        tier = self.tier(model)
+        if not tier or tier not in self.LADDER:
+            return model if not self.model_exhausted_until(name, model) else None
+        chain = [model] + ([fallback] if fallback and self.tier(fallback) != tier else [])
+        chain += [t for t in self.LADDER[self.LADDER.index(tier) + 1:] if t not in {self.tier(c) for c in chain}]
+        for candidate in chain:
+            if not self.model_exhausted_until(name, candidate):
+                return candidate
+        return None
+
+    def exhausted_models(self, name: str) -> list[dict]:
+        if self.history is None:
+            return []
+        out = []
+        for tier in ("fable", "mythos", "opus", "sonnet", "haiku"):
+            until = self.history.provider_exhausted_until(f"{name}:{tier}")
+            if until:
+                out.append({"model": tier, "until": until})
+        return out
 
     def mark_exhausted(self, name: str, reason: str) -> str | None:
         if self.history is None:
