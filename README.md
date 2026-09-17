@@ -11,7 +11,7 @@ Claude near its usage limit → Codex/OpenCode/Gemini · run budget exceeded →
 ## Windows: one-click
 | File | What it does |
 |---|---|
-| `install.bat` | **New machine: grab just this file and run it** → clone to `%USERPROFILE%\Projects\Jokate-Agent`, then run setup.bat |
+| `install.bat` | **New machine: grab just this file and run it** → clone into `Jokate-Agent` under **the folder where you ran it** (or a folder given as an argument), then run setup.bat. If run inside an existing clone, installs in place |
 | `setup.bat` | Check git/uv/Claude CLI (offers to install uv via winget) → `uv sync` → create local config → `doctor` → prompt to register repos → offer to start |
 | `start.bat [port]` | Start the server and open the dashboard (if already running, just opens the dashboard) |
 | `update.bat` | `git pull --ff-only` → `uv sync` → `doctor` (stops if there are uncommitted changes) |
@@ -65,13 +65,21 @@ uv run relay repo clone mnys --url <git url>          # on a new machine: clone 
 - **MCP recording:** `mcp_call` (server.tool + arguments) and `mcp_result` (result size); oversized tool results are flagged as `tool_result_large`.
 - **Timeline:** tool calls fold into per-stage counts (click to expand). In the terminal, `relay log` is compact and `--full` shows everything.
 
-## Disk usage (snapshot design)
-- **Snapshot store shared per repo** (`runs/shadow/<hash>.git`): each run is just a ref plus its own index, so repeated runs store only what changed. Measured: 5 snapshots of the same repo ≈ disk size of 1.
-- **`.gitignore` respected by default**: build output, caches, and Unity `Library` are excluded. Per repo you can set `include_ignored: true`.
-- **Wide default excludes**: `node_modules .venv dist build out target obj bin .next Library Temp Binaries Intermediate Saved Content *.uasset *.pak *.fbx *.mp4 …`; add more per repo with `excludes`.
-- **Size limit**: a snapshot over `max_snapshot_mb` (default 500) is **refused before starting**, naming the biggest folders; single files over `max_file_mb` (default 20) are left out and reported.
-- **Cleanup**: copies from runs with no changes are deleted right after the run; applied/discarded/rolled-back runs are cleaned immediately; undecided runs after `workspace_retention_days` (default 3). `result.patch` is kept (a patch can still be applied later). Unreferenced snapshots are removed with `git gc`.
-- Check / clean up: `uv run relay disk`, `uv run relay cleanup`.
+## Disk usage — why not snapshot the whole target
+**In-place work on a git repository (e.g. Unreal) takes no project snapshot.**
+- **Baseline:** git's `HEAD`. Only files that were **already modified or untracked when the run started** are saved (to restore to that point).
+  - Measured on MNYS: 50 uncommitted files, **0.57MB**, 0.2s.
+  - Assets and build folders (`Content`, `*.uasset`, `Binaries`, …) are never saved.
+- **At the end:** the diff from that baseline becomes `result.patch`. Rollback returns to that baseline, including uncommitted work that existed before the run.
+- **The repository itself is untouched:** no index, stash, ref, or object is created (tested).
+- **Other cases (copy mode, non-git folders):** a snapshot is still used, with these limits:
+  - one shared store per repo (5 runs ≈ size of 1), `.gitignore` respected;
+  - over `max_snapshot_mb` (500) it's refused before starting;
+  - files over `max_file_mb` (20) are left out.
+
+  **Copy mode is recommended only for small code repos. For large game projects use `inplace`.**
+- **Cleanup:** runs with no changes are cleaned right away; applied, discarded, or rolled-back runs immediately; undecided runs after 3 days. `result.patch` is kept.
+- `uv run relay disk` (where space goes), `uv run relay cleanup` (free it).
 
 ## Dashboard layout and selections
 - **Resizing**: drag the column dividers (double-click to reset), drag the divider between top and bottom panels to change height, use the header buttons to collapse the session/history columns or enlarge the result view (⛶). Sizes are remembered per browser.
@@ -79,7 +87,7 @@ uv run relay repo clone mnys --url <git url>          # on a new machine: clone 
 - **Relays** are shown by role and model tier (lightweight/standard/advanced/top), not vendor names; relays that support automatic switching show "switches to another AI when usage runs low".
 
 ## Getting work back (workspace)
-The folder is snapshotted into a private git repo right before a run (`runs/<id>/shadow.git`). **Uncommitted work is included, and the target repo's own git is never touched.**
+The target repo's own git is never touched, and uncommitted work is included. **inplace + git repo uses the git baseline (no snapshot)**; copy/non-git uses a shared snapshot store.
 | Mode | Behavior | Fits |
 |---|---|---|
 | `copy` (default/quick default) | Work happens in a copy → returned as `result.patch` → you **apply** or **discard** | Regular code projects |

@@ -37,7 +37,7 @@ class Config(BaseModel):
     # Registered repositories (see repos.py). Shared rules here, each machine's `path` in the local file.
     repos: dict[str, dict] = {}
     # Where `relay repo clone` puts repositories that have a url but no path on this machine.
-    repos_root: str = "~/katae-repos"
+    repos_root: str = ""  # empty = next to this agent folder
     # Added to every stage that has Bash. Headless runs can't ask for approval, and a denied verification
     # command was measured to burn 2.6x tokens in retries — list this machine's test/build commands here.
     extra_allowed_tools: list[str] = []

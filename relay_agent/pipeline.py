@@ -32,7 +32,8 @@ from .providers import LEGACY_RUNNER, ProviderRegistry
 from .runners import Runner, RunnerError, StageCall, make_runner
 from .usage import UsageStore
 from .repos import RepoRegistry, RepoSpec
-from .workspace import DEFAULT_EXCLUDES, Workspace, WorkspaceError, dir_size, gc_shadow
+from .workspace import (DEFAULT_EXCLUDES, GitBaselineWorkspace, Workspace, WorkspaceError, dir_size, gc_shadow,
+                        git_toplevel)
 
 WRITE_TOOLS = {"Edit", "Write", "Bash", "NotebookEdit"}
 VERIFY_NOISE_PREFIX = re.compile(r'^cd\s+("[^"]*"|\S+)\s*&&\s*')
@@ -225,6 +226,12 @@ class RelayEngine:
         repo = self._repo(run)
         if repo:
             excludes += repo.excludes
+        if run.workspace_mode == "inplace" and not (self._dir(run.id) / "snapshot.ready").exists():
+            root = git_toplevel(Path(run.workdir))
+            if root is not None:
+                # git repo: HEAD is the baseline, only uncommitted files are saved — no project snapshot
+                return GitBaselineWorkspace(self._dir(run.id), Path(run.workdir), root, excludes,
+                                            max_file_mb=self.max_file_mb)
         return Workspace(
             self._dir(run.id), Path(run.workdir), run.workspace_mode, excludes,
             shadow_root=self.runs_dir / "shadow",

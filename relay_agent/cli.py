@@ -125,7 +125,8 @@ def repo_command(args, cfg) -> str:
             url = args.url or entry.get("url") or shared.get("url")
             if not url:
                 sys.exit("clone 에는 --url 이 필요합니다 (또는 relay.config.yaml 의 repos.<이름>.url)")
-            target = Path(args.path or Path(cfg.repos_root).expanduser() / args.name).resolve()
+            base = Path(cfg.repos_root).expanduser() if cfg.repos_root else ROOT.parent  # beside the agent, not a fixed drive
+            target = Path(args.path or base / args.name).resolve()
             if not target.exists():
                 subprocess.run(["git", "clone", url, str(target)], check=True)
             entry["path"], entry["url"] = target.as_posix(), url
@@ -168,7 +169,10 @@ def doctor(cfg) -> int:
         line(any(p.exists() for p in creds), "Claude 로그인 흔적", "`claude` 를 한 번 실행해 로그인하세요 (확실한 확인: relay providers --probe)")
     for name, p in (("runs_dir", cfg.runs_dir), ("relays_dir", cfg.relays_dir)):
         line(p.exists() or name == "runs_dir", f"{name}: {p}", "경로가 없습니다")
-    line(cfg.docs_root.exists(), f"docs_root: {cfg.docs_root}", "relay.config.local.yaml 에서 이 머신의 문서 폴더로 지정 (docs-qa 용, 선택)")
+    if cfg.docs_root.exists():
+        line(True, f"docs_root: {cfg.docs_root}")
+    else:  # optional (docs-qa only): a warning, not a problem
+        print(f"➖ docs_root 없음 (선택): {cfg.docs_root} — 문서 질의는 저장소 등록 시 docs 폴더를 지정하면 됩니다")
     line(True, f"auth_token: {'설정됨' if cfg.auth_token else '없음 (이 PC 에서만 접속 가능)'}")
     from .repos import RepoRegistry
 
