@@ -72,6 +72,11 @@ class StageCall:
     live: "LiveChannel | None" = None  # user messages injected into the running session (Claude Code)
     result_mode: str = "schema"  # claude_cli: "text" = JSON object at the end of the answer, "schema" = --json-schema
     add_dirs: list[str] = field(default_factory=list)  # extra readable folders (user attachments)
+    # claude_cli: keep the conversation (session_id) so a cancelled/failed stage can be continued with
+    # resume_session instead of re-exploring from scratch
+    session_id: str | None = None
+    resume_session: str | None = None
+    fresh_prompt: str | None = None  # the full prompt, used if resuming the conversation fails
 
     def emit(self, kind: str, detail: dict) -> None:
         if self.on_event:
@@ -203,7 +208,7 @@ def run_process(args: list[str], call: StageCall, stdin_text: str | None,
         while not stop.is_set():
             if call.cancelled or time.monotonic() > deadline:
                 reason.append("cancelled" if call.cancelled else "timeout")
-                kill_tree(proc)
+                call.emit("process_stopped", {"why": reason[0], **kill_tree(proc)})
                 return
             stop.wait(0.3)
 
@@ -253,14 +258,76 @@ def run_process(args: list[str], call: StageCall, stdin_text: str | None,
     return proc.returncode, "".join(stderr_chunks)
 
 
-def kill_tree(proc: subprocess.Popen) -> None:
-    """Kill a process and its children (claude.exe spawns shells and tools)."""
+def pid_alive(pid: int) -> bool:
+    """Is a process (e.g. a `relay run` in a terminal, or a tool the AI started) still alive?"""
+    if os.name == "nt":
+        import ctypes
+
+        handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return False
+        code = ctypes.c_ulong()
+        ok = ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
+        ctypes.windll.kernel32.CloseHandle(handle)
+        return bool(ok) and code.value == 259  # STILL_ACTIVE
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def descendants(pid: int) -> list[int]:
+    """Child processes (shells, builds, tests the AI started), so a cancel can check they are gone too."""
+    try:
+        if os.name == "nt":
+            out = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+                                  "Get-CimInstance Win32_Process | ForEach-Object { \"$($_.ProcessId) $($_.ParentProcessId)\" }"],
+                                 capture_output=True, text=True, timeout=15,
+                                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
+        else:
+            out = subprocess.run(["ps", "-e", "-o", "pid=,ppid="], capture_output=True, text=True, timeout=15).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    children: dict[int, list[int]] = {}
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+            children.setdefault(int(parts[1]), []).append(int(parts[0]))
+    found, todo = [], [pid]
+    while todo:
+        for child in children.get(todo.pop(), []):
+            if child not in found:
+                found.append(child)
+                todo.append(child)
+    return found
+
+
+def kill_tree(proc: subprocess.Popen) -> dict:
+    """Kill a process and its children (claude.exe spawns shells and tools), then check they are really gone."""
     if proc.poll() is not None:
-        return
+        return {"pid": proc.pid, "confirmed": True, "children": 0, "survivors": []}
+    tree = descendants(proc.pid)
     if os.name == "nt":
         subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True)
     if proc.poll() is None:
         proc.kill()
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        pass
+    survivors = [p for p in tree if pid_alive(p)]
+    for p in survivors:  # orphaned grandchildren (e.g. a build the AI started): one more try each
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(p)], capture_output=True)
+        else:
+            try:
+                os.kill(p, 9)
+            except OSError:
+                pass
+    survivors = [p for p in survivors if pid_alive(p)]
+    return {"pid": proc.pid, "confirmed": proc.poll() is not None and not survivors,
+            "children": len(tree), "survivors": survivors}
 
 
 class MockRunner:
@@ -364,12 +431,15 @@ class ClaudeCliRunner:
             self.exe, "-p",
             "--output-format", "stream-json", "--verbose",
             "--input-format", "stream-json",  # keeps stdin open so a user note can join the running session
-            "--no-session-persistence",
             "--permission-mode", call.permission_mode,
             "--strict-mcp-config",
         ]
         if call.result_mode != "text" or call.system_mode != "replace":
             args += ["--json-schema", json.dumps(result_schema(), ensure_ascii=False)]
+        if call.resume_session:
+            args += ["--resume", call.resume_session]
+        else:
+            args += ["--session-id", call.session_id] if call.session_id else ["--no-session-persistence"]
         if call.model:
             args += ["--model", call.model]
         if call.system_mode == "replace":
@@ -405,6 +475,15 @@ class ClaudeCliRunner:
 
     def run(self, call: StageCall) -> tuple[StageResult, Usage]:
         """Run on call.model; if that fails (unavailable, limit, error), retry once on fallback_model."""
+        if call.resume_session:
+            try:
+                return self._run_once(call, call.model)
+            except RunnerError as e:
+                if e.kind in ("cancelled", "quota", "budget"):
+                    raise
+                # the saved conversation is gone or unusable: start the stage fresh
+                call.emit("resume_fallback", {"reason": str(e)[:200]})
+                call = replace(call, resume_session=None, prompt=call.fresh_prompt or call.prompt)
         try:
             return self._run_once(call, call.model)
         except RunnerError as e:
@@ -437,7 +516,18 @@ class ClaudeCliRunner:
                 event = parse_json_line(line)
                 if event is None:
                     return
-                if event.get("type") == "result":
+                etype = event.get("type")
+                if etype == "assistant":
+                    blocks = [b.get("type") for b in (event.get("message") or {}).get("content", []) or []]
+                    doing = "thinking" if "thinking" in blocks else "tool" if "tool_use" in blocks else "writing"
+                elif etype == "user":
+                    doing = "tool_result"
+                elif etype == "system" and event.get("subtype") == "thinking_tokens":
+                    doing = "thinking"
+                else:
+                    doing = etype or "?"
+                call.emit("pulse", {"doing": doing, "turn": len(watch.turns)})
+                if etype == "result":
                     box["result"] = event
                 elif event.get("type") == "rate_limit_event":
                     info = event.get("rate_limit_info") or {}

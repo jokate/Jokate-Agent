@@ -73,3 +73,14 @@ def test_catalog_lists_only_usable_providers(tmp_path, monkeypatch):
     assert list(models) == ["fable", "opus", "sonnet", "haiku"]
     assert models["fable"]["exhausted_until"] and not models["opus"]["exhausted_until"]
     assert models["opus"]["tier"] == "고급"
+
+
+def test_effort_pick_validated_per_model_and_wins_on_retry(tmp_path):
+    engine, relay, _ = make(tmp_path, registry(tmp_path))
+    engine.providers.specs["mock"].kind = "claude_cli"  # treat the mock as Claude for the effort table
+    reg = engine.providers
+    assert reg.efforts_for("mock", "haiku") == [] and "xhigh" in reg.efforts_for("mock", "opus")
+    run = engine.create(relay, "g", tmp_path, stage_models={"build": {"effort": "high"}})
+    assert run.stage_models == {"build": {"provider": "mock", "model": None, "effort": "high"}}
+    with pytest.raises(ValueError, match="effort"):
+        engine.create(relay, "g", tmp_path, stage_models={"plan": {"model": "haiku", "effort": "max"}})

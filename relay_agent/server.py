@@ -199,7 +199,9 @@ def list_relays() -> list[dict]:
             "stages": steps,
             "switchable": any(s.alternates for s in spec.stages),
             "stage_defaults": [{"name": s.name, "label": STAGE_KO.get(s.name, s.name), "provider": s.primary,
-                                "model": s.model, "tier": TIER.get((s.model or "").lower(), ""), "writes": s.writes}
+                                "model": s.model, "tier": TIER.get((s.model or "").lower(), ""), "writes": s.writes,
+                                "effort": s.effort,
+                                "efforts": engine.providers.efforts_for(s.primary, s.model) if engine.providers else []}
                                for s in spec.stages],
         })
     return out
@@ -537,6 +539,27 @@ def get_stats(session_id: str | None = None) -> dict:
 
 
 WATCH_RULES = {"big_result_chars": 20000, "many_turns": 25, "big_prompt_tokens": 8000, "big_context": 60000}
+
+
+@app.get("/runs/{run_id}/live")
+def run_live(run_id: str) -> dict:
+    _load(run_id)
+    return engine.liveness(run_id)
+
+
+@app.get("/notifications")
+def notifications(after: int = -1) -> dict:
+    """Runs that need the user: finished, failed, waiting for approval, stopped at a budget.
+    after=-1 returns only the current cursor (no backlog on first load)."""
+    from .notify import NOTIFY_KINDS
+
+    if after < 0:
+        return {"cursor": engine.history.last_event_id(), "items": []}
+    items = engine.history.events_of_kinds(list(NOTIFY_KINDS), after)
+    return {"cursor": items[-1]["id"] if items else after, "items": [
+        {"id": e["id"], "run_id": e["run_id"], "session_id": e["session_id"], "kind": e["kind"], "at": e["at"],
+         "title": e["session_title"] or "", "question": (e["question"] or "")[:120],
+         "reason": e["detail"].get("error") or e["detail"].get("reason") or ""} for e in items]}
 
 
 @app.get("/runs/{run_id}/tokens")

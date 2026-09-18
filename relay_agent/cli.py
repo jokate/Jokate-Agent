@@ -216,7 +216,7 @@ def main() -> None:
     p_run.add_argument("--attach", action="append", default=[], metavar="FILE",
                        help="attach a file (screenshot, log, spec...) the AI may read; repeatable")
     p_run.add_argument("--stage-model", action="append", default=[], metavar="STAGE=PROVIDER:MODEL",
-                       help="pick a model per stage, e.g. plan=claude:opus or build=codex:gpt-5 (repeatable)")
+                       help="pick a model (and effort) per stage, e.g. plan=claude:opus@high, build=@low (repeatable)")
     sub.add_parser("repos", help="registered repositories on this machine")
     p_repo = sub.add_parser("repo", help="register or clone a repository")
     p_repo.add_argument("action", choices=["add", "clone", "remove"])
@@ -317,8 +317,9 @@ def main() -> None:
         stage_models = {}
         for item in args.stage_model:
             stage_name, _, choice = item.partition("=")
+            choice, _, effort = choice.partition("@")  # plan=claude:opus@high
             provider, _, model = choice.partition(":") if ":" in choice else ("", "", choice)
-            stage_models[stage_name] = {"provider": provider or None, "model": model or None}
+            stage_models[stage_name] = {"provider": provider or None, "model": model or None, "effort": effort or None}
         run = engine.create(cfg.relays_dir / f"{args.relay}.yaml", args.goal, workdir, session_id=args.session,
                             workspace=args.workspace, repo=repo, stage_models=stage_models,
                             attachments=[Path(a) for a in args.attach], approval=args.approval)

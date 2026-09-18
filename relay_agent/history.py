@@ -204,6 +204,22 @@ class HistoryStore:
     def limits(self, name: str) -> list[dict]:
         return self._rows("SELECT * FROM provider_limits WHERE name = ? ORDER BY window", (name,))
 
+    def events_of_kinds(self, kinds: list[str], after_id: int = 0, limit: int = 50) -> list[dict]:
+        """Across all runs, e.g. finished/failed/waiting — the dashboard's alert feed."""
+        marks = ",".join("?" * len(kinds))
+        rows = self._rows(
+            f"""SELECT e.*, s.title AS session_title, t.session_id AS session_id, t.question AS question
+                FROM events e LEFT JOIN turns t ON t.run_id = e.run_id LEFT JOIN sessions s ON s.id = t.session_id
+                WHERE e.kind IN ({marks}) AND e.id > ? ORDER BY e.id DESC LIMIT ?""",
+            (*kinds, after_id, limit))
+        for r in rows:
+            r["detail"] = json.loads(r["detail"])
+        return rows[::-1]
+
+    def last_event_id(self) -> int:
+        rows = self._rows("SELECT COALESCE(MAX(id), 0) AS m FROM events")
+        return rows[0]["m"]
+
     def events(self, run_id: str, after_id: int = 0) -> list[dict]:
         rows = self._rows("SELECT * FROM events WHERE run_id = ? AND id > ? ORDER BY id", (run_id, after_id))
         for r in rows:

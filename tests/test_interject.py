@@ -206,3 +206,58 @@ def test_auto_approve_runs_through_design_gates(tmp_path):
                          runner_factory=lambda _: asking)
     paused = engine.advance(engine.create(relay, "g", tmp_path, approval="ai").id)
     assert paused.status == "awaiting_approval" and "A안/B안" in paused.baton.stop.reason
+
+
+def test_user_is_alerted_when_a_run_needs_them(tmp_path):
+    from relay_agent.notify import toast_xml
+
+    seen = []
+    engine, relay = make(tmp_path, MockRunner())
+    engine.notifier = lambda run_id, kind, title, detail: seen.append((kind, title))
+    run = engine.advance(engine.create(relay, "체력 로직 고쳐줘\n자세한 설명", tmp_path).id)
+    assert seen == [("run_done", "체력 로직 고쳐줘")] and run.status == "done"
+    feed = engine.history.events_of_kinds(["run_done"])
+    assert feed[-1]["run_id"] == run.id and feed[-1]["question"].startswith("체력")
+    xml = toast_xml('A&B <x>', '"q"', "http://h/?run=1&x=2")
+    assert "A&amp;B &lt;x&gt;" in xml and 'launch="http://h/?run=1&amp;x=2"' in xml
+
+
+def test_liveness_reports_what_the_ai_is_doing(tmp_path):
+    seen = {}
+
+    class Busy(MockRunner):
+        def run(self, call):
+            call.emit("pulse", {"doing": "thinking", "turn": 2})
+            seen["live"] = engine.liveness(run_id)
+            return super().run(call)
+
+    engine, relay = make(tmp_path, Busy())
+    run_id = engine.create(relay, "g", tmp_path).id
+    engine.advance(run_id)
+    live = seen["live"]
+    assert live["alive"] and live["doing"] == "thinking" and live["turn"] == 2 and live["stage"] == "build"
+    assert live["quiet_seconds"] < 5 and live["precise"]
+    assert "pulse" not in [e["kind"] for e in engine.history.events(run_id)]  # never written to the log
+    assert engine.liveness(run_id)["alive"] is False  # done
+
+
+def test_interrupted_stage_continues_its_conversation_on_resume(tmp_path):
+    from relay_agent.runners import RunnerError
+
+    calls = []
+
+    class Flaky(MockRunner):
+        def run(self, call):
+            calls.append((call.stage, call.session_id, call.resume_session, call.prompt[:4]))
+            if call.stage == "scout" and len(calls) == 1:
+                raise RunnerError("network", "error")
+            return super().run(call)
+
+    engine, relay = make(tmp_path, Flaky())
+    run = engine.advance(engine.create(relay, "g", tmp_path).id)
+    assert run.status == "failed" and run.stage_sessions["scout"] == calls[0][1]
+    run = engine.advance(run.id, resume=True)
+    stage, sid, resume, head = calls[1]
+    assert resume == calls[0][1] and sid is None and head == "[재개]"  # same conversation, short prompt
+    assert run.status == "done" and run.stage_sessions == {}
+    assert calls[2][2] is None and calls[2][1]  # next stage: its own fresh conversation

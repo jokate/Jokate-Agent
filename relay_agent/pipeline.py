@@ -31,7 +31,8 @@ from pydantic import BaseModel, Field
 from .baton import Baton, StopNote
 from .history import HistoryStore
 from .providers import LEGACY_RUNNER, ProviderRegistry
-from .runners import LiveChannel, Runner, RunnerError, StageCall, Usage, make_runner
+from .notify import NOTIFY_KINDS
+from .runners import LiveChannel, pid_alive, Runner, RunnerError, StageCall, Usage, make_runner
 from .usage import UsageStore
 from .repos import RepoRegistry, RepoSpec
 from .journal import JournalWorkspace
@@ -140,7 +141,9 @@ class RunState(BaseModel):
     # design gates: ai = continue unless the stage itself asks for a decision (needs_approval),
     # always = pause every time, never = run through. Budget limits pause in every mode.
     approval: Literal["ai", "always", "never"] = "ai"
-    owner_pid: int | None = None  # process advancing the run (server or a CLI); recovery leaves live owners alone
+    owner_pid: int | None = None
+    # stage -> Claude Code conversation id of an unfinished attempt (continued on resume, dropped when it finishes)
+    stage_sessions: dict[str, str] = {}  # process advancing the run (server or a CLI); recovery leaves live owners alone
     workspace_mode: Literal["none", "copy", "inplace"] = "none"
     changes: dict | None = None  # {files, insertions, deletions, stat}
     changes_status: Literal["none", "ready", "applied", "discarded", "rolled_back"] = "none"
@@ -156,25 +159,6 @@ RESUMABLE = ("pending", "failed", "cancelled")
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-
-def pid_alive(pid: int) -> bool:
-    """Is another process (e.g. a `relay run` in a terminal) still alive?"""
-    if os.name == "nt":
-        import ctypes
-
-        handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
-        if not handle:
-            return False
-        code = ctypes.c_ulong()
-        ok = ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
-        ctypes.windll.kernel32.CloseHandle(handle)
-        return bool(ok) and code.value == 259  # STILL_ACTIVE
-    try:
-        os.kill(pid, 0)
-        return True
-    except OSError:
-        return False
 
 
 def prompt_breakdown(system: str, prompt: str) -> dict:
@@ -211,6 +195,7 @@ class RelayEngine:
         extra_allowed_tools: list[str] | None = None,
         repos: RepoRegistry | None = None,
         mcp_registry: dict[str, dict] | None = None,
+        notifier: Callable[[str, str, str, dict], None] | None = None,
         max_snapshot_mb: float = 500,
         max_file_mb: float = 20,
     ):
@@ -219,6 +204,7 @@ class RelayEngine:
         self.extra_allowed_tools = extra_allowed_tools or []
         self.repos = repos or RepoRegistry()
         self.mcp_registry = mcp_registry or {}
+        self.notifier = notifier
         self.runs_dir = runs_dir
         self.usage = usage
         self.history = history
@@ -228,7 +214,8 @@ class RelayEngine:
         self._runners: dict[str, Runner] = {}
         self._locks: dict[str, threading.Lock] = {}
         self._cancel: dict[str, threading.Event] = {}
-        self._live: dict[str, LiveChannel] = {}  # run -> stdin of the AI session running right now
+        self._live: dict[str, LiveChannel] = {}
+        self._pulse: dict[str, dict] = {}  # run -> last sign of life from the running AI  # run -> stdin of the AI session running right now
 
     # --- persistence -------------------------------------------------------
     def _dir(self, run_id: str) -> Path:
@@ -270,6 +257,11 @@ class RelayEngine:
 
     def _event(self, run: RunState, stage: str, kind: str, **detail) -> None:
         self.history.add_event(run.id, stage, kind, detail)
+        if self.notifier is not None and kind in NOTIFY_KINDS:
+            try:
+                self.notifier(run.id, kind, run.baton.goal.splitlines()[0][:80], detail)
+            except Exception:  # an alert must never break the run
+                pass
 
     def workspace(self, run: RunState) -> Workspace | None:
         if run.workspace_mode == "none":
@@ -333,7 +325,7 @@ class RelayEngine:
         chosen: dict[str, dict] = {}
         by_name = {s.name: s for s in spec.stages}
         for stage_name, choice in (stage_models or {}).items():
-            if not choice or not (choice.get("provider") or choice.get("model")):
+            if not choice or not (choice.get("provider") or choice.get("model") or choice.get("effort")):
                 continue  # "default" in the picker
             if stage_name not in by_name:
                 raise ValueError(f"이 릴레이에 없는 단계입니다: {stage_name}")
@@ -342,7 +334,16 @@ class RelayEngine:
                 problem = self.providers.check_choice(provider, by_name[stage_name].writes)
                 if problem:
                     raise ValueError(f"[{stage_name}] {problem}")
+            effort = choice.get("effort") or None
+            if effort and self.providers is not None:
+                model = choice.get("model") or by_name[stage_name].model
+                allowed = self.providers.efforts_for(provider, model)
+                if effort not in allowed:
+                    raise ValueError(f"[{stage_name}] {model or provider} 는 effort '{effort}' 를 지원하지 않습니다"
+                                     + (f" (가능: {', '.join(allowed)})" if allowed else " (effort 조절 없음)"))
             chosen[stage_name] = {"provider": provider, "model": choice.get("model") or None}
+            if effort:
+                chosen[stage_name]["effort"] = effort
         live_mcp = sorted({m for s in spec.stages for m in s.mcp if m not in READ_ONLY_MCP})
         forced = None
         if mode == "copy" and live_mcp:
@@ -459,6 +460,34 @@ class RelayEngine:
         for run_id in removed:
             shutil.rmtree(self._dir(run_id), ignore_errors=True)
         return {"deleted": session_id, "runs": len(removed)}
+
+    def liveness(self, run_id: str) -> dict:
+        """Is the AI really working? Process alive + seconds since its last output + what it was doing."""
+        run = self.load(run_id)
+        events = self.history.events(run_id)
+        started = next((e for e in reversed(events) if e["kind"] == "stage_started"), None)
+        last = events[-1] if events else None
+        here = run_id in self._cancel
+        alive = here or bool(run.owner_pid and run.owner_pid != os.getpid() and pid_alive(run.owner_pid))
+        pulse = self._pulse.get(run_id) if here else None
+        now = time.time()
+
+        def age(iso: str | None) -> float | None:
+            try:
+                return max(0.0, now - datetime.fromisoformat(iso).timestamp()) if iso else None
+            except ValueError:
+                return None
+
+        quiet = (now - pulse["at"]) if pulse else age(last["at"] if last else None)
+        return {
+            "status": run.status, "alive": alive if run.status == "running" else False,
+            "stage": started["stage"] if started else None,
+            "stage_seconds": age(started["at"]) if started else None,
+            "quiet_seconds": quiet, "doing": pulse.get("doing") if pulse else None,
+            "turn": pulse.get("turn") if pulse else None,
+            "last": {"kind": last["kind"], "stage": last["stage"], "detail": last["detail"]} if last else None,
+            "precise": pulse is not None,  # False: run owned by another process (CLI) — judged by its log only
+        }
 
     def cancel(self, run_id: str) -> RunState:
         """Stop a running relay (kills the current AI process) or a paused one. Resumable later."""
@@ -775,6 +804,9 @@ class RelayEngine:
 
     def _on_stage_event(self, run_id: str, stage: str):
         def handle(kind: str, detail: dict) -> None:
+            if kind == "pulse":  # liveness only: in memory, not in the activity log
+                self._pulse[run_id] = {"at": time.time(), "stage": stage, **detail}
+                return
             if kind == "rate_limit":  # subscription usage snapshot, stored, not logged as activity
                 self.history.record_limits(detail["provider"], detail.get("status"), detail.get("windows", []))
                 return
@@ -946,13 +978,20 @@ class RelayEngine:
             if new_notes:
                 self._event(run, stage.name, "user_notes_applied", notes=new_notes)
             live = self._live[run_id] = LiveChannel()
+            resume_sid = run.stage_sessions.get(stage.name)
+            session_id = resume_sid or str(uuid.uuid4())
+            if not resume_sid:
+                run.stage_sessions[stage.name] = session_id
+                self.save(run)  # known before the AI starts, so a cancel/crash can continue this conversation
 
             # Cheap first pass; spend more only when this stage is being redone.
             redo = any(h.stage == stage.name for h in run.history)
             effort = stage.retry_effort if redo and stage.retry_effort else stage.effort
             choice = run.stage_models.get(stage.name) or {}
+            if choice.get("effort"):
+                effort = choice["effort"]  # the user's pick, also on retries
             primary = choice.get("provider") or stage.primary
-            if choice.get("model") or choice.get("provider"):
+            if choice.get("model") or (choice.get("provider") and choice["provider"] != stage.primary):
                 # the user's pick wins, also on retries (no silent escalation to another model)
                 model = choice.get("model") if choice.get("model") is not None else (
                     stage.model if primary == stage.primary else None)
@@ -961,6 +1000,9 @@ class RelayEngine:
             self._event(run, stage.name, "stage_started", runner=primary, model=model, chosen=bool(choice),
                         effort=effort, reads=stage.reads_outputs, system_mode=stage.system_mode,
                         escalated=redo and bool(stage.retry_model or stage.retry_effort))
+            fresh_prompt = None
+            if resume_sid:
+                self._event(run, stage.name, "stage_resumed", session=resume_sid)
             call = StageCall(
                 stage=stage.name,
                 model=model,
@@ -990,7 +1032,17 @@ class RelayEngine:
                 on_event=self._on_stage_event(run.id, stage.name),
                 cancel_event=cancel,
                 live=live,
+                session_id=None if resume_sid else session_id,
+                resume_session=resume_sid,
             )
+            if resume_sid:
+                # continue the same conversation: only what changed, not the whole baton again
+                fresh_prompt = call.prompt
+                notes = "\n".join(f"- {n}" for n in new_notes)
+                call = replace(call, fresh_prompt=fresh_prompt, prompt=(
+                    "[재개] 이 단계는 중단됐다가 다시 이어서 진행한다. 위 대화에서 이미 읽고 고친 것은 반복하지 말고, "
+                    "현재 파일 상태를 기준으로 남은 일만 마친 뒤 결과 JSON 을 낸다."
+                    + (f"\n그사이 사용자 추가 지시:\n{notes}" if notes else "")))
             self._event(run, stage.name, "prompt_breakdown", **prompt_breakdown(call.system, call.prompt))
             try:
                 result, usage = self._run_stage(run, stage, call, primary)
@@ -1018,6 +1070,7 @@ class RelayEngine:
             except (OSError, ValueError) as e:
                 return self._fail(run, stage.name, str(e))
 
+            run.stage_sessions.pop(stage.name, None)  # finished: a later redo starts fresh
             self.usage.record(run.id, stage.name, usage)
             run.baton = result.apply(run.baton, stage.name)
             run.history.append(StageRecord(

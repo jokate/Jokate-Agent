@@ -183,6 +183,22 @@ Subscription usage also counts tokens re-read on every turn, so the goal is to c
   - Budget limits stop the run in every mode. CLI: `--approval ai|always|never`
 - **User checks:** each stage's list replaces the previous one (so earlier false positives don't linger).
 
+## Alerts · is it working · cancel and resume
+- **Alerts:** a Windows notification when a run finishes, fails, needs approval, or hits a budget limit.
+  - It comes from the server, so it arrives even with the page closed or when the run came from the CLI. Clicking it opens that run.
+  - The dashboard also shows a toast, a count in the tab title, and a short sound (off with `localStorage katae-sound=0`).
+  - Turn off: `notify: false`
+- **Is it working:** a bar under the run header shows what the AI is doing right now, the elapsed time, and **how long ago its last signal was**.
+  - What it's doing: thinking, calling a tool, writing its answer, and so on.
+  - Silent for over 1 minute: yellow. Over 5 minutes, or no AI process at all: red, with guidance.
+  - `GET /runs/{id}/live`
+- **Cancel verification:** on cancel, the AI process and its child processes (shells, builds, and so on) are killed, then the check that they're really gone is recorded in the timeline (🛑).
+- **Resuming continues the conversation:** each stage keeps its Claude Code conversation (`--session-id`). A stage that was cancelled or failed continues from where it left off (`--resume`) instead of re-exploring from scratch.
+  - Measured: 31.9K before cancel + 56.7K after resume = 88.6K. An uninterrupted run averages ~96K; the old way (start over) is ~128K.
+  - If the conversation can't be continued, the stage automatically starts fresh.
+  - Note: these conversations are saved in Claude Code's conversation history.
+- **effort:** can be set next to each phase's model. Sonnet/Opus/Fable offer `low`–`max`; Haiku 4.5 offers none (it has no effort control). Other AIs only offer what `providers.<name>.efforts` lists. CLI: `--stage-model plan=claude:opus@high`, `build=@low`
+
 ## Choosing a model per phase
 - In the dashboard, pick a relay and a model dropdown appears for each phase (scout · plan · build · review). Leave it blank to use the relay's default.
 - The list shows **only models from AIs usable right now** (installed and logged in). Models whose usage is exhausted appear as `소진` and can't be picked.

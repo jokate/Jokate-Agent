@@ -43,6 +43,7 @@ class Config(BaseModel):
     extra_allowed_tools: list[str] = []
     # Required for any request that is not from this machine (env KATAE_TOKEN wins). Empty = localhost only.
     auth_token: str = ""
+    notify: bool = True  # Windows toast when a run finishes, fails or needs approval
 
     @classmethod
     def load(cls, path: Path | None = None) -> "Config":
@@ -82,6 +83,7 @@ def _merge(base: dict, over: dict) -> dict:
 def build_engine(cfg: Config):
     """Engine wired with the configured stores, provider registry and real runners."""
     from .history import HistoryStore
+    from .notify import Notifier
     from .pipeline import RelayEngine
     from .providers import ProviderRegistry
     from .repos import RepoRegistry
@@ -100,4 +102,5 @@ def build_engine(cfg: Config):
         extra_allowed_tools=cfg.extra_allowed_tools,
         repos=RepoRegistry(cfg.repos),
         mcp_registry=cfg.mcp_registry,
+        notifier=Notifier(cfg.server_url, cfg.notify),
     )

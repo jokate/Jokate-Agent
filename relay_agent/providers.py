@@ -39,6 +39,8 @@ class ProviderSpec(BaseModel):
     model_map: dict[str, str] = {}
     # models a user can pick per stage (provider's own names; for Claude the tier aliases)
     models: list[str] = []
+    # effort levels a user can pick for this provider's models (Claude tiers are known: see EFFORTS)
+    efforts: list[str] = []
     # model id -> [input $/MTok, output $/MTok] for cost estimates
     prices: dict[str, list[float]] = {}
     daily_usd: float | None = Field(None, description="stop using this provider after this spend in 24h")
@@ -258,6 +260,19 @@ class ProviderRegistry:
 
     TIER_LABEL = {"fable": "최상급", "mythos": "최상급", "opus": "고급", "sonnet": "표준", "haiku": "경량"}
 
+    # Claude Code --effort: low/medium/high/xhigh/max on Sonnet, Opus, Fable. Haiku 4.5 has no effort control
+    # (the CLI accepts the flag but it changes nothing), so it is not offered.
+    CLAUDE_EFFORTS = ["low", "medium", "high", "xhigh", "max"]
+
+    def efforts_for(self, provider: str, model: str | None) -> list[str]:
+        spec = self.specs.get(provider)
+        if spec is None:
+            return []
+        tier = self.tier(model)
+        if spec.kind in ("claude_cli", "api", "mock") and tier:
+            return [] if tier == "haiku" else list(self.CLAUDE_EFFORTS)
+        return list(spec.efforts)
+
     def catalog(self) -> list[dict]:
         """Models selectable right now: only providers that are usable, with benched models marked."""
         out = []
@@ -272,9 +287,10 @@ class ProviderRegistry:
             for model in models:
                 tier = self.tier(model)
                 entries.append({"model": model, "tier": self.TIER_LABEL.get(tier or "", ""),
-                                "exhausted_until": self.model_exhausted_until(name, model) if tier else None})
-            if not entries:
-                entries.append({"model": "", "tier": "", "exhausted_until": None})  # provider's own default model
+                                "exhausted_until": self.model_exhausted_until(name, model) if tier else None,
+                                "efforts": self.efforts_for(name, model)})
+            if not entries:  # provider's own default model
+                entries.append({"model": "", "tier": "", "exhausted_until": None, "efforts": list(spec.efforts)})
             out.append({"provider": name, "label": spec.label or name, "tools": spec.tools, "models": entries})
         return out
 
