@@ -322,6 +322,18 @@ Rules:
 """
 
 
+DIGEST_RULE = """
+Documents and large files: to understand several docs or any file over ~8K chars, call the digest tool
+(paths/globs, e.g. ["Docs/**/*.md"]) instead of Reading them one by one. Each file is summarized in its own
+fresh call and cached, so only summaries enter your context and later stages get them for free. Summaries
+cite sections (§); Read only the exact section you still need. Reading many whole docs makes every later
+turn re-read all of them.
+"""
+
+# a digest over dozens of files is one long tool call
+os.environ.setdefault("MCP_TOOL_TIMEOUT", "900000")
+
+
 def os_name() -> str:
     import platform
 
@@ -351,7 +363,8 @@ class ClaudeCliRunner:
         if call.system_mode == "replace":
             # Replacing Claude Code's default system prompt was measured at ~7.5K -> ~0.6K input tokens.
             # It also drops the environment/tool-usage guidance, so restate the essentials.
-            args += ["--system-prompt", REPLACE_PREAMBLE.format(cwd=call.cwd, os_name=os_name()) + call.system]
+            args += ["--system-prompt", REPLACE_PREAMBLE.format(cwd=call.cwd, os_name=os_name())
+                     + (DIGEST_RULE if "digest" in call.mcp_servers else "") + call.system]
         else:
             # Moves cwd/git-status out of the system prompt so it caches across working directories.
             args += ["--append-system-prompt", call.system, "--exclude-dynamic-system-prompt-sections"]

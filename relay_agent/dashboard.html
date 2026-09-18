@@ -848,6 +848,7 @@ async function renderUsage(run) {
     return `<div class="tw-stage">
       <h4>${STAGE_IC[s.stage] || "◆"} ${esc(s.stage)}
         <span class="muted">새 입력 ${fmtN(u.input || 0)} · 캐시 쓰기 ${fmtN(u.cache_write || 0)} · 캐시 읽기 ${fmtN(u.cache_read || 0)} (10% 과금) · 출력 ${fmtN(u.output || 0)} · ${fmt$(u.cost_usd || 0)}</span></h4>
+      ${s.digest ? `<div class="muted">📚 문서 요약(digest) 호출: 새 입력 ${fmtN(s.digest.input + s.digest.cache_write)} · 출력 ${fmtN(s.digest.output)} · ${fmt$(s.digest.cost_usd)} — 원문 대신 요약만 맥락에 들어감</div>` : ""}
       ${(s.warnings || []).map((w) => `<div class="tw-warn">⚠️ ${esc(w)}</div>`).join("") || '<div class="muted">✅ 눈에 띄는 누수 없음</div>'}
       ${p.est_tokens ? `<div class="muted">📤 보낸 프롬프트 약 ${fmtN(p.est_tokens)} 토큰 — ${Object.entries(p.sections || {}).slice(0, 4).map(([k, v]) => `${esc(k)} ${fmtN(v)}자`).join(" · ")}</div>` : ""}
       ${r.turns ? `<div class="muted">🔁 턴 ${r.turns}회 — 턴마다 아래 크기의 맥락을 통째로 다시 읽음 (합계 ${fmtN(r.reread_tokens)})</div>

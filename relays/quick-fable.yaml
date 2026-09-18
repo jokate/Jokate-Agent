@@ -13,6 +13,7 @@ stages:
     alternates: [{provider: codex}, {provider: opencode}, {provider: gemini}]
     prompt: ../prompts/build.md
     tools: [Read, Grep, Glob, Edit, Write, Bash]
+    mcp: [digest]              # 여러 문서·큰 파일은 파일별 요약만 받는다(캐시)
     allowed_tools: ["Bash(uv run:*)", "Bash(pytest:*)", "Bash(python:*)", "Bash(python3:*)", "Bash(py:*)", "Bash(node:*)",
                     "Bash(npm test:*)", "Bash(npm run test:*)", "Bash(git diff:*)", "Bash(git status:*)"]
     permission_mode: acceptEdits

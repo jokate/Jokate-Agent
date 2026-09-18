@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS usage (
 
 class UsageStore:
     def __init__(self, path: Path):
+        self.path = path
         path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row

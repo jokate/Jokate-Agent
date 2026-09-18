@@ -67,6 +67,7 @@ class Config(BaseModel):
         builtin = {
             "docs_read": {"command": py, "args": [str(ROOT / "mcp_servers" / "docs_read.py"), str(self.docs_root)]},
             "handoff": {"command": py, "args": [str(ROOT / "mcp_servers" / "handoff.py"), str(self.runs_dir)]},
+            "digest": {"command": py, "args": [str(ROOT / "mcp_servers" / "digest.py"), str(self.runs_dir / "digest-cache")]},
         }
         return builtin | self.mcp_servers
 

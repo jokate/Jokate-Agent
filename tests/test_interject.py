@@ -122,3 +122,21 @@ def test_prompt_breakdown_names_the_biggest_part():
 
     b = prompt_breakdown("sys", "# HANDOFF\n## 목표\n짧음\n## 산출물: scout\n" + "가" * 5000 + "\n")
     assert next(iter(b["sections"])) == "산출물: scout" and b["prompt_chars"] > 5000
+
+
+def test_recovery_leaves_runs_of_other_live_processes_alone(tmp_path):
+    import os
+    import subprocess
+    import sys
+
+    engine, relay = make(tmp_path, MockRunner())
+    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        live, dead = engine.create(relay, "a", tmp_path), engine.create(relay, "b", tmp_path)
+        for run, pid in ((live, other.pid), (dead, 999999)):
+            run.status, run.owner_pid = "running", pid
+            engine.save(run)
+        assert engine.recover_interrupted() == [dead.id]
+        assert engine.load(live.id).status == "running" and os.getpid() != other.pid
+    finally:
+        other.kill()

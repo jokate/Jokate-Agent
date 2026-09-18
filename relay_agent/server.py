@@ -502,6 +502,7 @@ def get_tokens(run_id: str) -> dict:
         u["cache_read"] += r["cache_read_input_tokens"]
         u["output"] += r["output_tokens"]
         u["cost_usd"] += r["cost_usd"] or 0
+    digests = {k.split(":")[0]: v for k, v in usage.items() if k.endswith(":digest")}
     stages: dict[str, dict] = {}
     for e in engine.history.events(run_id):
         if e["kind"] not in ("prompt_breakdown", "token_report"):
@@ -511,6 +512,7 @@ def get_tokens(run_id: str) -> dict:
     out, R = [], WATCH_RULES
     for name, s in stages.items():
         s["usage"] = usage.get(name)
+        s["digest"] = digests.get(name)  # the per-file summary calls this stage made (separate, fresh contexts)
         warn = []
         rep, pr = s["report"] or {}, s["prompt"] or {}
         for r in rep.get("top_results", []):

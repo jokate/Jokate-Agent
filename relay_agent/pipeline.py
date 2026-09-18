@@ -37,7 +37,7 @@ from .journal import JournalWorkspace
 from .workspace import DEFAULT_EXCLUDES, Workspace, WorkspaceError, dir_size, gc_shadow
 
 WRITE_TOOLS = {"Edit", "Write", "Bash", "NotebookEdit"}
-READ_ONLY_MCP = {"docs_read", "handoff"}  # every other MCP server may change the real project
+READ_ONLY_MCP = {"docs_read", "handoff", "digest"}  # every other MCP server may change the real project
 VERIFY_NOISE_PREFIX = re.compile(r'^cd\s+("[^"]*"|\S+)\s*&&\s*')
 LOOKAROUND = {"ls", "dir", "pwd", "cat", "head", "tail", "echo", "find", "tree", "cd"}
 
@@ -130,6 +130,7 @@ class RunState(BaseModel):
     auto_apply: bool = False
     stage_models: dict[str, dict] = {}  # stage -> {"provider": ..., "model": ...} chosen for this run
     notes_seen: int = 0  # lines of notes.jsonl already merged into the baton
+    owner_pid: int | None = None  # process advancing the run (server or a CLI); recovery leaves live owners alone
     workspace_mode: Literal["none", "copy", "inplace"] = "none"
     changes: dict | None = None  # {files, insertions, deletions, stat}
     changes_status: Literal["none", "ready", "applied", "discarded", "rolled_back"] = "none"
@@ -145,6 +146,25 @@ RESUMABLE = ("pending", "failed", "cancelled")
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def pid_alive(pid: int) -> bool:
+    """Is another process (e.g. a `relay run` in a terminal) still alive?"""
+    if os.name == "nt":
+        import ctypes
+
+        handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return False
+        code = ctypes.c_ulong()
+        ok = ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
+        ctypes.windll.kernel32.CloseHandle(handle)
+        return bool(ok) and code.value == 259  # STILL_ACTIVE
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
 
 
 def prompt_breakdown(system: str, prompt: str) -> dict:
@@ -516,7 +536,8 @@ class RelayEngine:
         """Runs left 'running' by a server stop are marked failed so they can be resumed."""
         recovered = []
         for run in self.list_runs():
-            if run.status == "running" and run.id not in self._cancel:
+            if run.status == "running" and run.id not in self._cancel and not (
+                    run.owner_pid and run.owner_pid != os.getpid() and pid_alive(run.owner_pid)):
                 try:
                     run.status, run.error = "failed", "서버 재시작으로 중단됨 — 재개하면 중단된 단계부터 다시 실행"
                     self._event(run, "-", "run_failed", error=run.error)
@@ -701,6 +722,15 @@ class RelayEngine:
             self.history.add_event(run_id, stage, kind, detail)
         return handle
 
+    def _stage_mcp(self, overrides: dict, run: RunState, stage: str, cwd: Path) -> dict:
+        """The digest server needs to know where it works and whom to bill (its summaries are separate calls)."""
+        if "digest" not in self.mcp_registry:
+            return overrides
+        entry = dict(overrides.get("digest") or self.mcp_registry["digest"])
+        entry["env"] = {**entry.get("env", {}), "KATAE_WORKDIR": str(cwd), "KATAE_RUN_ID": run.id, "KATAE_STAGE": stage,
+                        "KATAE_USAGE_DB": str(getattr(self.usage, "path", "")), "PATH": os.environ.get("PATH", "")}
+        return {**overrides, "digest": entry}
+
     def _model_for(self, provider: str, model: str | None) -> str | None:
         if self.providers is None or provider not in self.providers.specs:
             return model
@@ -806,7 +836,7 @@ class RelayEngine:
                 self._write_stop(run, "failed", "-", run.error)
                 self.save(run)
                 return run
-        run.status, run.error = "running", None
+        run.status, run.error, run.owner_pid = "running", None, os.getpid()
         self.save(run)
 
         ws = self.workspace(run)
@@ -876,7 +906,7 @@ class RelayEngine:
                 mcp_servers=stage.mcp,
                 allowed_tools=stage.allowed_tools + (
                     self.extra_allowed_tools + repo_tools if "Bash" in (stage.tools or []) else []),
-                mcp_overrides=mcp_overrides,
+                mcp_overrides=self._stage_mcp(mcp_overrides, run, stage.name, cwd),
                 settings_path=hook_settings,
                 permission_mode=stage.permission_mode,
                 timeout_s=stage.timeout_s,

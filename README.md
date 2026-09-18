@@ -115,6 +115,22 @@ uv run relay repo clone mnys --url <git url>          # on a new machine: clone 
   - Wrong-typed fields (e.g. a string instead of a list) are fixed automatically, and a JSON object found in the answer text is used.
   - Otherwise the text is passed on as-is (🩹 "결과 형식 복구" event).
 
+## Document summaries (digest) — don't read many documents whole
+- When a stage needs to understand several documents or large files, it calls the `digest` tool (`mcp_servers/digest.py`) instead of Reading them one by one.
+  - Each file is summarized in its own fresh, small Haiku call (no tools, no thinking, neutral folder).
+  - Only the summaries enter the stage's context. The summaries keep section (§) references.
+  - Results are cached by content hash, so later stages and runs get them free.
+- Measured (MNYS Docs, 25 files, 415KB, "write a final document analyzing all docs" task):
+
+| | Reading whole docs (before) | digest (after) |
+|---|---|---|
+| Build context size (peak) | 197K | 67K |
+| Build total re-read across turns | 1.12M | 336K |
+| Build result | Hit the $1.0 budget with nothing written | Done, $0.45 |
+
+  - Summarizer call savings (same document): $0.018 → $0.0067 by using a neutral folder + `--safe-mode` + no thinking.
+- All stages of the shipped relays (default, quick, quick-fable) have `mcp: [digest]`. The cost appears separately as `<stage>:digest` in the token watch.
+
 ## Token watch — where the tokens go
 - The headline "실질 입력" is the input converted at billing rates (cache reads 0.1×, cache writes 1.25×). The full-input total (mostly cache reads) is in the tooltip.
 - The "토큰 감시" tab shows, per phase:

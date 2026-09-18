@@ -16,6 +16,7 @@ stages:
     alternates: [{provider: codex}, {provider: opencode}, {provider: gemini}]
     prompt: ../prompts/scout.md
     tools: [Read, Grep, Glob]
+    mcp: [digest]              # 여러 문서·큰 파일은 파일별 요약만 받는다(캐시)
     system_mode: replace
     max_budget_usd: 0.4          # 큰 게임 프로젝트는 탐색이 길다 — 넘으면 실패가 아니라 승인 대기(승인 시 2배)
     timeout_s: 600
@@ -28,6 +29,7 @@ stages:
     alternates: [{provider: codex}, {provider: opencode}, {provider: gemini}]
     prompt: ../prompts/plan.md
     tools: [Read, Grep, Glob]
+    mcp: [digest]              # 여러 문서·큰 파일은 파일별 요약만 받는다(캐시)
     system_mode: replace
     reads_outputs: [scout]
     gate: human
@@ -43,6 +45,7 @@ stages:
     alternates: [{provider: codex}, {provider: opencode}, {provider: gemini}]
     prompt: ../prompts/build.md
     tools: [Read, Grep, Glob, Edit, Write, Bash]
+    mcp: [digest]
     # headless 실행은 권한 질문에 답할 수 없다 — 검증 명령만 미리 허용 (프로젝트에 맞게 추가)
     allowed_tools: ["Bash(uv run:*)", "Bash(pytest:*)", "Bash(python:*)", "Bash(python3:*)", "Bash(py:*)", "Bash(node:*)",
                     "Bash(npm test:*)", "Bash(npm run test:*)", "Bash(git diff:*)", "Bash(git status:*)"]
@@ -58,6 +61,7 @@ stages:
     alternates: [{provider: codex}, {provider: opencode}, {provider: gemini}]
     prompt: ../prompts/review.md
     tools: [Read, Grep, Glob, Bash]
+    mcp: [digest]
     allowed_tools: ["Bash(uv run:*)", "Bash(pytest:*)", "Bash(python:*)", "Bash(python3:*)", "Bash(py:*)", "Bash(node:*)",
                     "Bash(npm test:*)", "Bash(npm run test:*)", "Bash(git diff:*)"]
     system_mode: replace
