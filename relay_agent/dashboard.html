@@ -494,6 +494,7 @@ const EV = {
   user_notes_applied: ["📌", "추가 지시 반영"], result_repaired: ["🩹", "결과 형식 복구"], prompt_breakdown: ["📤", "보낸 프롬프트"],
   token_report: ["🔥", "토큰 사용 내역"], gate_skipped: ["⏩", "승인 없이 진행"],
   process_stopped: ["🛑", "AI 프로세스 종료"], stage_resumed: ["⏯️", "중단된 대화 이어서"], resume_fallback: ["↻", "처음부터 다시"],
+  handoff_written: ["📝", "인계서 작성"], handoff_failed: ["📝", "인계서 AI 작성 실패"], project_context: ["📁", "프로젝트 지침·스킬 적용"],
 };
 const PROVIDER_LABEL = { claude: "Claude", codex: "Codex", opencode: "OpenCode", gemini: "Gemini", anthropic_api: "Claude API", openai: "OpenAI", openrouter: "OpenRouter", ollama: "Ollama", mock: "Mock" };
 const WINDOW_LABEL = { five_hour: "5h", seven_day: "7d", seven_day_opus: "7d·Opus", seven_day_sonnet: "7d·Son" };
@@ -630,6 +631,9 @@ function describe(e) {
       : `⚠️ 일부 프로세스가 아직 살아 있음: PID ${(d.survivors || []).join(", ")} — 작업 관리자에서 확인하세요`;
     case "stage_resumed": return "이전 대화를 그대로 이어서 진행 — 이미 한 탐색·수정을 반복하지 않음";
     case "resume_fallback": return `이전 대화를 이어갈 수 없어 이 단계를 새로 시작 (${esc(d.reason)})`;
+    case "handoff_written": return `${esc(d.model)} 가 요청·작업된 내역·남은 일로 정리 — HANDOFF 탭 · 재개하면 이것부터 읽음 (입력 ${fmtN(d.input_tokens)} · $${(d.cost_usd || 0).toFixed(4)})`;
+    case "handoff_failed": return `기본 인계서로 대신함 (${esc(d.reason)})`;
+    case "project_context": return `${esc(d.root)} · 지침 ${(d.instructions || []).length}개 · 스킬 ${esc((d.skills || []).join(", ") || "없음")}${(d.mcp || []).length ? " · MCP " + esc(d.mcp.join(", ")) : ""}${(d.commands || []).length ? " · 명령 " + esc(d.commands.join(", ")) : ""}`;
     case "prompt_breakdown": return `약 ${fmtN(d.est_tokens)} 토큰 · 가장 큰 부분: ${esc(Object.keys(d.sections || {})[0] || "-")} (${fmtN(Object.values(d.sections || {})[0] || 0)}자)`;
     case "token_report": return `턴 ${d.turns}회 · 매 턴 다시 읽은 양 합계 ${fmtN(d.reread_tokens)} · 최대 맥락 ${fmtN(d.peak_context)}`
       + (d.top_results?.[0] ? ` · 가장 큰 도구 결과 <code>${esc(d.top_results[0].tool)}</code> ${fmtN(d.top_results[0].chars)}자` : "");

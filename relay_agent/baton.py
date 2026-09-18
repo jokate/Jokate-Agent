@@ -44,13 +44,31 @@ class StopNote(BaseModel):
     at: str
     done_stages: list[str] = []
     remaining_stages: list[str] = []
-    partial_actions: list[str] = []  # what the interrupted stage had already done (from the activity log)
+    partial_actions: list[str] = []  # (old runs) tool log of the interrupted stage — no longer written or shown
     resume_hint: str = ""
+    summary: str = ""  # hand-over by a lightweight model: request / work done / what is left (no tool history)
+    writer: str = ""  # model that wrote the summary ("" = built by the engine without AI)
+
+    def to_markdown(self) -> str:
+        label = {"cancelled": "취소로 중단", "failed": "실패로 중단", "awaiting_approval": "승인 대기",
+                 "budget": "예산 도달로 대기", "stage_budget": "단계 비용 한도 도달로 대기"}.get(self.kind, self.kind)
+        lines = [f"## 중단 지점 — {label} ({self.at})", f"- 멈춘 단계: `{self.stage}` · 사유: {self.reason}"]
+        if self.done_stages:
+            lines.append("- 끝난 단계: " + " → ".join(self.done_stages))
+        if self.remaining_stages:
+            lines.append("- 남은 단계: " + " → ".join(self.remaining_stages))
+        if self.resume_hint:
+            lines.append(f"- 이어가기: {self.resume_hint}")
+        if self.summary:
+            lines += ["", self.summary.strip()]
+        lines.append("")
+        return "\n".join(lines)
 
 
 class Baton(BaseModel):
     goal: str
     session_context: list[str] = Field(default_factory=list, description="같은 세션의 이전 요청 한 줄 요약")
+    previous_handoff: str = Field("", description="같은 세션 직전 실행이 끝나지 못했을 때 그 인계서(HANDOFF)")
     user_notes: list[str] = Field(default_factory=list, description="실행 중 사용자가 끼어들어 남긴 추가 지시")
     attachments: list[str] = Field(default_factory=list, description="사용자가 첨부한 파일의 절대 경로")
     state: str = "시작 전"
@@ -79,20 +97,10 @@ class Baton(BaseModel):
         full = max_output_chars is None  # the saved HANDOFF.md / dashboard, not a stage prompt
         lines = [f"# HANDOFF\n\n## 목표\n{self.goal}\n"]
         if self.stop:
-            st = self.stop
-            label = {"cancelled": "취소로 중단", "failed": "실패로 중단", "awaiting_approval": "승인 대기",
-                     "budget": "예산 도달로 대기", "stage_budget": "단계 비용 한도 도달로 대기"}.get(st.kind, st.kind)
-            lines.append(f"## 중단 지점 — {label} ({st.at})")
-            lines.append(f"- 멈춘 단계: `{st.stage}` · 사유: {st.reason}")
-            if st.done_stages:
-                lines.append("- 끝난 단계: " + " → ".join(st.done_stages))
-            if st.remaining_stages:
-                lines.append("- 남은 단계: " + " → ".join(st.remaining_stages))
-            if st.partial_actions:
-                lines.append("- 멈춘 단계에서 이미 한 일:")
-                lines += [f"  - {a}" for a in st.partial_actions]
-            if st.resume_hint:
-                lines.append(f"- 이어가기: {st.resume_hint}")
+            lines.append(self.stop.to_markdown())
+        if self.previous_handoff:
+            lines.append("## 직전 실행의 인계서 (끝나지 못한 이전 요청 — 먼저 읽고, 이어지는 작업이면 여기서부터)")
+            lines.append(self.previous_handoff.strip())
             lines.append("")
         if self.attachments:
             lines.append("## 첨부 파일 (사용자가 올린 자료 — 필요할 때 Read, 문서가 여럿이면 digest)")
@@ -103,7 +111,7 @@ class Baton(BaseModel):
             lines += [f"- {n}" for n in self.user_notes]
             lines.append("")
         if self.session_context:
-            lines.append("## 이 세션의 이전 요청 (자세한 내용은 handoff MCP 의 load_handoff(run id))")
+            lines.append("## 이 세션의 이전 요청")
             lines += [f"- {c}" for c in self.session_context]
             lines.append("")
         lines.append(f"## 현재 상태\n{self.state}\n")

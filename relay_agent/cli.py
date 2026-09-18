@@ -78,7 +78,8 @@ def print_run(engine: RelayEngine, run: RunState) -> None:
     if s["mcp"]:
         print("  MCP: " + ", ".join(f"{k}×{v['calls']} ({v['result_chars']}자)" for k, v in s["mcp"].items()))
     print(f"  비용 ${s['cost_usd']:.4f} · {s['tokens']:,} 토큰 · " + " → ".join(f"{x['stage']}({x['model']})" for x in s["stages"]))
-    print(f"  run={run.id} · 전체 내역: relay log {run.id} · {engine.runs_dir / run.id / 'HANDOFF.md'}")
+    handoff = engine.runs_dir / run.id / "HANDOFF.md"
+    print(f"  run={run.id} · 전체 내역: relay log {run.id}" + (f" · 인계서 {handoff}" if handoff.exists() else ""))
 
 
 def print_log(events: list[dict], full: bool = False) -> None:

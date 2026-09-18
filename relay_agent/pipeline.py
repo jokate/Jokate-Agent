@@ -32,6 +32,7 @@ from .baton import Baton, StopNote
 from .history import HistoryStore
 from .providers import LEGACY_RUNNER, ProviderRegistry
 from .notify import NOTIFY_KINDS
+from .projctx import ProjectContext, discover
 from .runners import LiveChannel, pid_alive, Runner, RunnerError, StageCall, Usage, make_runner
 from .usage import UsageStore
 from .repos import RepoRegistry, RepoSpec
@@ -174,6 +175,9 @@ def prompt_breakdown(system: str, prompt: str) -> dict:
             "sections": dict(sorted(sections.items(), key=lambda kv: -kv[1])[:10])}
 
 
+RESUME_LINE = ("- 이 실행은 중단됐다가 재개됐다. 위 `중단 지점` HANDOFF 를 반드시 먼저 읽고, "
+               "'작업된 내역'은 반복하지 말고 '남은 일'부터 한다.\n")
+
 STAGE_FOOTER = """
 ---
 ## 이번 단계: {stage}
@@ -196,6 +200,7 @@ class RelayEngine:
         repos: RepoRegistry | None = None,
         mcp_registry: dict[str, dict] | None = None,
         notifier: Callable[[str, str, str, dict], None] | None = None,
+        handoff_writer: Callable[[str], tuple[str, Usage]] | None = None,
         max_snapshot_mb: float = 500,
         max_file_mb: float = 20,
     ):
@@ -205,6 +210,7 @@ class RelayEngine:
         self.repos = repos or RepoRegistry()
         self.mcp_registry = mcp_registry or {}
         self.notifier = notifier
+        self.handoff_writer = handoff_writer  # lightweight model that writes the stop hand-over
         self.runs_dir = runs_dir
         self.usage = usage
         self.history = history
@@ -228,7 +234,11 @@ class RelayEngine:
         tmp = d / f"run.json.{threading.get_ident()}.tmp"
         tmp.write_text(run.model_dump_json(indent=2), encoding="utf-8")
         os.replace(tmp, d / "run.json")
-        (d / "HANDOFF.md").write_text(run.baton.to_markdown(max_output_chars=None), encoding="utf-8")
+        # HANDOFF.md exists only while there is something to hand over; a finished run's record stays in run.json
+        if run.status == "done":
+            (d / "HANDOFF.md").unlink(missing_ok=True)
+        else:
+            (d / "HANDOFF.md").write_text(run.baton.to_markdown(max_output_chars=None), encoding="utf-8")
         # Full stage outputs live on disk; prompts carry a capped copy plus this path.
         (d / "outputs").mkdir(exist_ok=True)
         for stage, text in run.baton.outputs.items():
@@ -284,6 +294,34 @@ class RelayEngine:
 
     def _repo(self, run: RunState) -> RepoSpec | None:
         return self.repos.repos.get(run.repo) if run.repo else None
+
+    def _previous_handoff(self, session_id: str) -> str:
+        """The hand-over of the session's last run when it did not finish, so a re-request continues from it."""
+        turns = self.history.turns(session_id)
+        if not turns:
+            return ""
+        try:
+            prev = self.load(turns[-1]["run_id"])
+        except (OSError, ValueError):
+            return ""
+        if prev.status == "done" or prev.baton.stop is None:
+            return ""
+        return f"- 이전 실행: `{prev.id}` · 목표: {prev.baton.goal.splitlines()[0][:200]}\n\n" + prev.baton.stop.to_markdown()
+
+    def _clear_session_handoffs(self, run: RunState) -> None:
+        """A finished request closes the session's open hand-overs: remove the other runs' HANDOFF.md files."""
+        for t in self.history.turns(run.session_id):
+            if t["run_id"] != run.id:
+                (self._dir(t["run_id"]) / "HANDOFF.md").unlink(missing_ok=True)
+
+    def project_context(self, run: RunState) -> ProjectContext | None:
+        repo = self._repo(run)
+        if repo is not None and not repo.project_context:
+            return None
+        try:
+            return discover(Path(run.workdir))
+        except OSError:
+            return None
 
     # --- lifecycle ---------------------------------------------------------
     DEFAULT_APPROVAL = "ai"
@@ -356,7 +394,8 @@ class RelayEngine:
             session_id=session_id,
             relay=str(relay_path.resolve()),
             workdir=str(workdir.resolve()),
-            baton=Baton(goal=goal, session_context=self.history.session_context(session_id)),
+            baton=Baton(goal=goal, session_context=self.history.session_context(session_id),
+                        previous_handoff=self._previous_handoff(session_id)),
             workspace_mode=mode,
             repo=repo,
             auto_apply=bool(auto_apply),
@@ -773,27 +812,76 @@ class RelayEngine:
             self._runners[name] = self._runner_factory(name)
         return self._runners[name]
 
-    PARTIAL_KINDS = ("tool_use", "mcp_call")
+    EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
+
+    def _stage_work(self, run: RunState, stage: str) -> tuple[list[str], list[str]]:
+        """What the interrupted stage said and which files it changed (work, not the tool log)."""
+        events = self.history.events(run.id)
+        starts = [i for i, e in enumerate(events) if e["stage"] == stage and e["kind"] == "stage_started"]
+        said: list[str] = []
+        files: list[str] = []
+        for e in events[starts[-1] + 1:] if starts else []:
+            if e["stage"] != stage:
+                continue
+            d = e["detail"]
+            if e["kind"] == "note" and d.get("text"):
+                said.append(" ".join(str(d["text"]).split())[:600])
+            elif e["kind"] == "stage_answer" and d.get("summary"):
+                said.append(" ".join(str(d["summary"]).split())[:600])
+            elif e["kind"] == "tool_use" and d.get("tool") in self.EDIT_TOOLS and d.get("target"):
+                if d["target"] not in files:
+                    files.append(d["target"])
+        return said[-6:], files[:30]
+
+    def _handoff_facts(self, run: RunState, stop: StopNote, said: list[str], files: list[str]) -> str:
+        b = run.baton
+        parts = [f"요청(목표): {b.goal}"]
+        if b.user_notes:
+            parts.append("실행 중 사용자 추가 지시:\n" + "\n".join(f"- {n}" for n in b.user_notes))
+        parts.append(f"중단: {stop.kind} · 멈춘 단계 {stop.stage} · 사유 {stop.reason}")
+        if b.log:
+            parts.append("끝난 단계의 결과:\n" + "\n".join(f"- [{e.stage}] {e.summary}" for e in b.log[-8:]))
+        if b.state and b.state != "시작 전":
+            parts.append(f"현재 상태: {b.state}")
+        if b.decisions:
+            parts.append("결정:\n" + "\n".join(f"- {d.decision} — {d.reason}" for d in b.decisions[-8:]))
+        if b.open_issues:
+            parts.append("미해결 이슈:\n" + "\n".join(f"- {i}" for i in b.open_issues))
+        if b.next_steps:
+            parts.append("예정된 다음 작업:\n" + "\n".join(f"- {i}" for i in b.next_steps))
+        if stop.remaining_stages:
+            parts.append("남은 단계: " + " → ".join(stop.remaining_stages))
+        if said:
+            parts.append(f"멈춘 단계({stop.stage})에서 AI 가 남긴 말:\n" + "\n".join(f"- {s}" for s in said))
+        if files:
+            parts.append(f"멈춘 단계({stop.stage})에서 바꾼 파일: " + ", ".join(files))
+        return "\n\n".join(parts)[:12000]
+
+    @staticmethod
+    def _plain_handoff(run: RunState, stop: StopNote, files: list[str]) -> str:
+        """Same three sections without an AI call (no writer configured, or the call failed)."""
+        b = run.baton
+        asked = [b.goal.splitlines()[0][:300]] + b.user_notes
+        done = [f"[{e.stage}] {e.summary}" for e in b.log[-8:]]
+        if files:
+            done.append(f"[{stop.stage}] 바꾼 파일: " + ", ".join(files[:15]))
+        left = b.next_steps or [f"`{s}` 단계" for s in stop.remaining_stages]
+
+        def section(title: str, items: list[str]) -> list[str]:
+            return [f"### {title}"] + ([f"- {i}" for i in items] or ["- 없음"])
+
+        return "\n".join(section("요청", asked) + section("작업된 내역", done) + section("남은 일", left))
 
     def _write_stop(self, run: RunState, kind: str, stage: str, reason: str) -> None:
-        """Handoff up to the stopping point, built from the run state and activity log (no AI call)."""
+        """Hand-over up to the stopping point: request / work done / what is left, written by a lightweight
+        model (the tool log is not part of it). Saved first without AI so the stop shows up at once."""
         try:
             spec, _ = RelaySpec.load(Path(run.relay))
             names = [s.name for s in spec.stages]
         except (OSError, ValueError):
             names = []
         done = list(dict.fromkeys(h.stage for h in run.history))
-        partial: list[str] = []
-        if kind in ("cancelled", "failed") and stage != "-":
-            events = self.history.events(run.id)
-            starts = [i for i, e in enumerate(events) if e["stage"] == stage and e["kind"] == "stage_started"]
-            for e in events[starts[-1] + 1:] if starts else []:
-                if e["stage"] == stage and e["kind"] in self.PARTIAL_KINDS:
-                    d = e["detail"]
-                    label = f"{d.get('server')}.{d.get('tool')}" if e["kind"] == "mcp_call" else d.get("tool")
-                    partial.append(f"{label} {d.get('target', '')}".strip()[:160])
-            if len(partial) > 10:
-                partial = partial[:10] + [f"… 외 {len(partial) - 10}건"]
+        said, files = self._stage_work(run, stage) if stage != "-" else ([], [])
         remaining = names[run.index:] if names else []
         hint = {
             "cancelled": f"재개하면 `{stage}` 단계부터 다시 실행합니다 (relay resume {run.id})",
@@ -802,8 +890,21 @@ class RelayEngine:
             "budget": f"승인하면 예산 1회분을 더 허용하고 `{stage}` 단계부터 진행합니다 (relay approve {run.id})",
             "stage_budget": f"승인하면 `{stage}` 단계의 비용 한도를 2배로 올려 다시 실행합니다 (relay approve {run.id})",
         }.get(kind, "")
-        run.baton.stop = StopNote(kind=kind, stage=stage, reason=reason[:300], at=_now(), done_stages=done,
-                                  remaining_stages=remaining, partial_actions=partial, resume_hint=hint)
+        stop = run.baton.stop = StopNote(kind=kind, stage=stage, reason=reason[:300], at=_now(), done_stages=done,
+                                         remaining_stages=remaining, resume_hint=hint)
+        stop.summary = self._plain_handoff(run, stop, files)
+        if self.handoff_writer is None or not (run.history or said or files):
+            return
+        self.save(run)
+        try:
+            text, usage = self.handoff_writer(self._handoff_facts(run, stop, said, files))
+        except Exception as e:  # the plain hand-over stays
+            self._event(run, stage, "handoff_failed", reason=str(e)[:200])
+            return
+        stop.summary, stop.writer = text, usage.model
+        self.usage.record(run.id, f"{stage}:handoff", usage)
+        self._event(run, stage, "handoff_written", model=usage.model, input_tokens=usage.total_input,
+                    output_tokens=usage.output_tokens, cost_usd=usage.cost_usd)
 
     def _fail(self, run: RunState, stage: str, error: str, status: str = "failed") -> RunState:
         run.status, run.error = status, f"[{stage}] {error}"
@@ -825,8 +926,14 @@ class RelayEngine:
         return handle
 
     @staticmethod
-    def _stage_tools(stage: StageSpec, repo) -> list[str] | None:
+    def _stage_tools(stage: StageSpec, repo, ctx: ProjectContext | None = None) -> list[str] | None:
         tools = stage.tools
+        if tools and ctx is not None:
+            # the project's instructions and skills name commands to run: keep them working in every stage
+            extra = (["Bash"] if ctx.allowed_bash() else []) + (["Skill"] if ctx.skills else [])
+            tools = tools + [t for t in extra if t not in tools]
+            if ctx.allowed_bash():
+                return tools
         if tools and "Bash" in tools and stage.bash == "auto" and repo is not None:
             needs = repo.verify or any(t.startswith("Bash") for t in repo.allowed_tools)
             if not needs:
@@ -964,6 +1071,12 @@ class RelayEngine:
         repo = self._repo(run)
         repo_lines = "\n".join(repo.prompt_lines(repo.git_info().get("branch"))) + "\n" if repo else ""
         repo_tools = (repo.verify_tools() + repo.allowed_tools) if repo else []
+        ctx = self.project_context(run)
+        if ctx is not None:
+            self._event(run, "-", "project_context", root=ctx.root.as_posix(),
+                        instructions=[p.relative_to(ctx.root).as_posix() for p in ctx.instructions],
+                        skills=ctx.skills, mcp=list(ctx.mcp), commands=ctx.commands)
+            repo_lines += "\n".join(ctx.prompt_lines(cwd)) + "\n"
         mcp_overrides = {}
         if repo and repo.docs_root and "docs_read" in self.mcp_registry:
             entry = dict(self.mcp_registry["docs_read"])
@@ -1012,6 +1125,7 @@ class RelayEngine:
                         effort=effort, reads=stage.reads_outputs, system_mode=stage.system_mode,
                         escalated=redo and bool(stage.retry_model or stage.retry_effort))
             fresh_prompt = None
+            tools = self._stage_tools(stage, repo, ctx)
             if resume_sid:
                 self._event(run, stage.name, "stage_resumed", session=resume_sid)
             call = StageCall(
@@ -1023,15 +1137,21 @@ class RelayEngine:
                     include_outputs=stage.reads_outputs,
                     output_ref=str(self._dir(run.id) / "outputs" / "{stage}.md"),
                 )
-                + STAGE_FOOTER.format(stage=stage.name, workdir=cwd) + repo_lines,
+                + STAGE_FOOTER.format(stage=stage.name, workdir=cwd)
+                + (RESUME_LINE if run.baton.stop and run.baton.stop.kind != "awaiting_approval" else "") + repo_lines,
                 cwd=cwd,
-                tools=self._stage_tools(stage, repo),
-                mcp_servers=stage.mcp,
+                tools=tools,
+                mcp_servers=stage.mcp + ([m for m in ctx.mcp if m not in stage.mcp] if ctx and tools else []),
                 result_mode=stage.result_mode,
-                add_dirs=[str(self._dir(run.id) / "attachments")] if run.baton.attachments else [],
+                add_dirs=([str(self._dir(run.id) / "attachments")] if run.baton.attachments else [])
+                + ([ctx.root.as_posix()] if ctx and Path(cwd).resolve() != ctx.root else []),
                 allowed_tools=stage.allowed_tools + (
-                    self.extra_allowed_tools + repo_tools if "Bash" in (stage.tools or []) else []),
-                mcp_overrides=self._stage_mcp(mcp_overrides, run, stage.name, cwd),
+                    self.extra_allowed_tools + repo_tools + (ctx.allowed_bash() if ctx else [])
+                    if "Bash" in (tools or []) else []) + (ctx.allowed_other() if ctx and tools else []),
+                mcp_overrides={**(ctx.mcp if ctx else {}), **self._stage_mcp(mcp_overrides, run, stage.name, cwd)},
+                project=ctx is not None,
+                # a copy outside the project doesn't see the project's CLAUDE.md by walking up: load it via --add-dir
+                env={"CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD": "1"} if ctx and not ctx.contains(cwd) else {},
                 settings_path=hook_settings,
                 permission_mode=stage.permission_mode,
                 timeout_s=stage.timeout_s,
@@ -1050,9 +1170,12 @@ class RelayEngine:
                 # continue the same conversation: only what changed, not the whole baton again
                 fresh_prompt = call.prompt
                 notes = "\n".join(f"- {n}" for n in new_notes)
+                handoff = run.baton.stop.to_markdown() if run.baton.stop else ""
                 call = replace(call, fresh_prompt=fresh_prompt, prompt=(
-                    "[재개] 이 단계는 중단됐다가 다시 이어서 진행한다. 위 대화에서 이미 읽고 고친 것은 반복하지 말고, "
-                    "현재 파일 상태를 기준으로 남은 일만 마친 뒤 결과 JSON 을 낸다."
+                    "[재개] 이 단계는 중단됐다가 다시 이어서 진행한다. 먼저 아래 HANDOFF(중단 시점 인계서)를 읽고 "
+                    "그 기준으로 한다. 위 대화와 HANDOFF 의 '작업된 내역'은 반복하지 말고, 현재 파일 상태를 확인해 "
+                    "'남은 일'만 마친 뒤 결과 JSON 을 낸다."
+                    + (f"\n\n# HANDOFF\n{handoff}" if handoff else "")
                     + (f"\n그사이 사용자 추가 지시:\n{notes}" if notes else "")))
             self._event(run, stage.name, "prompt_breakdown", **prompt_breakdown(call.system, call.prompt))
             try:
@@ -1082,6 +1205,8 @@ class RelayEngine:
                 return self._fail(run, stage.name, str(e))
 
             run.stage_sessions.pop(stage.name, None)  # finished: a later redo starts fresh
+            run.baton.stop = None  # the hand-over was for the stage that picked the work back up
+            run.baton.previous_handoff = ""
             self.usage.record(run.id, stage.name, usage)
             run.baton = result.apply(run.baton, stage.name)
             run.history.append(StageRecord(
@@ -1127,6 +1252,7 @@ class RelayEngine:
         run.status = "done"
         run.baton.stop = None
         self._event(run, "-", "run_done")
+        self._clear_session_handoffs(run)
         self._settle_workspace(run)
         if ws is not None and run.workspace_mode == "copy" and run.auto_apply and run.changes_status == "ready":
             try:

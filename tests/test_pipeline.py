@@ -89,7 +89,7 @@ def test_gate_then_done(setup):
     run = engine.advance(run.id)
     assert run.status == "done"
     assert [h.stage for h in run.history] == ["scout", "plan", "build", "review"]
-    assert (engine.runs_dir / run.id / "HANDOFF.md").exists()
+    assert not (engine.runs_dir / run.id / "HANDOFF.md").exists()  # finished: nothing left to hand over
 
 
 def test_stage_sees_only_requested_outputs(setup):

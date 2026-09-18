@@ -42,6 +42,8 @@ class RepoSpec(BaseModel):
     hook_only: list[str] | None = None  # top-level folders not scanned (default ["Engine"]); only hook backups there
     max_snapshot_mb: float | None = None  # override the global snapshot size limit
     notes: str = ""
+    # apply the folder's own CLAUDE.md (up the tree), .claude/skills, MCP servers and the commands they name
+    project_context: bool = True
 
     @property
     def resolved(self) -> Path | None:

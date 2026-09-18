@@ -72,6 +72,8 @@ class StageCall:
     live: "LiveChannel | None" = None  # user messages injected into the running session (Claude Code)
     result_mode: str = "schema"  # claude_cli: "text" = JSON object at the end of the answer, "schema" = --json-schema
     add_dirs: list[str] = field(default_factory=list)  # extra readable folders (user attachments)
+    project: bool = False  # the folder's own CLAUDE.md / skills / MCP apply (never --safe-mode or skill-less)
+    env: dict[str, str] = field(default_factory=dict)  # extra environment for the CLI process
     # claude_cli: keep the conversation (session_id) so a cancelled/failed stage can be continued with
     # resume_session instead of re-exploring from scratch
     session_id: str | None = None
@@ -194,6 +196,7 @@ def run_process(args: list[str], call: StageCall, stdin_text: str | None,
         proc = subprocess.Popen(
             args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, encoding="utf-8", errors="replace", cwd=call.cwd,
+            env={**os.environ, **call.env} if call.env else None,
         )
     except FileNotFoundError as e:
         raise RunnerError(f"{Path(args[0]).name} not installed", "unavailable") from e
@@ -451,7 +454,7 @@ class ClaudeCliRunner:
         else:
             # Moves cwd/git-status out of the system prompt so it caches across working directories.
             args += ["--append-system-prompt", call.system, "--exclude-dynamic-system-prompt-sections"]
-        if call.isolate:
+        if call.isolate and not call.project:
             # --safe-mode also disables MCP servers and hooks, so only disable skills when either is needed.
             args += ["--disable-slash-commands"] if (call.mcp_servers or call.settings_path) else ["--safe-mode"]
         if call.settings_path:

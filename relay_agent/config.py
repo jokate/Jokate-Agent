@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 import os
 import sys
 from functools import cached_property
@@ -44,6 +45,7 @@ class Config(BaseModel):
     # Required for any request that is not from this machine (env KATAE_TOKEN wins). Empty = localhost only.
     auth_token: str = ""
     notify: bool = True  # Windows toast when a run finishes, fails or needs approval
+    handoff_model: str = "haiku"  # writes the hand-over when a run stops ("" = no AI, engine-built only)
 
     @classmethod
     def load(cls, path: Path | None = None) -> "Config":
@@ -84,6 +86,7 @@ def build_engine(cfg: Config):
     """Engine wired with the configured stores, provider registry and real runners."""
     from .history import HistoryStore
     from .notify import Notifier
+    from .handoff import HandoffWriter
     from .pipeline import RelayEngine
     from .providers import ProviderRegistry
     from .repos import RepoRegistry
@@ -103,4 +106,5 @@ def build_engine(cfg: Config):
         repos=RepoRegistry(cfg.repos),
         mcp_registry=cfg.mcp_registry,
         notifier=Notifier(cfg.server_url, cfg.notify),
+        handoff_writer=HandoffWriter(cfg.handoff_model) if cfg.handoff_model and shutil.which("claude") else None,
     )

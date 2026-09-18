@@ -52,8 +52,9 @@ def test_cancel_writes_handoff_up_to_the_stop(tmp_path):
     stop = stopped.baton.stop
     assert stopped.status == "cancelled" and stop.kind == "cancelled" and stop.stage == "build"
     assert stop.done_stages == ["scout"] and stop.remaining_stages == ["build", "review"]
-    assert any("Edit calc.py" in a for a in stop.partial_actions)
-    assert any("docs_read.search" in a for a in stop.partial_actions)
+    # request / work done / what is left — changed files are work, the tool log is not
+    assert "### 요청" in stop.summary and "### 작업된 내역" in stop.summary and "### 남은 일" in stop.summary
+    assert "calc.py" in stop.summary and "docs_read" not in stop.summary and not stop.partial_actions
     handoff = (engine.runs_dir / run.id / "HANDOFF.md").read_text(encoding="utf-8")
     assert "## 중단 지점" in handoff and "relay resume" in handoff
 

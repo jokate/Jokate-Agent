@@ -61,7 +61,10 @@ uv run relay repo clone mnys --url <git url>          # on a new machine: clone 
 - **Summary** (dashboard default tab, `relay status`, `katae_status`): one line + up to 3 key actions per stage + changed files + verify commands + MCP/tool usage + cost.
 - **User checklist:** only what the AI can't verify itself, as checkboxes (state saved per browser).
 - **Diagrams:** only when a flow or structure changed, the AI draws Mermaid and the dashboard renders it. Stage prompts never carry diagrams or highlights (no token cost).
-- **Handoff on stop:** on cancel, failure, approval wait, or budget limit, a `## Stop point` section is added to `HANDOFF.md` automatically (stage stopped at, done/remaining stages, **what that stage already did**, how to resume). No AI call.
+- **Handoff on stop:** on cancel, failure, approval wait, or budget limit, a lightweight model (`handoff_model`, default Haiku, ~$0.002) writes `HANDOFF.md` in three sections: **request / work done / what is left**. Tool calls and command history are not part of it. Without Claude, or if that call fails, the engine writes the same sections itself.
+  - **Re-runs read it first:** a resumed stage gets the handoff in its prompt, and a new request in the same session after an unfinished run carries that run's handoff.
+  - **Cleanup:** when a run finishes, its `HANDOFF.md` and the session's other open handoffs are deleted. The record stays in the dashboard.
+- **Folder context:** a run applies what the folder itself defines, like a normal Claude Code session opened there: `CLAUDE.md` up the tree, `.claude/skills`, `.mcp.json` / project MCP servers, the project's `permissions.allow`, and the commands its instructions name (e.g. `python Tools/mnys_q.py`, pre-approved). This also works from a copy workspace or a subfolder such as `MNYS/Source`. Turn it off per repo with `project_context: false`.
 - **MCP recording:** `mcp_call` (server.tool + arguments) and `mcp_result` (result size); oversized tool results are flagged as `tool_result_large`.
 - **Timeline:** tool calls fold into per-stage counts (click to expand). In the terminal, `relay log` is compact and `--full` shows everything.
 
