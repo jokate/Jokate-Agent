@@ -80,6 +80,8 @@ class HistoryStore:
             columns = {r[1] for r in self._conn.execute("PRAGMA table_info(sessions)")}
             if "repo" not in columns:  # migration for databases created before repositories existed
                 self._conn.execute("ALTER TABLE sessions ADD COLUMN repo TEXT")
+            if "completed_at" not in columns:  # the user pressed "작업 완료": the session's hand-overs are closed
+                self._conn.execute("ALTER TABLE sessions ADD COLUMN completed_at TEXT")
             self._conn.commit()
 
     def _exec(self, sql: str, params: tuple = ()) -> sqlite3.Cursor:
@@ -119,7 +121,11 @@ class HistoryStore:
             "INSERT INTO turns (session_id, at, question, relay, run_id, status) VALUES (?,?,?,?,?,?)",
             (session_id, at or now, question, relay, run_id, "pending"),
         )
-        self._exec("UPDATE sessions SET updated_at = ? WHERE id = ?", (now, session_id))
+        # a new request reopens a completed session
+        self._exec("UPDATE sessions SET updated_at = ?, completed_at = NULL WHERE id = ?", (now, session_id))
+
+    def set_completed(self, session_id: str) -> None:
+        self._exec("UPDATE sessions SET completed_at = ? WHERE id = ?", (_now(), session_id))
 
     def has_turn(self, run_id: str) -> bool:
         return bool(self._rows("SELECT 1 FROM turns WHERE run_id = ?", (run_id,)))

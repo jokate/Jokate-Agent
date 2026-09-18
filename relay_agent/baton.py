@@ -68,7 +68,9 @@ class StopNote(BaseModel):
 class Baton(BaseModel):
     goal: str
     session_context: list[str] = Field(default_factory=list, description="같은 세션의 이전 요청 한 줄 요약")
-    previous_handoff: str = Field("", description="같은 세션 직전 실행이 끝나지 못했을 때 그 인계서(HANDOFF)")
+    previous_handoff: str = Field("", description="같은 세션 직전 실행의 인계서(HANDOFF) — 작업 완료 전까지 이어짐")
+    handoff: str = Field("", description="끝난 실행의 인계서: 요청 / 작업된 내역 / 남은 일")
+    handoff_by: str = ""  # model that wrote it ("" = built by the engine)
     user_notes: list[str] = Field(default_factory=list, description="실행 중 사용자가 끼어들어 남긴 추가 지시")
     attachments: list[str] = Field(default_factory=list, description="사용자가 첨부한 파일의 절대 경로")
     state: str = "시작 전"
@@ -98,8 +100,12 @@ class Baton(BaseModel):
         lines = [f"# HANDOFF\n\n## 목표\n{self.goal}\n"]
         if self.stop:
             lines.append(self.stop.to_markdown())
+        elif self.handoff:
+            lines.append("## 인계 요약" + (f" ({self.handoff_by})" if self.handoff_by else ""))
+            lines.append(self.handoff.strip())
+            lines.append("")
         if self.previous_handoff:
-            lines.append("## 직전 실행의 인계서 (끝나지 못한 이전 요청 — 먼저 읽고, 이어지는 작업이면 여기서부터)")
+            lines.append("## 직전 실행의 인계서 (같은 작업의 이전 요청 — 먼저 읽고, 이어지는 작업이면 여기서부터)")
             lines.append(self.previous_handoff.strip())
             lines.append("")
         if self.attachments:

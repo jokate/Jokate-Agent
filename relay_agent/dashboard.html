@@ -738,7 +738,11 @@ async function openSession(id) {
   s.repo_relay = (repos.find((r) => r.name === s.repo) || {}).relay;
   S.relays = relays;
   $("sessionPanel").innerHTML = `
-    <div class="session-head" style="margin-bottom:12px"><h2>${esc(s.title)}</h2><div class="wd">${s.repo ? `📁 ${esc(s.repo)} · ` : ""}${esc(s.workdir)}</div></div>
+    <div class="session-head" style="margin-bottom:12px;display:flex;gap:12px;align-items:flex-start">
+      <div style="flex:1;min-width:0"><h2>${esc(s.title)}</h2><div class="wd">${s.repo ? `📁 ${esc(s.repo)} · ` : ""}${esc(s.workdir)}</div></div>
+      ${s.completed_at ? `<span class="wd" title="인계서(HANDOFF)가 정리됨 — 새로 요청하면 다시 열립니다">✅ 작업 완료됨</span>`
+        : s.turns.length ? `<button class="btn btn-ghost" id="completeBtn" title="이 세션의 인계서(HANDOFF)를 지웁니다. 다음 요청부터 이전 인계서를 이어받지 않습니다.">✅ 작업 완료</button>` : ""}
+    </div>
     <form class="composer" id="ask">
       <textarea class="field" name="goal" placeholder="이 세션에 이어서 요청하세요. 파일은 끌어다 놓거나 스크린샷을 붙여넣을 수 있습니다." required></textarea>
       <div class="attach-row"><button type="button" class="btn btn-ghost" id="attachBtn" title="스크린샷·로그·문서 등 (파일당 25MB)">📎 첨부</button>
@@ -1125,6 +1129,17 @@ $("restartBtn").onclick = async () => {
   }
 };
 checkVersion(); setInterval(checkVersion, 30000);
+
+/* "작업 완료": close the session's hand-overs (delegated: the session panel is re-rendered) */
+document.addEventListener("click", async (ev) => {
+  if (ev.target.id !== "completeBtn" || !S.session) return;
+  if (!confirm("이 세션의 작업을 완료로 표시할까요?\n인계서(HANDOFF)가 삭제되고, 다음 요청은 이전 인계서를 이어받지 않습니다.")) return;
+  try {
+    const r = await api(`/sessions/${S.session}/complete`, { method: "POST" });
+    toast(`✅ 작업 완료 — 인계서 ${r.handoffs_removed}개 삭제`);
+    openSession(S.session); loadSessions();
+  } catch (e) { toast(e.message, true); }
+});
 
 /* deep link from a desktop alert: /?run=<id> */
 (async () => {

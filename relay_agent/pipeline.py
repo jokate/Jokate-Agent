@@ -143,6 +143,7 @@ class RunState(BaseModel):
     # always = pause every time, never = run through. Budget limits pause in every mode.
     approval: Literal["ai", "always", "never"] = "ai"
     owner_pid: int | None = None
+    handoff_closed: bool = False  # the user marked the session's work complete: no HANDOFF.md, nothing carried on
     # stage -> Claude Code conversation id of an unfinished attempt (continued on resume, dropped when it finishes)
     stage_sessions: dict[str, str] = {}  # process advancing the run (server or a CLI); recovery leaves live owners alone
     workspace_mode: Literal["none", "copy", "inplace"] = "none"
@@ -234,8 +235,8 @@ class RelayEngine:
         tmp = d / f"run.json.{threading.get_ident()}.tmp"
         tmp.write_text(run.model_dump_json(indent=2), encoding="utf-8")
         os.replace(tmp, d / "run.json")
-        # HANDOFF.md exists only while there is something to hand over; a finished run's record stays in run.json
-        if run.status == "done":
+        # HANDOFF.md stays until the user marks the session's work complete; the record stays in run.json
+        if run.handoff_closed:
             (d / "HANDOFF.md").unlink(missing_ok=True)
         else:
             (d / "HANDOFF.md").write_text(run.baton.to_markdown(max_output_chars=None), encoding="utf-8")
@@ -296,7 +297,8 @@ class RelayEngine:
         return self.repos.repos.get(run.repo) if run.repo else None
 
     def _previous_handoff(self, session_id: str) -> str:
-        """The hand-over of the session's last run when it did not finish, so a re-request continues from it."""
+        """The hand-over of the session's last run, so the next request (a re-run or the next step) continues
+        from it — until the user marks the work complete."""
         turns = self.history.turns(session_id)
         if not turns:
             return ""
@@ -304,15 +306,33 @@ class RelayEngine:
             prev = self.load(turns[-1]["run_id"])
         except (OSError, ValueError):
             return ""
-        if prev.status == "done" or prev.baton.stop is None:
+        if prev.handoff_closed:
             return ""
-        return f"- 이전 실행: `{prev.id}` · 목표: {prev.baton.goal.splitlines()[0][:200]}\n\n" + prev.baton.stop.to_markdown()
+        body = prev.baton.stop.to_markdown() if prev.baton.stop else prev.baton.handoff
+        if not body:
+            return ""
+        state = "끝남" if prev.status == "done" else prev.status
+        return f"- 이전 실행: `{prev.id}` ({state}) · 목표: {prev.baton.goal.splitlines()[0][:200]}\n\n" + body
 
-    def _clear_session_handoffs(self, run: RunState) -> None:
-        """A finished request closes the session's open hand-overs: remove the other runs' HANDOFF.md files."""
-        for t in self.history.turns(run.session_id):
-            if t["run_id"] != run.id:
-                (self._dir(t["run_id"]) / "HANDOFF.md").unlink(missing_ok=True)
+    def complete_session(self, session_id: str) -> dict:
+        """The user says the work is done: delete the session's HANDOFF.md files and stop carrying them on."""
+        if self.history.get_session(session_id) is None:
+            raise FileNotFoundError(session_id)
+        runs = [t["run_id"] for t in self.history.turns(session_id)]
+        active = [r for r in runs if r in self._cancel]
+        if active:
+            raise ValueError(f"진행 중인 실행이 있습니다: {', '.join(active)} — 끝나거나 취소한 뒤 완료하세요")
+        closed = 0
+        for run_id in runs:
+            try:
+                run = self.load(run_id)
+            except (OSError, ValueError):
+                continue
+            closed += (self._dir(run_id) / "HANDOFF.md").exists()
+            run.handoff_closed = True
+            self.save(run)
+        self.history.set_completed(session_id)
+        return {"session_id": session_id, "runs": len(runs), "handoffs_removed": closed}
 
     def project_context(self, run: RunState) -> ProjectContext | None:
         repo = self._repo(run)
@@ -872,6 +892,53 @@ class RelayEngine:
 
         return "\n".join(section("요청", asked) + section("작업된 내역", done) + section("남은 일", left))
 
+    def _done_facts(self, run: RunState) -> str:
+        b = run.baton
+        parts = [f"요청(목표): {b.goal}"]
+        if b.user_notes:
+            parts.append("실행 중 사용자 추가 지시:\n" + "\n".join(f"- {n}" for n in b.user_notes))
+        parts.append("상태: 모든 단계를 마침")
+        if b.log:
+            parts.append("단계별 결과:\n" + "\n".join(f"- [{e.stage}] {e.summary}" for e in b.log[-10:]))
+        if b.state and b.state != "시작 전":
+            parts.append(f"현재 상태: {b.state}")
+        if b.decisions:
+            parts.append("결정:\n" + "\n".join(f"- {d.decision} — {d.reason}" for d in b.decisions[-8:]))
+        if run.changes and run.changes.get("stat"):
+            parts.append("바뀐 파일 (diff stat):\n" + str(run.changes["stat"])[:2000])
+        if b.open_issues:
+            parts.append("미해결 이슈:\n" + "\n".join(f"- {i}" for i in b.open_issues))
+        if b.next_steps:
+            parts.append("제안된 다음 작업:\n" + "\n".join(f"- {i}" for i in b.next_steps))
+        if b.user_checks:
+            parts.append("사람이 확인할 것:\n" + "\n".join(f"- {i}" for i in b.user_checks))
+        return "\n\n".join(parts)[:12000]
+
+    def _write_done_handoff(self, run: RunState) -> None:
+        """A finished run also leaves a hand-over (the next request in the session reads it until the user
+        marks the work complete). Same three sections, same lightweight model."""
+        b = run.baton
+
+        def section(title: str, items: list[str]) -> list[str]:
+            return [f"### {title}"] + ([f"- {i}" for i in items] or ["- 없음"])
+
+        b.handoff = "\n".join(section("요청", [b.goal.splitlines()[0][:300]] + b.user_notes)
+                               + section("작업된 내역", [f"[{e.stage}] {e.summary}" for e in b.log[-8:]])
+                               + section("남은 일", b.open_issues + b.next_steps))
+        b.handoff_by = ""
+        if self.handoff_writer is None:
+            return
+        self.save(run)
+        try:
+            text, usage = self.handoff_writer(self._done_facts(run))
+        except Exception as e:
+            self._event(run, "-", "handoff_failed", reason=str(e)[:200])
+            return
+        b.handoff, b.handoff_by = text, usage.model
+        self.usage.record(run.id, "-:handoff", usage)
+        self._event(run, "-", "handoff_written", model=usage.model, input_tokens=usage.total_input,
+                    output_tokens=usage.output_tokens, cost_usd=usage.cost_usd)
+
     def _write_stop(self, run: RunState, kind: str, stage: str, reason: str) -> None:
         """Hand-over up to the stopping point: request / work done / what is left, written by a lightweight
         model (the tool log is not part of it). Saved first without AI so the stop shows up at once."""
@@ -1252,8 +1319,8 @@ class RelayEngine:
         run.status = "done"
         run.baton.stop = None
         self._event(run, "-", "run_done")
-        self._clear_session_handoffs(run)
         self._settle_workspace(run)
+        self._write_done_handoff(run)
         if ws is not None and run.workspace_mode == "copy" and run.auto_apply and run.changes_status == "ready":
             try:
                 ws.apply()

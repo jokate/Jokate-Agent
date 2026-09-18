@@ -197,8 +197,8 @@ def main() -> None:
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p_session = sub.add_parser("session")
-    p_session.add_argument("action", choices=["new"])
-    p_session.add_argument("title")
+    p_session.add_argument("action", choices=["new", "complete"])
+    p_session.add_argument("title", help="new: 제목 · complete: 세션 id")
     p_session.add_argument("--workdir", default=".")
     p_session.add_argument("--repo")
     sub.add_parser("sessions")
@@ -289,7 +289,10 @@ def main() -> None:
     if args.cmd == "repo":
         print(repo_command(args, cfg))
         return
-    if args.cmd == "session":
+    if args.cmd == "session" and args.action == "complete":
+        r = engine.complete_session(args.title)
+        print(f"작업 완료: {r['session_id']} · 인계서 {r['handoffs_removed']}개 삭제")
+    elif args.cmd == "session":
         repo = engine.repos.get(args.repo) if args.repo else None
         workdir = str(repo.resolved) if repo else str(Path(args.workdir).resolve())
         s = h.create_session(args.title, workdir, args.repo)

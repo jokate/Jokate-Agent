@@ -415,6 +415,15 @@ def delete_session(session_id: str, force: bool = False) -> dict:
         raise HTTPException(404, f"session {session_id} not found")
 
 
+@app.post("/sessions/{session_id}/complete")
+def complete_session(session_id: str) -> dict:
+    """The user marks the work done: the session's HANDOFF files are deleted and no longer carried on."""
+    try:
+        return _conflict(engine.complete_session, session_id)
+    except FileNotFoundError:
+        raise HTTPException(404, f"session {session_id} not found")
+
+
 @app.get("/sessions/{session_id}")
 def get_session(session_id: str) -> dict:
     session = engine.history.get_session(session_id)

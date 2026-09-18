@@ -82,7 +82,9 @@ def test_resume_reads_the_handoff_then_done_removes_it(tmp_path):
     retry_prompt = runner.prompts["build"][-1]
     assert "HANDOFF" in retry_prompt and "calc.py 수정 시작" in retry_prompt
     assert done.status == "done" and done.baton.stop is None
-    assert not (engine.runs_dir / run.id / "HANDOFF.md").exists()
+    # a finished run leaves its own hand-over (written by the same model) until the user completes the work
+    assert done.baton.handoff == WRITTEN and done.baton.handoff_by == "haiku"
+    assert (engine.runs_dir / run.id / "HANDOFF.md").exists()
 
 
 def test_new_request_in_session_carries_the_unfinished_handoff(tmp_path):
@@ -96,10 +98,20 @@ def test_new_request_in_session_carries_the_unfinished_handoff(tmp_path):
     done = engine.advance(second.id)
     assert done.status == "done"
     assert "calc.py 수정 시작" in runner.prompts["scout"][-1]  # the first stage of the re-request read it
-    assert not (engine.runs_dir / first.id / "HANDOFF.md").exists()  # session finished: open hand-overs removed
+    assert (engine.runs_dir / first.id / "HANDOFF.md").exists()  # a finished run does not close the work
 
     third = engine.create(relay, "다음 일", session_id=first.session_id)
-    assert third.baton.previous_handoff == ""
+    assert second.id in third.baton.previous_handoff  # the finished run's hand-over carries on too
+    engine.advance(third.id)
+
+    # only the user's "작업 완료" closes the session's hand-overs
+    r = engine.complete_session(first.session_id)
+    assert r["handoffs_removed"] == 3 and engine.history.get_session(first.session_id)["completed_at"]
+    for run_id in (first.id, second.id, third.id):
+        assert not (engine.runs_dir / run_id / "HANDOFF.md").exists()
+    fourth = engine.create(relay, "새 작업", session_id=first.session_id)
+    assert fourth.baton.previous_handoff == ""
+    assert engine.history.get_session(first.session_id)["completed_at"] is None  # a new request reopens it
 
 
 def project(tmp_path):
