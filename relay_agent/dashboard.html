@@ -681,17 +681,27 @@ async function loadSessions() {
 async function deleteSessions(ids) {
   if (!ids.length) return;
   const names = ids.map((id) => document.querySelector(`.session[data-id="${id}"] .t span`)?.textContent.trim() || id);
-  if (!confirm(`세션 ${ids.length}개를 삭제할까요?\n${names.slice(0, 8).join("\n")}${names.length > 8 ? "\n…" : ""}\n\n질문 이력·작업 기록·HANDOFF 가 지워집니다 (사용량 통계는 남음).`)) return;
+  // look first, then ask once with the facts
+  const checks = await Promise.all(ids.map((id) => api(`/sessions/${id}/delete-check`).catch(() => null)));
+  const busy = ids.filter((id, i) => checks[i]?.active?.length);
+  const targets = ids.filter((id) => !busy.includes(id));
+  if (busy.length) toast(`진행 중인 실행이 있는 세션 ${busy.length}개는 건너뜁니다 — 먼저 취소하세요`, true);
+  if (!targets.length) return;
+  const count = (key) => targets.reduce((n, id) => n + (checks[ids.indexOf(id)]?.[key]?.length || 0), 0);
+  const unapplied = count("unapplied"), rollback = count("rollback_only");
+  const shown = targets.map((id) => names[ids.indexOf(id)]);
+  const notes = [
+    "질문 이력·작업 기록·HANDOFF 가 지워집니다 (사용량 통계는 남음).",
+    unapplied ? `⚠️ 복사본에만 있고 원본에 적용하지 않은 변경 ${unapplied}건이 사라집니다.` : "",
+    rollback ? `원본에 이미 반영된 변경 ${rollback}건은 그대로 남고, 되돌리기 백업만 지워집니다.` : "",
+  ].filter(Boolean).join("\n");
+  if (!confirm(`세션 ${targets.length}개를 삭제할까요?\n${shown.slice(0, 8).join("\n")}${shown.length > 8 ? "\n…" : ""}\n\n${notes}`)) return;
   let done = 0;
-  for (const id of ids) {
+  for (const id of targets) {
     try {
-      await api(`/sessions/${id}`, { method: "DELETE" });
+      await api(`/sessions/${id}?force=true`, { method: "DELETE" });
       done++;
-    } catch (e) {
-      if (/적용·폐기를 정하지 않은 변경/.test(e.message) && confirm(`${e.message}\n\n그래도 삭제할까요?`)) {
-        try { await api(`/sessions/${id}?force=true`, { method: "DELETE" }); done++; } catch (e2) { toast(e2.message, true); }
-      } else toast(e.message, true);
-    }
+    } catch (e) { toast(e.message, true); }
     if (S.session === id) {
       S.session = null; S.run = null; clearInterval(S.timer);
       $("sessionPanel").innerHTML = `<div class="empty"><div class="big">🏁</div><div>왼쪽에서 세션을 고르거나 새로 만드세요</div></div>`;

@@ -438,9 +438,8 @@ class RelayEngine:
         run.baton.user_notes += new
         return new
 
-    def delete_session(self, session_id: str, force: bool = False) -> dict:
-        """Delete a session and its runs' folders (logs, HANDOFF, backups). Usage totals are kept.
-        Refuses while a run is active; runs with undecided changes need force (their backups go too)."""
+    def delete_check(self, session_id: str) -> dict:
+        """What deleting a session would lose, so the UI can ask once with the facts."""
         if self.history.get_session(session_id) is None:
             raise FileNotFoundError(session_id)
         runs = []
@@ -449,13 +448,25 @@ class RelayEngine:
                 runs.append(self.load(turn["run_id"]))
             except (FileNotFoundError, ValueError):
                 continue
-        active = [r.id for r in runs if r.status in ("running", "pending") or r.id in self._cancel]
-        if active:
-            raise ValueError(f"진행 중인 실행이 있어 삭제할 수 없습니다: {', '.join(active)} — 먼저 취소하세요")
-        undecided = [r.id for r in runs if r.changes_status == "ready"]
-        if undecided and not force:
-            raise ValueError(f"적용·폐기를 정하지 않은 변경이 있습니다: {', '.join(undecided)} "
-                             "— 삭제하면 되돌리기 백업도 사라집니다")
+        ready = [r for r in runs if r.changes_status == "ready"]
+        return {
+            "runs": runs,
+            "active": [r.id for r in runs if r.status in ("running", "pending") or r.id in self._cancel],
+            # changes that exist only in a copy: deleting throws them away
+            "unapplied": [r.id for r in ready if r.workspace_mode == "copy"],
+            # changes already in the original (in place): only the rollback backup goes
+            "rollback_only": [r.id for r in ready if r.workspace_mode != "copy"],
+        }
+
+    def delete_session(self, session_id: str, force: bool = False) -> dict:
+        """Delete a session and its runs' folders (logs, HANDOFF, backups). Usage totals are kept.
+        Refuses while a run is active. Changes that live only in a copy need force; in-place changes are
+        already in the original, so only their rollback backup goes and that doesn't block."""
+        check = self.delete_check(session_id)
+        if check["active"]:
+            raise ValueError(f"진행 중인 실행이 있어 삭제할 수 없습니다: {', '.join(check['active'])} — 먼저 취소하세요")
+        if check["unapplied"] and not force:
+            raise ValueError(f"복사본에만 있고 원본에 적용하지 않은 변경이 있습니다: {', '.join(check['unapplied'])}")
         removed = self.history.delete_session(session_id)
         for run_id in removed:
             shutil.rmtree(self._dir(run_id), ignore_errors=True)

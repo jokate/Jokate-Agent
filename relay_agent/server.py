@@ -382,6 +382,15 @@ def match_repo(path: str) -> dict:
     return {"repo": repo.name if repo else None}
 
 
+@app.get("/sessions/{session_id}/delete-check")
+def delete_check(session_id: str) -> dict:
+    try:
+        c = engine.delete_check(session_id)
+    except FileNotFoundError:
+        raise HTTPException(404, f"session {session_id} not found")
+    return {k: v for k, v in c.items() if k != "runs"} | {"run_count": len(c["runs"])}
+
+
 @app.delete("/sessions/{session_id}")
 def delete_session(session_id: str, force: bool = False) -> dict:
     try:

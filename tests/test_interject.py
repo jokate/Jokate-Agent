@@ -157,9 +157,12 @@ def test_delete_session_removes_runs_but_not_active_or_undecided_ones(tmp_path):
     with pytest.raises(ValueError, match="진행 중"):
         engine.delete_session(sid2)
     pending = engine.advance(pending.id)
-    pending.changes_status = "ready"
+    pending.changes_status, pending.workspace_mode = "ready", "inplace"
     engine.save(pending)
-    with pytest.raises(ValueError, match="적용·폐기"):
+    assert engine.delete_check(sid2)["rollback_only"] == [pending.id]  # already in the original: no block
+    pending.workspace_mode = "copy"
+    engine.save(pending)
+    with pytest.raises(ValueError, match="복사본에만"):
         engine.delete_session(sid2)
     assert engine.delete_session(sid2, force=True)["runs"] == 1
 
