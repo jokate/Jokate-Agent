@@ -501,7 +501,7 @@ Rules:
   Look a little wider in step 1 rather than coming back for one more grep. No no-op or "just checking" turns.
 - Edit with the Edit tool (small exact replacements). Run only the verification command you need, once.
 - Bash runs without a human: only pre-approved commands work — the verification/project commands listed in the
-  prompt and read-only ls, cat, head, tail, wc, grep, rg, find, git log/show/diff/status. Every part of a chained
+  prompt and read-only inspection (ls, cat, head, tail, wc, grep, rg, find, tasklist, ps, git log/show/diff/status …). Every part of a chained
   command is checked; one unapproved part blocks the whole line. Stay inside the working directory.
 - If a command is denied or needs approval, do NOT retry it or a variant. Note it in open_issues and continue.
 {finish}
@@ -536,9 +536,17 @@ def os_name() -> str:
 
 # Read-only inspection commands a headless stage may always run (with Bash). Claude Code checks every part
 # of a chained command; without these, `cat a; ls b` stops at "requires approval" and the turn is wasted.
-READ_ONLY_BASH = ["Bash(ls:*)", "Bash(dir:*)", "Bash(cat:*)", "Bash(head:*)", "Bash(tail:*)", "Bash(wc:*)",
-                  "Bash(grep:*)", "Bash(rg:*)", "Bash(find:*)", "Bash(pwd)", "Bash(echo:*)", "Bash(which:*)",
-                  "Bash(git log:*)", "Bash(git show:*)", "Bash(git diff:*)", "Bash(git status:*)", "Bash(git blame:*)"]
+READ_ONLY_BASH = [f"Bash({c}:*)" for c in (
+    # files and text (nothing here writes: no sed/awk/tee, no mv/cp/rm/mkdir)
+    "ls", "dir", "tree", "cat", "type", "head", "tail", "wc", "grep", "rg", "findstr", "find", "where", "which",
+    "sort", "uniq", "cut", "diff", "cmp", "stat", "file", "du", "df", "realpath", "basename", "dirname",
+    "md5sum", "sha256sum", "echo", "printf", "env", "printenv", "date", "uname", "pwd",
+    # processes / network state (Windows and Unix)
+    "tasklist", "ps", "netstat",
+    # git, read-only
+    "git log", "git show", "git diff", "git status", "git blame", "git branch", "git ls-files", "git rev-parse",
+    "git grep", "git remote",
+)]
 
 
 class ClaudeCliRunner:
