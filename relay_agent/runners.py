@@ -103,7 +103,9 @@ class TokenWatch:
                 if isinstance(block, dict) and block.get("type") == "tool_result":
                     content = block.get("content")
                     text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
-                    name, target = pending.get(block.get("tool_use_id", ""), ("?", ""))
+                    if block.get("tool_use_id", "") not in pending:
+                        continue  # the StructuredOutput acknowledgement, not a tool the model used
+                    name, target = pending[block["tool_use_id"]]
                     self.results.append({"tool": name, "target": target, "chars": len(text)})
 
     def report(self) -> dict:
