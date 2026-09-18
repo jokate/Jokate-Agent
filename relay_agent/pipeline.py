@@ -71,6 +71,12 @@ class StageSpec(BaseModel):
     retry_model: str | None = Field(None, description="stronger model used when this stage runs again")
     system_mode: Literal["replace", "append"] = "replace"
     isolate: bool = False
+    # text: the result is a JSON object at the end of the answer (measured: one turn less than the
+    # structured-output tool, and that turn re-reads the whole context). schema: Claude Code --json-schema.
+    result_mode: Literal["text", "schema"] = "text"
+    # auto: keep Bash only if the repo has verify commands or allowed Bash tools (or no repo is registered).
+    # The Bash tool definition alone is ~3.5K tokens, re-read on every turn. always: keep it.
+    bash: Literal["auto", "always"] = "auto"
     max_budget_usd: float | None = None
     fallback_model: str | None = None
 
@@ -722,6 +728,16 @@ class RelayEngine:
             self.history.add_event(run_id, stage, kind, detail)
         return handle
 
+    @staticmethod
+    def _stage_tools(stage: StageSpec, repo) -> list[str] | None:
+        tools = stage.tools
+        if tools and "Bash" in tools and stage.bash == "auto" and repo is not None:
+            needs = repo.verify or any(t.startswith("Bash") for t in repo.allowed_tools)
+            if not needs:
+                # without Bash the stage greps with the dedicated tools instead
+                return [t for t in tools if t != "Bash"] + [t for t in ("Grep", "Glob") if t not in tools]
+        return tools
+
     def _stage_mcp(self, overrides: dict, run: RunState, stage: str, cwd: Path) -> dict:
         """The digest server needs to know where it works and whom to bill (its summaries are separate calls)."""
         if "digest" not in self.mcp_registry:
@@ -902,8 +918,9 @@ class RelayEngine:
                 )
                 + STAGE_FOOTER.format(stage=stage.name, workdir=cwd) + repo_lines,
                 cwd=cwd,
-                tools=stage.tools,
+                tools=self._stage_tools(stage, repo),
                 mcp_servers=stage.mcp,
+                result_mode=stage.result_mode,
                 allowed_tools=stage.allowed_tools + (
                     self.extra_allowed_tools + repo_tools if "Bash" in (stage.tools or []) else []),
                 mcp_overrides=self._stage_mcp(mcp_overrides, run, stage.name, cwd),

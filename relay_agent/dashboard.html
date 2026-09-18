@@ -619,8 +619,8 @@ async function loadStats() {
   $("stats").innerHTML = [
     ["질문", st.turns, "var(--c1)"],
     ["누적 비용", fmt$(st.cost_usd), "var(--c3)"],
-    ["실질 입력 / 출력", `${fmtN(st.billed_input_equiv ?? st.input_tokens)}<small style="font-size:12px;color:var(--muted);font-weight:600"> / ${fmtN(st.output_tokens)}</small>`, "var(--c2)", null,
-      `전체 입력 ${fmtN(st.input_tokens)} = 새 입력 ${fmtN(st.fresh_input_tokens ?? 0)} + 캐시 쓰기 ${fmtN(st.cache_write_tokens ?? 0)}(1.25배) + 캐시 읽기 ${fmtN(st.cache_read_tokens ?? 0)}(0.1배). 실질 입력은 과금 기준으로 환산한 값`],
+    ["입력 / 출력 토큰", `${fmtN(st.input_tokens)}<small style="font-size:12px;color:var(--muted);font-weight:600"> / ${fmtN(st.output_tokens)}</small>`, "var(--c2)", null,
+      `사용량 기준 전체 입력 = 새 입력 ${fmtN(st.fresh_input_tokens ?? 0)} + 캐시 쓰기 ${fmtN(st.cache_write_tokens ?? 0)} + 캐시 읽기(턴마다 다시 읽은 양) ${fmtN(st.cache_read_tokens ?? 0)}. 요금 환산으로는 ${fmtN(st.billed_input_equiv ?? 0)}`],
     ["캐시 적중", pct + "%", "var(--ok)", pct],
   ].map(([k, v, c, p, tip]) => `<div class="glass stat" style="--accent:${c}" ${tip ? `title="${esc(tip)}"` : ""}><div class="k">${k}${tip ? " ⓘ" : ""}</div><div class="v">${v}</div>${p != null ? `<div class="ring" style="--p:${p}"></div>` : ""}</div>`).join("");
 }

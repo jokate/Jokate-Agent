@@ -70,6 +70,7 @@ class StageCall:
     on_event: Callable[[str, dict], None] | None = None
     cancel_event: threading.Event | None = None
     live: "LiveChannel | None" = None  # user messages injected into the running session (Claude Code)
+    result_mode: str = "schema"  # claude_cli: "text" = JSON object at the end of the answer, "schema" = --json-schema
 
     def emit(self, kind: str, detail: dict) -> None:
         if self.on_event:
@@ -316,10 +317,15 @@ Rules:
   the whole context, so fewer turns = far fewer tokens.
 - Edit with the Edit tool (small exact replacements). Run only the verification command you need, once.
 - If a command is denied or needs approval, do NOT retry it or a variant. Note it in open_issues and continue.
-- Finish with ONE structured output call: summary, state, open_issues, next_steps are required; add decisions_added,
-  pointers_added, output, verdict (pass|retry|fail) when relevant. Write the text fields in Korean.
-
+{finish}
 """
+
+FINISH_SCHEMA = """- Finish with ONE structured output call: summary, state, open_issues, next_steps are required; add decisions_added,
+  pointers_added, output, verdict (pass|retry|fail) when relevant. Write the text fields in Korean."""
+FINISH_TEXT = """- Your FINAL message is only one JSON object (no code fence, no prose). Required: "summary" (1-2 sentences),
+  "state" (overall status), "open_issues" [str], "next_steps" [str]. Optional: "decisions_added" [{"decision","reason"}],
+  "pointers_added" [{"path","anchor","note"}], "output" (deliverable for the next stage), "verdict" (pass|retry|fail),
+  "highlights" [<=3 short str], "user_checks" [str], "diagram" (mermaid, only if it helps). Text values in Korean."""
 
 
 DIGEST_RULE = """
@@ -353,17 +359,19 @@ class ClaudeCliRunner:
             self.exe, "-p",
             "--output-format", "stream-json", "--verbose",
             "--input-format", "stream-json",  # keeps stdin open so a user note can join the running session
-            "--json-schema", json.dumps(result_schema(), ensure_ascii=False),
             "--no-session-persistence",
             "--permission-mode", call.permission_mode,
             "--strict-mcp-config",
         ]
+        if call.result_mode != "text" or call.system_mode != "replace":
+            args += ["--json-schema", json.dumps(result_schema(), ensure_ascii=False)]
         if call.model:
             args += ["--model", call.model]
         if call.system_mode == "replace":
             # Replacing Claude Code's default system prompt was measured at ~7.5K -> ~0.6K input tokens.
             # It also drops the environment/tool-usage guidance, so restate the essentials.
-            args += ["--system-prompt", REPLACE_PREAMBLE.format(cwd=call.cwd, os_name=os_name())
+            finish = FINISH_TEXT if call.result_mode == "text" else FINISH_SCHEMA
+            args += ["--system-prompt", REPLACE_PREAMBLE.format(cwd=call.cwd, os_name=os_name(), finish=finish)
                      + (DIGEST_RULE if "digest" in call.mcp_servers else "") + call.system]
         else:
             # Moves cwd/git-status out of the system prompt so it caches across working directories.
@@ -457,6 +465,11 @@ class ClaudeCliRunner:
             raise error(f"claude -p ended without a result (exit {code}): {text}",
                         "quota" if rejected or looks_like_quota(text) else "error")
         subtype = data.get("subtype") or ""
+        if "structured_output" not in data and not data.get("is_error") and isinstance(data.get("result"), str):
+            try:
+                data = {**data, "structured_output": extract_result(data["result"])}
+            except RunnerError:
+                pass  # not JSON: _salvage keeps the prose as the stage output
         salvage = self._salvage(call, data, subtype, box["texts"])
         if salvage is not None:
             data = {**data, "structured_output": salvage, "is_error": False}
@@ -573,6 +586,14 @@ class ClaudeCliRunner:
                 text = block["text"].strip()
                 if texts is not None:
                     texts.append(text)
+                if text.startswith("{") and '"summary"' in text:
+                    try:
+                        answer = extract_result(text)  # the final result JSON (text result mode)
+                        call.emit("stage_answer", {"summary": answer.summary[:500], "verdict": answer.verdict,
+                                                   "open_issues": answer.open_issues[:8]})
+                        continue
+                    except RunnerError:
+                        pass
                 call.emit("note", {"text": text[:4000]})
             elif btype == "thinking" and (block.get("thinking") or "").strip():
                 call.emit("thinking", {"text": block["thinking"].strip()[:4000]})

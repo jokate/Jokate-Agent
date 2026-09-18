@@ -131,6 +131,36 @@ uv run relay repo clone mnys --url <git url>          # on a new machine: clone 
   - Summarizer call savings (same document): $0.018 → $0.0067 by using a neutral folder + `--safe-mode` + no thinking.
 - All stages of the shipped relays (default, quick, quick-fable) have `mcp: [digest]`. The cost appears separately as `<stage>:digest` in the token watch.
 
+## Cutting usage (input tokens themselves) — measured
+Subscription usage also counts tokens re-read on every turn, so the goal is to cut **total input**, not the bill.
+- **Structure:** every turn re-reads (tool definitions + system prompt + everything so far).
+  - On one feature-add task, tool definitions alone were ~70% of the total.
+  - Levers: ① fixed tokens per turn ② number of turns ③ large tool results (→ digest).
+- **Tool definition sizes** (Haiku, one-shot):
+
+| Tools | Starting tokens |
+|---|---|
+| None | 539 |
+| Read | 1,725 |
+| Read+Grep+Glob | 3,033 |
+| +Edit/Write | 3,750 |
+| +Bash | 6,819 |
+| digest MCP | +230 |
+
+- **Applied:**
+  - Stages that edit files use `Read, Edit, Write, Bash` (grep/ls go through Bash).
+  - `bash: auto`: Bash is dropped when the repo has no verify commands (Grep/Glob are added instead).
+  - The result is a JSON object at the end of the answer (`result_mode: text`): no structured-output tool definition and no extra turn. Only the key names are given.
+- **Result** (same task, quick relay):
+
+| | Before | After |
+|---|---|---|
+| Fixed tokens on turn 1 | 11.3K | 8.9K |
+| Average per turn | 14.7K | 12.0K (−18%) |
+| Total input per run (avg) | 151K | 109K |
+
+  - The number of turns itself varies 8–12 between runs on the same task, so compare averages over several runs.
+
 ## Token watch — where the tokens go
 - The headline "실질 입력" is the input converted at billing rates (cache reads 0.1×, cache writes 1.25×). The full-input total (mostly cache reads) is in the tooltip.
 - The "토큰 감시" tab shows, per phase:
