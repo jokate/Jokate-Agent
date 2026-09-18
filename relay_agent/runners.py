@@ -313,8 +313,11 @@ Environment: {os_name}. Working directory: {cwd} (already the current directory;
 Rules:
 - Locate with Grep/Glob first, then Read only the needed line ranges (offset/limit). Never read whole large files.
 - Use tools directly without narration. Do not repeat file contents in your answer.
-- Batch independent tool calls (several Grep/Glob/Read at once) in ONE message: every extra turn re-reads
-  the whole context, so fewer turns = far fewer tokens.
+- Turn budget: every turn re-reads the whole context (10K+ tokens), so aim for about 4 turns:
+  1) explore ONCE: put every search/read you may need in one message (several tool calls in parallel, or one
+     Bash command chaining them with `;`, e.g. `cat -n a.py; ls tests; grep -rn "X" src | head -40`);
+  2) edit ONCE: all Edit/Write calls in one message;  3) verify ONCE: the single relevant command;  4) answer.
+  Look a little wider in step 1 rather than coming back for one more grep. No no-op or "just checking" turns.
 - Edit with the Edit tool (small exact replacements). Run only the verification command you need, once.
 - If a command is denied or needs approval, do NOT retry it or a variant. Note it in open_issues and continue.
 {finish}
