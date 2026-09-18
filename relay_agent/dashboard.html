@@ -356,6 +356,10 @@ textarea.field { resize: vertical; min-height: 84px; }
   .live.stuck .dot { background: #ff6b6b; }
   .live.stuck { border-color: #ff6b6b66; }
   @keyframes beat { 0%, 100% { transform: scale(.8); opacity: .6; } 50% { transform: scale(1.25); opacity: 1; } }
+  .stale-banner { position: fixed; left: 50%; top: 10px; transform: translateX(-50%); z-index: 60; display: flex; gap: 10px;
+    align-items: center; padding: 8px 14px; border-radius: 12px; background: #3a2a10; border: 1px solid #ffb86b; color: #ffd9a8;
+    font-size: 13px; box-shadow: 0 8px 30px rgba(0,0,0,.4); }
+  .stale-banner[hidden] { display: none; }
 </style>
 </head>
 <body>
@@ -439,6 +443,8 @@ textarea.field { resize: vertical; min-height: 84px; }
   </div>
 </div>
 <div class="toast" id="toast"></div>
+<div class="stale-banner" id="staleBanner" hidden>⚠️ 코드가 업데이트됐지만 서버는 예전 코드로 돌고 있습니다 (새 기능 호출 시 "Method Not Allowed" 등)
+  <button class="btn btn-warn" id="restartBtn" style="padding:5px 12px">↻ 서버 재시작</button></div>
 
 <script>
 const $ = (id) => document.getElementById(id);
@@ -1092,6 +1098,29 @@ async function pollAlerts() {
 }
 document.addEventListener("visibilitychange", () => { if (!document.hidden) { unseen = 0; document.title = baseTitle; } });
 setInterval(pollAlerts, 4000); pollAlerts();
+
+/* the page is read fresh from disk, the server's Python code is not: tell the user when they differ */
+async function checkVersion() {
+  try {
+    const v = await api("/version");
+    $("staleBanner").hidden = !v.stale;
+  } catch (e) {
+    if (/Not Found|404/.test(e.message)) $("staleBanner").hidden = false;  // a server older than /version itself
+  }
+}
+$("restartBtn").onclick = async () => {
+  try {
+    await api("/admin/restart", { method: "POST" });
+    toast("↻ 서버를 다시 시작합니다… 몇 초 뒤 새로고침");
+    $("staleBanner").hidden = true;
+    const wait = async (n) => { try { await fetch("/version"); location.reload(); } catch { if (n) setTimeout(() => wait(n - 1), 1500); } };
+    setTimeout(() => wait(20), 3000);
+  } catch (e) {
+    toast(/Not Found|404|Method Not Allowed/.test(e.message)
+      ? "이 서버는 너무 예전 버전이라 여기서 재시작할 수 없습니다 — 서버 창을 닫고 start.bat 을 다시 실행하세요" : e.message, true);
+  }
+};
+checkVersion(); setInterval(checkVersion, 30000);
 
 /* deep link from a desktop alert: /?run=<id> */
 (async () => {

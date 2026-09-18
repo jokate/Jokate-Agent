@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import hmac
+import os
+import sys
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -24,6 +26,20 @@ cfg = Config.load()
 engine = build_engine(cfg)
 app = FastAPI(title="Agent 카태")
 DASHBOARD = Path(__file__).with_name("dashboard.html")
+
+
+def code_version() -> str:
+    """Hash of the server's Python code on disk. The dashboard HTML is read fresh per request but the
+    Python code is loaded once, so after an update the page can be new while the server is old."""
+    import hashlib
+
+    h = hashlib.sha1()
+    for f in sorted(Path(__file__).parent.glob("*.py")):
+        h.update(f.name.encode() + f.read_bytes())
+    return h.hexdigest()[:12]
+
+
+RUNNING_CODE = code_version()
 
 
 @app.on_event("startup")
@@ -548,6 +564,41 @@ def get_stats(session_id: str | None = None) -> dict:
 
 
 WATCH_RULES = {"big_result_chars": 20000, "many_turns": 25, "big_prompt_tokens": 8000, "big_context": 60000}
+
+
+@app.get("/version")
+def version() -> dict:
+    disk = code_version()
+    return {"running": RUNNING_CODE, "disk": disk, "stale": disk != RUNNING_CODE}
+
+
+def _active_runs() -> list[str]:
+    return [r.id for r in engine.list_runs() if r.status in ("running", "pending") and r.id in engine._cancel]
+
+
+@app.post("/admin/restart")
+def restart(request: Request) -> dict:
+    """Restart with the code on disk: start a fresh server (start.bat waits for the port) and exit this one.
+    Local only; refused while a relay is running in this server."""
+    import subprocess
+
+    from .config import ROOT
+
+    if _is_remote(request):
+        raise HTTPException(403, "재시작은 이 PC 에서만 할 수 있습니다")
+    busy = _active_runs()
+    if busy:
+        raise HTTPException(409, f"진행 중인 실행이 있어 재시작하지 않습니다: {', '.join(busy)}")
+    port = request.url.port or 8020
+    if os.name == "nt":
+        subprocess.Popen(["cmd", "/c", "start", "Agent 카태 - 서버", "cmd", "/c", str(ROOT / "start.bat"), str(port)],
+                         cwd=ROOT, env={**os.environ, "KATAE_NO_BROWSER": "1", "KATAE_WAIT_FREE": "1"},
+                         creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+    else:
+        subprocess.Popen([sys.executable, "-m", "relay_agent.cli", "serve", "--port", str(port)], cwd=ROOT,
+                         env={**os.environ, "KATAE_WAIT_FREE": "1"}, start_new_session=True)
+    threading.Timer(0.8, os._exit, [0]).start()  # after the response is sent; no run is active
+    return {"restarting": True, "port": port}
 
 
 @app.get("/runs/{run_id}/live")

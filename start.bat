@@ -17,7 +17,16 @@ where uv >nul 2>&1 || (
     exit /b 1
 )
 
-rem 이미 켜져 있으면 대시보드만 연다
+rem 재시작 중이면 예전 서버가 포트를 놓을 때까지 기다린다 (최대 20초)
+if "%KATAE_WAIT_FREE%"=="1" (
+    for /l %%i in (1,1,20) do (
+        netstat -ano | findstr /r /c:":%PORT% .*LISTENING" >nul 2>&1 || goto :port_free
+        timeout /t 1 /nobreak >nul
+    )
+)
+:port_free
+
+rem 이미 켜져 있으면 대시보드만 연다 (코드가 바뀌었으면 대시보드에 '서버 재시작' 안내가 뜬다)
 netstat -ano | findstr /r /c:":%PORT% .*LISTENING" >nul 2>&1
 if not errorlevel 1 (
     echo  서버가 이미 %URL% 에서 실행 중입니다.
