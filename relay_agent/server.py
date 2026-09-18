@@ -537,8 +537,10 @@ def get_track(run_id: str) -> list[dict]:
         else:
             status = "pending"
         last = records[-1] if records else None
+        pick = run.stage_models.get(s.name) or {}  # the user's choice shows before the stage has run
         track.append({
-            "name": s.name, "model": last.model if last else s.model, "provider": last.runner if last else s.primary,
+            "name": s.name, "model": last.model if last else (pick.get("model") or s.model),
+            "provider": last.runner if last else (pick.get("provider") or s.primary), "picked": bool(pick),
             "gate": s.gate == "human", "status": status, "laps": len(records),
             "cost_usd": round(sum(r.cost_usd or 0 for r in records), 4),
             "tokens": sum(r.total_input + r.output_tokens for r in records),

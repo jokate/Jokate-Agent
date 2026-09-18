@@ -792,10 +792,10 @@ async function openSession(id) {
     const r = relays.find((x) => x.name === $("relaySelect").value);
     $("relayHint").innerHTML = r ? `${esc(r.description)}${r.switchable ? ' <span class="tag">사용량 부족 시 다른 AI 로 자동 교체</span>' : ""}` : "";
   };
-  const picks = () => { try { return JSON.parse(localStorage.getItem("katae-stage-models") || "{}"); } catch { return {}; } };
+  const picks = () => { try { return JSON.parse(localStorage.getItem("katae-stage-picks") || "{}"); } catch { return {}; } };
   const renderStageModels = () => {
     const r = relays.find((x) => x.name === $("relaySelect").value);
-    const saved = picks()[r?.name] || {};
+    const saved = picks();
     const EFF = { low: "낮음", medium: "보통", high: "높음", xhigh: "매우 높음", max: "최대" };
     const effortsOf = (st, v) => {
       if (!v) return st.efforts || [];
@@ -814,15 +814,17 @@ async function openSession(id) {
         p.models.map((m) => {
           const v = `${p.provider}|${m.model}`;
           const name = m.model ? `${m.model}${m.tier ? ` · ${m.tier}` : ""}` : "기본 모델";
-          return `<option value="${esc(v)}" ${m.exhausted_until ? "disabled" : ""} ${saved[st.name] === v && !m.exhausted_until ? "selected" : ""}>${esc(name)}${m.exhausted_until ? " — 소진" : ""}</option>`;
+          // an exhausted model stays selectable: the server substitutes a weaker one for that call only
+          // (model_substituted in the timeline) and returns to the pick once the window resets
+          return `<option value="${esc(v)}" ${saved[st.name] === v ? "selected" : ""}>${esc(name)}${m.exhausted_until ? " — 소진 중 (자동 대체)" : ""}</option>`;
         }).join("")}</optgroup>`).join("");
       return `<label title="${st.writes ? "파일을 수정하는 단계 — 파일 편집이 가능한 AI 만 표시" : "읽기 단계"}"><b>${esc(st.label)}${st.writes ? " ✏️" : ""}</b>
         <span class="pair"><select class="field" data-stage="${esc(st.name)}"><option value="">${esc(def)}</option>${groups}</select>
         <select class="field" data-effort="${esc(st.name)}" title="effort — 높을수록 더 깊이 생각하고 도구를 더 쓴다 (토큰↑)">${effortOptions(st, saved[st.name] || "", saved[st.name + "@effort"])}</select></span></label>`;
     }).join("");
     const save = (key, value) => {
-      const all = picks(); all[r.name] = { ...(all[r.name] || {}), [key]: value };
-      try { localStorage.setItem("katae-stage-models", JSON.stringify(all)); } catch {}
+      const all = picks(); all[key] = value;
+      try { localStorage.setItem("katae-stage-picks", JSON.stringify(all)); } catch {}
     };
     $("stageModels").querySelectorAll("select[data-stage]").forEach((sel) => {
       const st = r.stage_defaults.find((x) => x.name === sel.dataset.stage);
@@ -894,6 +896,8 @@ async function submitAsk(ev) {
     const attachments = (S.attach || []).map((a) => a.id);
     const approval = $("approvalMode").value;
     const run = await api("/runs", { method: "POST", body: JSON.stringify({ ...f, session_id: S.session, stage_models, attachments, approval }) });
+    const picked = Object.entries(stage_models).map(([k, v]) => `${k}: ${v.model || v.provider || "기본"}${v.effort ? "@" + v.effort : ""}`).join(", ");
+    toast(picked ? `▶ 시작 — 모델 지정 ${picked}` : "▶ 시작 — 릴레이 기본 모델");
     S.attach = [];
     toast("🏁 릴레이 출발!");
     await openSession(S.session);
@@ -928,7 +932,7 @@ function renderTrack(track) {
         <div class="node ${t.status}" style="width:${100 / n}%">
           <div class="dot">${STAGE_IC[t.name] || "◆"}${t.gate ? '<span class="gate">승인</span>' : ""}${t.laps > 1 ? `<span class="laps">×${t.laps}</span>` : ""}</div>
           <div class="name">${esc(t.name)}</div>
-          <div class="sub">${t.provider && !["claude", "mock"].includes(t.provider) ? `<b style="color:var(--c3)">${esc(PROVIDER_LABEL[t.provider] || t.provider)}</b> · ` : ""}${esc(t.model || "")}${t.tokens ? `<br>${fmtN(t.tokens)} tok · ${fmt$(t.cost_usd)}` : ""}</div>
+          <div class="sub">${t.provider && !["claude", "mock"].includes(t.provider) ? `<b style="color:var(--c3)">${esc(PROVIDER_LABEL[t.provider] || t.provider)}</b> · ` : ""}${esc(t.model || "")}${t.picked ? ' <span title="이 실행에서 직접 지정한 모델">📌</span>' : ""}${t.tokens ? `<br>${fmtN(t.tokens)} tok · ${fmt$(t.cost_usd)}` : ""}</div>
         </div>`).join("")}
     </div>`;
 }

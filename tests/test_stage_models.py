@@ -84,3 +84,17 @@ def test_effort_pick_validated_per_model_and_wins_on_retry(tmp_path):
     assert run.stage_models == {"build": {"provider": "mock", "model": None, "effort": "high"}}
     with pytest.raises(ValueError, match="effort"):
         engine.create(relay, "g", tmp_path, stage_models={"plan": {"model": "haiku", "effort": "max"}})
+
+
+def test_track_shows_the_pick_before_the_stage_has_run(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    import relay_agent.server as server
+
+    engine, relay, _ = make(tmp_path, registry(tmp_path))
+    run = engine.create(relay, "g", tmp_path, stage_models={"plan": {"model": "opus"}})
+    monkeypatch.setattr(server, "engine", engine)
+    track = TestClient(server.app).get(f"/runs/{run.id}/track").json()
+    by = {t["name"]: t for t in track}
+    assert by["plan"]["model"] == "opus" and by["plan"]["picked"]  # not the relay's fable
+    assert by["build"]["model"] == "sonnet" and not by["build"]["picked"]
