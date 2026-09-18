@@ -211,6 +211,10 @@ def main() -> None:
     p_run.add_argument("--workdir")
     p_run.add_argument("--workspace", choices=["none", "copy", "inplace"])
     p_run.add_argument("--repo", help="registered repository name (relay repos)")
+    p_run.add_argument("--approval", choices=["ai", "always", "never"], default="ai",
+                       help="design gates: ai = pause only when the AI asks for a decision (default), always, never")
+    p_run.add_argument("--attach", action="append", default=[], metavar="FILE",
+                       help="attach a file (screenshot, log, spec...) the AI may read; repeatable")
     p_run.add_argument("--stage-model", action="append", default=[], metavar="STAGE=PROVIDER:MODEL",
                        help="pick a model per stage, e.g. plan=claude:opus or build=codex:gpt-5 (repeatable)")
     sub.add_parser("repos", help="registered repositories on this machine")
@@ -316,7 +320,8 @@ def main() -> None:
             provider, _, model = choice.partition(":") if ":" in choice else ("", "", choice)
             stage_models[stage_name] = {"provider": provider or None, "model": model or None}
         run = engine.create(cfg.relays_dir / f"{args.relay}.yaml", args.goal, workdir, session_id=args.session,
-                            workspace=args.workspace, repo=repo, stage_models=stage_models)
+                            workspace=args.workspace, repo=repo, stage_models=stage_models,
+                            attachments=[Path(a) for a in args.attach], approval=args.approval)
         print(f"session {run.session_id} / run {run.id}")
         print_run(engine, engine.advance(run.id))
     elif args.cmd == "providers":

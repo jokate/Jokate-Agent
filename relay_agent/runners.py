@@ -71,6 +71,7 @@ class StageCall:
     cancel_event: threading.Event | None = None
     live: "LiveChannel | None" = None  # user messages injected into the running session (Claude Code)
     result_mode: str = "schema"  # claude_cli: "text" = JSON object at the end of the answer, "schema" = --json-schema
+    add_dirs: list[str] = field(default_factory=list)  # extra readable folders (user attachments)
 
     def emit(self, kind: str, detail: dict) -> None:
         if self.on_event:
@@ -328,7 +329,8 @@ FINISH_SCHEMA = """- Finish with ONE structured output call: summary, state, ope
 FINISH_TEXT = """- Your FINAL message is only one JSON object (no code fence, no prose). Required: "summary" (1-2 sentences),
   "state" (overall status), "open_issues" [str], "next_steps" [str]. Optional: "decisions_added" [{"decision","reason"}],
   "pointers_added" [{"path","anchor","note"}], "output" (deliverable for the next stage), "verdict" (pass|retry|fail),
-  "highlights" [<=3 short str], "user_checks" [str], "diagram" (mermaid, only if it helps). Text values in Korean."""
+  "highlights" [<=3 short str], "user_checks" [str], "diagram" (mermaid, only if it helps),
+  "needs_approval" (bool) + "approval_reason" when a human must decide before going on. Text values in Korean."""
 
 
 DIGEST_RULE = """
@@ -384,6 +386,8 @@ class ClaudeCliRunner:
             args += ["--disable-slash-commands"] if (call.mcp_servers or call.settings_path) else ["--safe-mode"]
         if call.settings_path:
             args += ["--settings", str(call.settings_path)]
+        for extra in call.add_dirs:
+            args += ["--add-dir", extra]
         if call.max_budget_usd is not None:
             args += ["--max-budget-usd", str(call.max_budget_usd)]
         if call.fallback_model and call.fallback_model != call.model:

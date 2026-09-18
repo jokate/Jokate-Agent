@@ -134,6 +134,15 @@ class HistoryStore:
         else:
             self._exec("UPDATE turns SET status = ?, result = ? WHERE run_id = ?", (status, result, run_id))
 
+    def delete_session(self, session_id: str) -> list[str]:
+        """Remove a session with its turns and activity log. Returns the run ids it held."""
+        runs = [r["run_id"] for r in self.turns(session_id)]
+        for run_id in runs:
+            self._exec("DELETE FROM events WHERE run_id = ?", (run_id,))
+        self._exec("DELETE FROM turns WHERE session_id = ?", (session_id,))
+        self._exec("DELETE FROM sessions WHERE id = ?", (session_id,))
+        return runs
+
     def turns(self, session_id: str) -> list[dict]:
         return self._rows("SELECT * FROM turns WHERE session_id = ? ORDER BY id", (session_id,))
 

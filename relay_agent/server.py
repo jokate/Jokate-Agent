@@ -80,7 +80,49 @@ class CreateRun(BaseModel):
     auto_apply: bool | None = None  # copy mode: apply automatically when done
     stage_models: dict[str, dict] | None = None  # {"plan": {"provider": "claude", "model": "opus"}}
     repo: str | None = None  # registered repository name (path, verify commands, notes come from it)
+    attachments: list[str] = []  # ids returned by POST /attachments
+    approval: str | None = None  # design gates: ai (pause only if the AI asks) | always | never
     start: bool = True
+
+
+class Upload(BaseModel):
+    name: str
+    data_b64: str
+
+
+MAX_ATTACHMENT_MB = 25
+
+
+def _attachment_dir() -> Path:
+    return engine.runs_dir / "uploads"
+
+
+@app.post("/attachments")
+def upload_attachment(body: Upload) -> dict:
+    """Stage a file for the next request (base64 JSON: no multipart dependency). Returns its id."""
+    import base64
+    import re
+    import uuid
+
+    data = base64.b64decode(body.data_b64.split(",", 1)[-1])
+    if len(data) > MAX_ATTACHMENT_MB * 1024 * 1024:
+        raise HTTPException(413, f"첨부는 파일당 {MAX_ATTACHMENT_MB}MB 까지입니다")
+    name = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", Path(body.name).name).strip(". ") or "file"
+    folder = _attachment_dir() / uuid.uuid4().hex[:12]
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / name).write_bytes(data)
+    return {"id": f"{folder.name}/{name}", "name": name, "size": len(data)}
+
+
+def _attachment_paths(ids: list[str]) -> list[Path]:
+    root = _attachment_dir().resolve()
+    paths = []
+    for i in ids:
+        p = (root / i).resolve()
+        if root not in p.parents or not p.is_file():
+            raise HTTPException(400, f"첨부를 찾을 수 없습니다: {i}")
+        paths.append(p)
+    return paths
 
 
 class ImportClaudeCode(BaseModel):
@@ -338,6 +380,14 @@ def match_repo(path: str) -> dict:
     return {"repo": repo.name if repo else None}
 
 
+@app.delete("/sessions/{session_id}")
+def delete_session(session_id: str, force: bool = False) -> dict:
+    try:
+        return _conflict(engine.delete_session, session_id, force)
+    except FileNotFoundError:
+        raise HTTPException(404, f"session {session_id} not found")
+
+
 @app.get("/sessions/{session_id}")
 def get_session(session_id: str) -> dict:
     session = engine.history.get_session(session_id)
@@ -421,7 +471,7 @@ def create_run(body: CreateRun, request: Request) -> RunState:
         _check_path(request, workdir)
         repo = repo or (m.name if (m := engine.repos.match(workdir)) else None)
     run = _conflict(engine.create, relay_path, body.goal, workdir, body.session_id, body.workspace or None, repo,
-                    body.auto_apply, body.stage_models)
+                    body.auto_apply, body.stage_models, _attachment_paths(body.attachments), body.approval)
     if body.start:
         _advance_bg(run.id)
     return run

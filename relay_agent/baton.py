@@ -52,6 +52,7 @@ class Baton(BaseModel):
     goal: str
     session_context: list[str] = Field(default_factory=list, description="같은 세션의 이전 요청 한 줄 요약")
     user_notes: list[str] = Field(default_factory=list, description="실행 중 사용자가 끼어들어 남긴 추가 지시")
+    attachments: list[str] = Field(default_factory=list, description="사용자가 첨부한 파일의 절대 경로")
     state: str = "시작 전"
     decisions: list[Decision] = []
     open_issues: list[str] = []
@@ -92,6 +93,10 @@ class Baton(BaseModel):
                 lines += [f"  - {a}" for a in st.partial_actions]
             if st.resume_hint:
                 lines.append(f"- 이어가기: {st.resume_hint}")
+            lines.append("")
+        if self.attachments:
+            lines.append("## 첨부 파일 (사용자가 올린 자료 — 필요할 때 Read, 문서가 여럿이면 digest)")
+            lines += [f"- `{a}`" for a in self.attachments]
             lines.append("")
         if self.user_notes:
             lines.append("## 사용자 추가 지시 (실행 중 개입 — 목표보다 우선, 반드시 반영)")
@@ -164,6 +169,9 @@ class StageResult(BaseModel):
     user_checks: list[str] = Field(
         default_factory=list, description="AI 가 직접 확인할 수 없어 사람이 확인해야 할 것(구체적 행동). 없으면 []"
     )
+    needs_approval: bool = Field(
+        False, description="설계 단계용. 사람이 정해야 할 것(요구사항 모호, 대안 선택, 삭제·대규모·외부 영향 변경)이 있으면 true")
+    approval_reason: str = Field("", description="needs_approval 이 true 인 이유와 사람이 정할 것, 한두 문장")
     diagram: str = Field(
         "", description="흐름·구조가 바뀌어 그림이 이해를 돕는 경우에만 Mermaid 소스(노드 12개 이하). 아니면 빈 문자열"
     )
@@ -231,9 +239,9 @@ class StageResult(BaseModel):
         b.log.append(LogEntry(stage=stage, summary=f"{self.summary} ({self.verdict})"))
         if self.highlights:
             b.highlights[stage] = [h.strip()[:120] for h in self.highlights[:3] if h.strip()]
-        for check in self.user_checks:
-            if check.strip() and check.strip() not in b.user_checks:
-                b.user_checks.append(check.strip()[:200])
+        checks = list(dict.fromkeys(c.strip()[:200] for c in self.user_checks if c.strip()))
+        if checks:
+            b.user_checks = checks
         if self.diagram.strip():
             b.diagrams[stage] = self.diagram.strip().removeprefix("```mermaid").removesuffix("```").strip()[:MAX_DIAGRAM_CHARS]
         b.stop = None  # a stage finished, so any earlier stop is resolved

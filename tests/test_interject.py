@@ -1,5 +1,6 @@
 """Cutting in on a running relay, and recovering a result the model didn't return in the required shape."""
 import json
+from pathlib import Path
 
 import pytest
 
@@ -140,3 +141,68 @@ def test_recovery_leaves_runs_of_other_live_processes_alone(tmp_path):
         assert engine.load(live.id).status == "running" and os.getpid() != other.pid
     finally:
         other.kill()
+
+
+def test_delete_session_removes_runs_but_not_active_or_undecided_ones(tmp_path):
+    engine, relay = make(tmp_path, MockRunner())
+    done = engine.advance(engine.create(relay, "끝난 일", tmp_path).id)
+    sid = engine.history.find_session_by_run_prefix(done.id)
+    assert (engine.runs_dir / done.id).exists()
+    assert engine.delete_session(sid) == {"deleted": sid, "runs": 1}
+    assert engine.history.get_session(sid) is None and not (engine.runs_dir / done.id).exists()
+    assert engine.history.events(done.id) == []
+
+    pending = engine.create(relay, "대기 중", tmp_path)
+    sid2 = engine.history.find_session_by_run_prefix(pending.id)
+    with pytest.raises(ValueError, match="진행 중"):
+        engine.delete_session(sid2)
+    pending = engine.advance(pending.id)
+    pending.changes_status = "ready"
+    engine.save(pending)
+    with pytest.raises(ValueError, match="적용·폐기"):
+        engine.delete_session(sid2)
+    assert engine.delete_session(sid2, force=True)["runs"] == 1
+
+
+def test_attachments_are_copied_listed_and_readable(tmp_path):
+    shot = tmp_path / "crash.png"
+    shot.write_bytes(b"\x89PNG fake")
+    runner = MockRunner()
+    engine, relay = make(tmp_path, runner)
+    run = engine.create(relay, "이 크래시 봐줘", tmp_path, attachments=[shot, shot])
+    copies = [Path(a) for a in run.baton.attachments]
+    assert [c.name for c in copies] == ["crash.png", "crash-1.png"] and all(c.read_bytes() == shot.read_bytes() for c in copies)
+    engine.advance(run.id)
+    call = runner.calls[0]
+    assert call.add_dirs == [str(engine.runs_dir / run.id / "attachments")] and "crash.png" in call.prompt
+
+
+def test_latest_stage_checks_replace_older_ones():
+    from relay_agent.baton import Baton, StageResult
+
+    b = StageResult(summary="s", state="s", open_issues=[], next_steps=[], user_checks=["누수 확인", "누수 확인"]).apply(Baton(goal="g"), "scout")
+    assert b.user_checks == ["누수 확인"]
+    b = StageResult(summary="s", state="s", open_issues=[], next_steps=[], user_checks=["빌드 확인"]).apply(b, "review")
+    assert b.user_checks == ["빌드 확인"]
+    b = StageResult(summary="s", state="s", open_issues=[], next_steps=[]).apply(b, "x")
+    assert b.user_checks == ["빌드 확인"]
+
+
+def test_auto_approve_runs_through_design_gates(tmp_path):
+    (tmp_path / "role.md").write_text("r", encoding="utf-8")
+    relay = tmp_path / "g.yaml"
+    relay.write_text("name: g\nworkspace: none\nstages:\n  - {name: plan, provider: mock, prompt: role.md, gate: human}\n"
+                     "  - {name: build, provider: mock, prompt: role.md}\n", encoding="utf-8")
+    engine = RelayEngine(tmp_path / "runs", UsageStore(tmp_path / "u.sqlite"), HistoryStore(tmp_path / "h.sqlite"),
+                         runner_factory=lambda _: MockRunner())
+    assert engine.advance(engine.create(relay, "g", tmp_path, approval="always").id).status == "awaiting_approval"
+    run = engine.advance(engine.create(relay, "g", tmp_path, approval="never").id)
+    assert run.status == "done" and "gate_skipped" in [e["kind"] for e in engine.history.events(run.id)]
+    # ai (the product default): continues unless the design itself asks for a decision
+    assert engine.advance(engine.create(relay, "g", tmp_path, approval="ai").id).status == "done"
+    asking = MockRunner({"plan": [{"summary": "s", "state": "s", "open_issues": [], "next_steps": [],
+                                   "needs_approval": True, "approval_reason": "A안/B안 중 선택 필요"}]})
+    engine = RelayEngine(tmp_path / "runs2", UsageStore(tmp_path / "u2.sqlite"), HistoryStore(tmp_path / "h2.sqlite"),
+                         runner_factory=lambda _: asking)
+    paused = engine.advance(engine.create(relay, "g", tmp_path, approval="ai").id)
+    assert paused.status == "awaiting_approval" and "A안/B안" in paused.baton.stop.reason

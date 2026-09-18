@@ -170,6 +170,19 @@ Subscription usage also counts tokens re-read on every turn, so the goal is to c
   - ⚠️ **Warnings** — one tool result ≥20K chars, ≥25 turns, context ≥60K, prompt ≥8K tokens.
 - API: `GET /runs/{id}/tokens`
 
+## Sessions · attachments · approval
+- **Delete sessions:** hover a session → 🗑, or "정리" (tidy) → check several → "선택 삭제" (delete selected).
+  - Question history, the activity log, HANDOFF and backups are deleted; usage stats are kept.
+  - Refused while a run is in progress. If there are changes not yet applied or discarded, it asks once more.
+- **Attach files:** 📎 button, drag and drop, or paste a screenshot (up to 25MB per file).
+  - Files are copied into the run folder and listed in the baton's "첨부 파일" section. The AI reads them only when needed (`--add-dir`; several docs go through digest).
+  - CLI: `relay run ... --attach crash.png --attach log.txt`
+- **Approval after design** (`approval`):
+  - `ai` (default): continues when the design stage judges "nothing for a human to decide" (`needs_approval=false`). It stops only for ambiguous requirements, a choice between options, or deletions or large changes, and shows why.
+  - `always`: always stops. `never`: runs to the end.
+  - Budget limits stop the run in every mode. CLI: `--approval ai|always|never`
+- **User checks:** each stage's list replaces the previous one (so earlier false positives don't linger).
+
 ## Choosing a model per phase
 - In the dashboard, pick a relay and a model dropdown appears for each phase (scout · plan · build · review). Leave it blank to use the relay's default.
 - The list shows **only models from AIs usable right now** (installed and logged in). Models whose usage is exhausted appear as `소진` and can't be picked.

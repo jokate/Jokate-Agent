@@ -38,16 +38,19 @@ SUMMARY = """너는 문서 요약기다. 받은 문서 하나를, 다른 AI 가 
 
 cache_dir = Path(sys.argv[1] if len(sys.argv) > 1 else ".digest-cache").resolve()
 workdir = Path(os.environ.get("KATAE_WORKDIR") or os.getcwd()).resolve()
+extra_dirs = [Path(p).resolve() for p in os.environ.get("KATAE_EXTRA_DIRS", "").split(os.pathsep) if p]
 mcp = FastMCP("digest")
 
 
 def _files(paths: list[str]) -> list[Path]:
     out: list[Path] = []
+    roots = [workdir, *extra_dirs]
     for p in paths:
-        hits = globmod.glob(str(workdir / p), recursive=True) if any(c in p for c in "*?[") else [str(workdir / p)]
+        base = Path(p) if Path(p).is_absolute() else workdir / p
+        hits = globmod.glob(str(base), recursive=True) if any(c in p for c in "*?[") else [str(base)]
         for h in sorted(hits):
             path = Path(h).resolve()
-            if path.is_file() and (workdir in path.parents) and path not in out:
+            if path.is_file() and any(r in path.parents for r in roots) and path not in out:
                 out.append(path)
     return out[:MAX_FILES]
 
@@ -88,8 +91,12 @@ def _summarize(text: str, focus: str, limit: int) -> str:
     return str(data.get("result") or "").strip()
 
 
+def _rel(path: Path) -> str:
+    return path.relative_to(workdir).as_posix() if workdir in path.parents else path.as_posix()
+
+
 def _digest_file(path: Path, focus: str, limit: int) -> str:
-    rel = path.relative_to(workdir).as_posix()
+    rel = _rel(path)
     text = path.read_text(encoding="utf-8", errors="replace")
     key = hashlib.sha256(f"{PROMPT_VERSION}|{MODEL}|{limit}|{focus}|".encode() + text.encode()).hexdigest()[:32]
     hit = cache_dir / f"{key}.md"
@@ -125,7 +132,7 @@ def _safe(path: Path, focus: str, limit: int) -> str:
     try:
         return _digest_file(path, focus, limit)
     except Exception as e:  # one bad file must not lose the others
-        return f"### {path.relative_to(workdir).as_posix()}\n(요약 실패: {str(e)[:200]} — 필요하면 직접 Read)"
+        return f"### {_rel(path)}\n(요약 실패: {str(e)[:200]} — 필요하면 직접 Read)"
 
 
 if __name__ == "__main__":

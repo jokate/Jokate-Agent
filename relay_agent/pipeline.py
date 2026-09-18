@@ -16,6 +16,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import threading
 import time
 import uuid
@@ -136,6 +137,9 @@ class RunState(BaseModel):
     auto_apply: bool = False
     stage_models: dict[str, dict] = {}  # stage -> {"provider": ..., "model": ...} chosen for this run
     notes_seen: int = 0  # lines of notes.jsonl already merged into the baton
+    # design gates: ai = continue unless the stage itself asks for a decision (needs_approval),
+    # always = pause every time, never = run through. Budget limits pause in every mode.
+    approval: Literal["ai", "always", "never"] = "ai"
     owner_pid: int | None = None  # process advancing the run (server or a CLI); recovery leaves live owners alone
     workspace_mode: Literal["none", "copy", "inplace"] = "none"
     changes: dict | None = None  # {files, insertions, deletions, stat}
@@ -290,9 +294,12 @@ class RelayEngine:
         return self.repos.repos.get(run.repo) if run.repo else None
 
     # --- lifecycle ---------------------------------------------------------
+    DEFAULT_APPROVAL = "ai"
+
     def create(self, relay_path: Path, goal: str, workdir: Path | None = None, session_id: str | None = None,
                workspace: str | None = None, repo: str | None = None, auto_apply: bool | None = None,
-               stage_models: dict[str, dict] | None = None) -> RunState:
+               stage_models: dict[str, dict] | None = None, attachments: list[Path] | None = None,
+               approval: str | None = None) -> RunState:
         """Start a run as a new turn. Without session_id a new session is opened.
         With a registered repo, its path, default workspace mode, verify commands and notes apply."""
         spec, _ = RelaySpec.load(relay_path)
@@ -353,7 +360,22 @@ class RelayEngine:
             repo=repo,
             auto_apply=bool(auto_apply),
             stage_models=chosen,
+            approval=approval if approval in ("ai", "always", "never") else self.DEFAULT_APPROVAL,
         )
+        if attachments:
+            # copied into the run folder: the AI may read them (--add-dir), the originals are never touched
+            folder = self._dir(run.id) / "attachments"
+            folder.mkdir(parents=True, exist_ok=True)
+            for src in attachments:
+                src = Path(src)
+                if not src.is_file():
+                    raise ValueError(f"첨부 파일이 없습니다: {src}")
+                dst = folder / src.name
+                n = 1
+                while dst.exists():
+                    dst, n = folder / f"{src.stem}-{n}{src.suffix}", n + 1
+                shutil.copy2(src, dst)
+                run.baton.attachments.append(dst.as_posix())
         self.history.add_turn(session_id, goal, spec.name, run.id)
         self._event(run, "-", "run_created", relay=spec.name, workdir=run.workdir, workspace=mode, repo=repo,
                     auto_apply=run.auto_apply, stages=[s.name for s in spec.stages], stage_models=chosen)
@@ -414,6 +436,29 @@ class RelayEngine:
         run.notes_seen = len(lines)
         run.baton.user_notes += new
         return new
+
+    def delete_session(self, session_id: str, force: bool = False) -> dict:
+        """Delete a session and its runs' folders (logs, HANDOFF, backups). Usage totals are kept.
+        Refuses while a run is active; runs with undecided changes need force (their backups go too)."""
+        if self.history.get_session(session_id) is None:
+            raise FileNotFoundError(session_id)
+        runs = []
+        for turn in self.history.turns(session_id):
+            try:
+                runs.append(self.load(turn["run_id"]))
+            except (FileNotFoundError, ValueError):
+                continue
+        active = [r.id for r in runs if r.status in ("running", "pending") or r.id in self._cancel]
+        if active:
+            raise ValueError(f"진행 중인 실행이 있어 삭제할 수 없습니다: {', '.join(active)} — 먼저 취소하세요")
+        undecided = [r.id for r in runs if r.changes_status == "ready"]
+        if undecided and not force:
+            raise ValueError(f"적용·폐기를 정하지 않은 변경이 있습니다: {', '.join(undecided)} "
+                             "— 삭제하면 되돌리기 백업도 사라집니다")
+        removed = self.history.delete_session(session_id)
+        for run_id in removed:
+            shutil.rmtree(self._dir(run_id), ignore_errors=True)
+        return {"deleted": session_id, "runs": len(removed)}
 
     def cancel(self, run_id: str) -> RunState:
         """Stop a running relay (kills the current AI process) or a paused one. Resumable later."""
@@ -487,6 +532,14 @@ class RelayEngine:
         failed/cancelled runs that could be resumed) go after retention_days. result.patch is always kept."""
         cutoff = time.time() - retention_days * 86400
         cleaned, freed = [], 0
+        uploads = self.runs_dir / "uploads"  # staged attachments; a run keeps its own copy
+        if uploads.is_dir():
+            for folder in uploads.iterdir():
+                try:
+                    if folder.stat().st_mtime < time.time() - 86400:
+                        shutil.rmtree(folder, ignore_errors=True)
+                except OSError:
+                    continue
         for run in self.list_runs():
             if run.workspace_mode == "none" or run.workspace_cleaned or run.status not in ("done", "failed", "cancelled"):
                 continue
@@ -744,6 +797,7 @@ class RelayEngine:
             return overrides
         entry = dict(overrides.get("digest") or self.mcp_registry["digest"])
         entry["env"] = {**entry.get("env", {}), "KATAE_WORKDIR": str(cwd), "KATAE_RUN_ID": run.id, "KATAE_STAGE": stage,
+                        "KATAE_EXTRA_DIRS": str(self._dir(run.id) / "attachments"),
                         "KATAE_USAGE_DB": str(getattr(self.usage, "path", "")), "PATH": os.environ.get("PATH", "")}
         return {**overrides, "digest": entry}
 
@@ -921,6 +975,7 @@ class RelayEngine:
                 tools=self._stage_tools(stage, repo),
                 mcp_servers=stage.mcp,
                 result_mode=stage.result_mode,
+                add_dirs=[str(self._dir(run.id) / "attachments")] if run.baton.attachments else [],
                 allowed_tools=stage.allowed_tools + (
                     self.extra_allowed_tools + repo_tools if "Bash" in (stage.tools or []) else []),
                 mcp_overrides=self._stage_mcp(mcp_overrides, run, stage.name, cwd),
@@ -989,10 +1044,17 @@ class RelayEngine:
                 continue
 
             run.index += 1
-            if stage.gate == "human" and run.index < len(spec.stages):
+            pause = stage.gate == "human" and run.index < len(spec.stages) and (
+                run.approval == "always" or (run.approval == "ai" and result.needs_approval))
+            if stage.gate == "human" and run.index < len(spec.stages) and not pause:
+                self._event(run, stage.name, "gate_skipped", next=spec.stages[run.index].name, mode=run.approval,
+                            reason="AI 판단: 사람이 정할 것 없음" if run.approval == "ai" else "승인 생략 설정")
+            elif pause:
                 run.status = "awaiting_approval"
-                self._event(run, stage.name, "awaiting_approval", next=spec.stages[run.index].name)
-                self._write_stop(run, "awaiting_approval", stage.name, f"`{stage.name}` 결과 확인 후 승인 필요")
+                why = result.approval_reason.strip() if result.needs_approval else ""
+                self._event(run, stage.name, "awaiting_approval", next=spec.stages[run.index].name, reason=why)
+                self._write_stop(run, "awaiting_approval", stage.name,
+                                 f"`{stage.name}` 결과 확인 후 승인 필요" + (f" — {why}" if why else ""))
                 self._settle_workspace(run)
                 self.save(run)
                 return run

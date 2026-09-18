@@ -189,6 +189,16 @@ textarea.field { resize: vertical; min-height: 84px; }
 .session .t { font-weight: 700; display: flex; justify-content: space-between; gap: 8px; }
 .session .t span { color: var(--muted); font-weight: 600; font-size: 12px; }
 .session .s { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 2px; }
+.session .del { position: absolute; right: 8px; bottom: 8px; border: 0; background: var(--glass-strong); color: var(--muted); border-radius: 8px;
+  padding: 2px 7px; cursor: pointer; opacity: 0; transition: .15s; font-size: 12px; }
+.session:hover .del { opacity: 1; }
+.session .del:hover { color: #ff6b6b; }
+.session .pick { display: none; margin-right: 6px; }
+#sessions.picking .session .pick { display: inline-block; }
+#sessions.picking .session .del { display: none; }
+.sess-tools { display: flex; gap: 6px; margin-left: auto; }
+.sess-tools button { border: 0; background: transparent; color: var(--muted); cursor: pointer; font-size: 12px; font-weight: 700; padding: 2px 6px; border-radius: 6px; }
+.sess-tools button:hover { color: var(--ink); background: var(--glass-strong); }
 
 /* stats */
 .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
@@ -328,6 +338,14 @@ textarea.field { resize: vertical; min-height: 84px; }
   .tw-table td { padding: 3px 4px; border-top: 1px solid var(--line); vertical-align: top; }
   .tw-table td.n { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
   .tw-table code { word-break: break-all; }
+  .attach-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; min-width: 0; }
+  .attach-row .btn { padding: 6px 12px; font-size: 12.5px; }
+  .chip { display: inline-flex; gap: 6px; align-items: center; max-width: 220px; padding: 4px 8px; border-radius: 9px;
+    background: var(--glass-strong); border: 1px solid var(--line); font-size: 12px; }
+  .chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .chip.up { opacity: .6; }
+  .chip button { border: 0; background: transparent; color: var(--muted); cursor: pointer; padding: 0 2px; }
+  .composer.drop textarea { outline: 2px dashed var(--c2); outline-offset: 2px; }
 </style>
 </head>
 <body>
@@ -363,7 +381,8 @@ textarea.field { resize: vertical; min-height: 84px; }
       </form>
     </div>
     <div class="glass panel scroll" style="flex:1">
-      <p class="label">세션 <span class="count" id="sessionCount">0</span></p>
+      <p class="label" style="display:flex;align-items:center">세션 <span class="count" id="sessionCount">0</span>
+        <span class="sess-tools"><button id="pickMode" title="여러 개 골라서 삭제">정리</button><button id="pickDelete" hidden>🗑 선택 삭제</button></span></p>
       <div id="sessions"></div>
     </div>
   </div>
@@ -457,7 +476,7 @@ const EV = {
   changes_discarded: ["🗑️", "변경 폐기"], changes_rolled_back: ["⏪", "되돌림 완료"], workspace_error: ["⚠️", "작업 공간 오류"],
   note: ["🤖", "AI"], thinking: ["💭", "AI 생각"], stage_answer: ["🎯", "단계 결론"], user_interject: ["🙋", "내 추가 지시"],
   user_notes_applied: ["📌", "추가 지시 반영"], result_repaired: ["🩹", "결과 형식 복구"], prompt_breakdown: ["📤", "보낸 프롬프트"],
-  token_report: ["🔥", "토큰 사용 내역"],
+  token_report: ["🔥", "토큰 사용 내역"], gate_skipped: ["⏩", "승인 없이 진행"],
 };
 const PROVIDER_LABEL = { claude: "Claude", codex: "Codex", opencode: "OpenCode", gemini: "Gemini", anthropic_api: "Claude API", openai: "OpenAI", openrouter: "OpenRouter", ollama: "Ollama", mock: "Mock" };
 const WINDOW_LABEL = { five_hour: "5h", seven_day: "7d", seven_day_opus: "7d·Opus", seven_day_sonnet: "7d·Son" };
@@ -631,11 +650,50 @@ async function loadSessions() {
   $("sessionCount").textContent = list.length;
   $("sessions").innerHTML = list.map((s) => `
     <div class="session ${S.session === s.id ? "active" : ""}" data-id="${s.id}">
-      <div class="t">${esc(s.title)} <span>${s.turns}</span></div>
+      <div class="t"><span style="color:inherit;font-weight:700;font-size:inherit"><input type="checkbox" class="pick" data-id="${s.id}">${esc(s.title)}</span> <span>${s.turns}</span></div>
       <div class="s">${esc(s.last_question || s.workdir)}</div>
+      <button class="del" data-id="${s.id}" title="세션 삭제">🗑</button>
     </div>`).join("") || `<div class="empty"><div class="big">🌱</div>아직 세션이 없습니다</div>`;
-  document.querySelectorAll(".session").forEach((el) => el.onclick = () => openSession(el.dataset.id));
+  document.querySelectorAll(".session").forEach((el) => el.onclick = (ev) => {
+    if (ev.target.closest(".del, .pick")) return;
+    if ($("sessions").classList.contains("picking")) { const c = el.querySelector(".pick"); c.checked = !c.checked; return; }
+    openSession(el.dataset.id);
+  });
+  document.querySelectorAll(".session .del").forEach((b) => b.onclick = () => deleteSessions([b.dataset.id]));
 }
+
+async function deleteSessions(ids) {
+  if (!ids.length) return;
+  const names = ids.map((id) => document.querySelector(`.session[data-id="${id}"] .t span`)?.textContent.trim() || id);
+  if (!confirm(`세션 ${ids.length}개를 삭제할까요?\n${names.slice(0, 8).join("\n")}${names.length > 8 ? "\n…" : ""}\n\n질문 이력·작업 기록·HANDOFF 가 지워집니다 (사용량 통계는 남음).`)) return;
+  let done = 0;
+  for (const id of ids) {
+    try {
+      await api(`/sessions/${id}`, { method: "DELETE" });
+      done++;
+    } catch (e) {
+      if (/적용·폐기를 정하지 않은 변경/.test(e.message) && confirm(`${e.message}\n\n그래도 삭제할까요?`)) {
+        try { await api(`/sessions/${id}?force=true`, { method: "DELETE" }); done++; } catch (e2) { toast(e2.message, true); }
+      } else toast(e.message, true);
+    }
+    if (S.session === id) {
+      S.session = null; S.run = null; clearInterval(S.timer);
+      $("sessionPanel").innerHTML = `<div class="empty"><div class="big">🏁</div><div>왼쪽에서 세션을 고르거나 새로 만드세요</div></div>`;
+      $("turns").innerHTML = "";
+    }
+  }
+  if (done) toast(`🗑 세션 ${done}개 삭제`);
+  setPicking(false);
+  loadSessions(); loadStats();
+}
+function setPicking(on) {
+  $("sessions").classList.toggle("picking", on);
+  $("pickMode").textContent = on ? "취소" : "정리";
+  $("pickDelete").hidden = !on;
+  if (!on) document.querySelectorAll(".session .pick").forEach((c) => c.checked = false);
+}
+$("pickMode").onclick = () => setPicking(!$("sessions").classList.contains("picking"));
+$("pickDelete").onclick = () => deleteSessions([...document.querySelectorAll(".session .pick:checked")].map((c) => c.dataset.id));
 
 async function openSession(id) {
   S.session = id;
@@ -646,7 +704,15 @@ async function openSession(id) {
   $("sessionPanel").innerHTML = `
     <div class="session-head" style="margin-bottom:12px"><h2>${esc(s.title)}</h2><div class="wd">${s.repo ? `📁 ${esc(s.repo)} · ` : ""}${esc(s.workdir)}</div></div>
     <form class="composer" id="ask">
-      <textarea class="field" name="goal" placeholder="이 세션에 이어서 요청하세요. 이전 질문들의 요약이 자동으로 바통에 실립니다." required></textarea>
+      <textarea class="field" name="goal" placeholder="이 세션에 이어서 요청하세요. 파일은 끌어다 놓거나 스크린샷을 붙여넣을 수 있습니다." required></textarea>
+      <div class="attach-row"><button type="button" class="btn btn-ghost" id="attachBtn" title="스크린샷·로그·문서 등 (파일당 25MB)">📎 첨부</button>
+        <input type="file" id="attachInput" multiple hidden><div id="attachChips" style="display:contents"></div>
+        <select class="field" id="approvalMode" style="margin-left:auto;width:auto;flex:0 0 auto;padding:6px 10px;font-size:12.5px"
+          title="설계 후 승인 방식 — 비용 한도에 닿으면 어느 모드든 멈춥니다">
+          <option value="ai">✋ 승인: AI 판단 (정할 게 있을 때만 멈춤)</option>
+          <option value="always">✋ 승인: 항상 설계 후 멈춤</option>
+          <option value="never">⏩ 승인 없이 끝까지</option>
+        </select></div>
       <div class="row">
         <select class="field" name="workspace" title="작업 공간" style="flex:0 0 auto;width:auto">
           <option value="">적용 방식: 기본값 (즉시 반영)</option>
@@ -663,6 +729,21 @@ async function openSession(id) {
       <div class="stage-models" id="stageModels"></div>
     </form>`;
   $("ask").onsubmit = submitAsk;
+  S.attach = [];
+  renderChips();
+  try { $("approvalMode").value = localStorage.getItem("katae-approval") || "ai"; } catch {}
+  $("approvalMode").onchange = () => { try { localStorage.setItem("katae-approval", $("approvalMode").value); } catch {} };
+  $("attachBtn").onclick = () => $("attachInput").click();
+  $("attachInput").onchange = (ev) => { addFiles(ev.target.files); ev.target.value = ""; };
+  const form = $("ask");
+  form.ondragover = (ev) => { ev.preventDefault(); form.classList.add("drop"); };
+  form.ondragleave = () => form.classList.remove("drop");
+  form.ondrop = (ev) => { ev.preventDefault(); form.classList.remove("drop"); addFiles(ev.dataTransfer.files); };
+  form.querySelector("textarea").onpaste = (ev) => {
+    const files = [...(ev.clipboardData?.files || [])];
+    if (files.length) { ev.preventDefault(); addFiles(files.map((f) => f.name && f.name !== "image.png" ? f
+      : new File([f], `screenshot-${new Date().toISOString().slice(11, 19).replaceAll(":", "")}.png`, { type: f.type }))); }
+  };
   const hint = () => {
     const r = relays.find((x) => x.name === $("relaySelect").value);
     $("relayHint").innerHTML = r ? `${esc(r.description)}${r.switchable ? ' <span class="tag">사용량 부족 시 다른 AI 로 자동 교체</span>' : ""}` : "";
@@ -712,6 +793,24 @@ function renderTurns(turns) {
     el.dataset.cc === "true" ? el.classList.toggle("open") : openRun(el.dataset.run));
 }
 
+function renderChips() {
+  $("attachChips").innerHTML = (S.attach || []).map((a, i) => `<span class="chip ${a.id ? "" : "up"}" title="${esc(a.name)} · ${fmtN(a.size)}B">
+    ${/\.(png|jpe?g|gif|webp)$/i.test(a.name) ? "🖼️" : "📄"}<span>${esc(a.name)}</span>${a.id ? "" : "…"}<button type="button" data-i="${i}" title="빼기">×</button></span>`).join("");
+  $("attachChips").querySelectorAll("button").forEach((b) => b.onclick = () => { S.attach.splice(+b.dataset.i, 1); renderChips(); });
+}
+async function addFiles(list) {
+  for (const f of [...list]) {
+    if (f.size > 25 * 1024 * 1024) { toast(`${f.name}: 파일당 25MB 까지`, true); continue; }
+    const item = { name: f.name, size: f.size, id: null };
+    S.attach.push(item); renderChips();
+    try {
+      const data = await new Promise((ok, bad) => { const r = new FileReader(); r.onload = () => ok(r.result); r.onerror = bad; r.readAsDataURL(f); });
+      Object.assign(item, await api("/attachments", { method: "POST", body: JSON.stringify({ name: f.name, data_b64: data }) }));
+    } catch (e) { S.attach.splice(S.attach.indexOf(item), 1); toast(`${f.name}: ${e.message}`, true); }
+    renderChips();
+  }
+}
+
 async function submitAsk(ev) {
   ev.preventDefault();
   const f = Object.fromEntries(new FormData(ev.target));
@@ -722,7 +821,11 @@ async function submitAsk(ev) {
       const [provider, model] = sel.value.split("|");
       stage_models[sel.dataset.stage] = { provider, model: model || null };
     });
-    const run = await api("/runs", { method: "POST", body: JSON.stringify({ ...f, session_id: S.session, stage_models }) });
+    if ((S.attach || []).some((a) => !a.id)) { toast("첨부 업로드가 끝나면 다시 눌러 주세요", true); return; }
+    const attachments = (S.attach || []).map((a) => a.id);
+    const approval = $("approvalMode").value;
+    const run = await api("/runs", { method: "POST", body: JSON.stringify({ ...f, session_id: S.session, stage_models, attachments, approval }) });
+    S.attach = [];
     toast("🏁 릴레이 출발!");
     await openSession(S.session);
     openRun(run.id);
