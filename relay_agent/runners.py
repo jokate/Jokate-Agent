@@ -248,10 +248,12 @@ RETRY_RE = re.compile(r"retry|retrying|overloaded|rate.?limit|529|503|ECONNRESET
 
 def run_process(args: list[str], call: StageCall, stdin_text: str | None,
                 on_line: Callable[[str], None], live: LiveChannel | None = None,
-                on_stderr: Callable[[str], None] | None = None) -> tuple[int, str]:
+                on_stderr: Callable[[str], None] | None = None,
+                busy: Callable[[], bool] | None = None) -> tuple[int, str]:
     """Stream stdout lines to on_line. stderr is drained on a thread (no pipe deadlock); lines that look like
     API retries/overload go to on_stderr so the dashboard can show why nothing is happening.
-    Kills the whole process tree on timeout, cancellation, a stall (no output for call.stall_s) or a callback error.
+    Kills the whole process tree on timeout, cancellation, a stall (no output for call.stall_s while `busy()` is
+    false — a running tool such as a long build prints nothing and is not a stall) or a callback error.
     With `live`, stdin stays open for stream-json user messages until the result line arrives."""
     # npm installs CLIs as .cmd shims that CreateProcess can't find by bare name; resolve the full path.
     args = [shutil.which(args[0]) or args[0], *args[1:]]
@@ -289,6 +291,8 @@ def run_process(args: list[str], call: StageCall, stdin_text: str | None,
         deadline = time.monotonic() + call.timeout_s
         while not stop.is_set():
             now = time.monotonic()
+            if busy is not None and busy():
+                last_output[0] = now  # a tool is running: the silence is the command, not the AI
             stalled = call.stall_s and now - last_output[0] > call.stall_s
             if call.cancelled or now > deadline or stalled:
                 reason.append("cancelled" if call.cancelled else "timeout" if now > deadline else "stalled")
@@ -668,7 +672,8 @@ class ClaudeCliRunner:
                 code, stderr = run_process(self.build_args(call, cfg_path), call, user_message_line(call.prompt),
                                            on_line, live=call.live or LiveChannel(),
                                            on_stderr=lambda ln: call.emit("pulse", {**detail.on_stderr(ln),
-                                                                                   "turn": len(watch.turns)}))
+                                                                                   "turn": len(watch.turns)}),
+                                           busy=lambda: detail.doing == "tool")
             finally:
                 if watch.turns or watch.results:
                     call.emit("token_report", watch.report())

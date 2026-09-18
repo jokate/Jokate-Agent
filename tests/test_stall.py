@@ -67,3 +67,11 @@ def test_resume_without_a_saved_conversation_starts_fresh_without_calling(tmp_pa
     calls.clear()
     ClaudeCliRunner(exe="claude").run(call)
     assert calls[0].resume_session == "deadbeef-0000" and calls[0].prompt == "[재개]"
+
+
+def test_a_running_tool_is_not_a_stall(tmp_path):
+
+    call = StageCall(stage="s", model=None, effort=None, system="s", prompt="p", cwd=tmp_path, timeout_s=60, stall_s=1)
+    code, _ = run_process([sys.executable, "-c", "import time; time.sleep(3); print('done')"], call, None,
+                          lambda line: None, busy=lambda: True)  # a long Bash command: silent but legitimate
+    assert code == 0
