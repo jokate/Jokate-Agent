@@ -134,6 +134,7 @@ def test_discover_finds_instructions_skills_mcp_and_commands_up_the_tree(tmp_pat
     assert [p.name for p in ctx.instructions] == ["CLAUDE.md"] and ctx.skills == ["engine-src"]
     assert ctx.commands == ["python Tools/q.py", "python Tools/ue.py"] and "editor" in ctx.mcp
     assert "Bash(python Tools/q.py:*)" in ctx.allowed_bash() and "Bash(make:*)" in ctx.allowed_bash()
+    assert "Bash(cd:*)" in ctx.allowed_bash()  # `cd <root> && python Tools/q.py …` must not wait for approval
     assert "Skill" in ctx.allowed_other()
     copy_lines = "\n".join(ctx.prompt_lines(tmp_path / "copy"))
     assert f"cd {root.resolve().as_posix()}" in copy_lines and "복사본" in copy_lines

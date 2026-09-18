@@ -31,6 +31,11 @@ class ProjectContext:
 
     def allowed_bash(self) -> list[str]:
         rules = [r for c in self.commands for r in (f"Bash({c})", f"Bash({c}:*)")]
+        if rules:
+            # the commands are relative to the root, so the AI runs `cd <root> && python Tools/x.py`; the cd part
+            # needs its own rule (Claude Code checks each part of a compound command). Directories outside the
+            # allowed working folders are still refused by the CLI itself.
+            rules.append("Bash(cd:*)")
         return rules + [a for a in self.allow if a.startswith("Bash")]
 
     def allowed_other(self) -> list[str]:
