@@ -75,3 +75,28 @@ def test_a_running_tool_is_not_a_stall(tmp_path):
     code, _ = run_process([sys.executable, "-c", "import time; time.sleep(3); print('done')"], call, None,
                           lambda line: None, busy=lambda: True)  # a long Bash command: silent but legitimate
     assert code == 0
+
+
+def test_a_cli_that_never_reads_the_prompt_is_a_stall_not_a_broken_pipe(tmp_path):
+    # the prompt is larger than a pipe buffer, the "CLI" never reads stdin and prints nothing
+    events = []
+    call = StageCall(stage="s", model=None, effort=None, system="s", prompt="p", cwd=tmp_path, timeout_s=60, stall_s=2,
+                     on_event=lambda k, d: events.append((k, d)))
+    t0 = time.monotonic()
+    try:
+        run_process([sys.executable, "-c", "import time; time.sleep(30)"], call, "x" * 300_000, lambda line: None)
+        raise AssertionError("expected a stall")
+    except RunnerError as e:
+        assert e.kind == "stalled"
+    assert time.monotonic() - t0 < 25
+    assert any(k == "process_stopped" and d["why"] == "stalled" for k, d in events)
+
+
+def test_a_cli_that_exits_before_reading_the_prompt_is_explained(tmp_path):
+    call = StageCall(stage="s", model=None, effort=None, system="s", prompt="p", cwd=tmp_path, timeout_s=60)
+    try:
+        run_process([sys.executable, "-c", "import sys; sys.stderr.write('bad flag\n'); sys.exit(2)"], call,
+                    "x" * 300_000, lambda line: None)
+        raise AssertionError("expected an error")
+    except RunnerError as e:
+        assert e.kind == "error" and "프롬프트를 읽기 전에 끝남" in str(e) and "bad flag" in str(e)

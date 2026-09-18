@@ -318,13 +318,27 @@ def run_process(args: list[str], call: StageCall, stdin_text: str | None,
             except OSError:
                 pass
 
+    input_error: list[str] = []
+
+    def feed() -> None:
+        # On its own thread: a Windows pipe holds only a few KB, so writing the prompt blocks until the CLI reads
+        # it. If the CLI never does (stuck at startup) the main thread must still watch stdout and the stall
+        # timer must still be able to kill it — and the resulting Broken pipe is a symptom, not the error.
+        try:
+            with write_lock:
+                proc.stdin.write(stdin_text)
+                proc.stdin.flush()
+            if live is None:
+                proc.stdin.close()
+        except OSError as e:
+            input_error.append(str(e))
+
     try:
         if stdin_text is not None:
-            proc.stdin.write(stdin_text)
-            proc.stdin.flush()
-        if live is None:
+            threading.Thread(target=feed, daemon=True).start()
+        elif live is None:
             proc.stdin.close()
-        else:
+        if live is not None:
             live.attach(write)
         for line in proc.stdout:
             last_output[0] = time.monotonic()
@@ -350,6 +364,9 @@ def run_process(args: list[str], call: StageCall, stdin_text: str | None,
         tail = "".join(stderr_chunks)[-300:].strip()
         raise RunnerError(f"AI 프로세스가 {call.stall_s // 60}분간 아무 출력이 없어 중단" + (f" (stderr: {tail})" if tail else ""),
                           "stalled")
+    if input_error and proc.returncode not in (0, None):
+        tail = "".join(stderr_chunks)[-300:].strip()
+        raise RunnerError(f"AI 프로세스가 프롬프트를 읽기 전에 끝남 (exit {proc.returncode}): {tail or input_error[0]}")
     return proc.returncode, "".join(stderr_chunks)
 
 

@@ -1071,12 +1071,13 @@ class RelayEngine:
         if primary != stage.primary:
             alternates.insert(0, {"provider": stage.primary})  # the relay's own AI becomes the first fallback
         options = [{"provider": primary}] + alternates
+        skipped: list[dict] = []
         if self.providers is not None:
+            # alternates are only fallbacks: which of them are unusable matters only if the primary fails
             options, skipped = self.providers.candidates(primary, options[1:], stage.writes)
-            if skipped:
-                self._event(run, stage.name, "providers_skipped", skipped=skipped)
+        unusable = "; ".join(f"{s['provider']}: {s['reason']}" for s in skipped)
         if not options:
-            raise RunnerError("사용 가능한 AI 가 없습니다 (모두 미설치·한도 초과·예산 소진)", "unavailable")
+            raise RunnerError("사용 가능한 AI 가 없습니다" + (f" ({unusable})" if unusable else ""), "unavailable")
 
         last_error: RunnerError | None = None
         for i, option in enumerate(options):
@@ -1124,6 +1125,8 @@ class RelayEngine:
                         self._event(run, stage.name, "provider_exhausted", provider=name, until=until)
                     break
             if last_error is None or last_error.kind not in ("quota", "unavailable") or i == len(options) - 1:
+                if last_error is not None and skipped and last_error.kind in ("quota", "unavailable"):
+                    self._event(run, stage.name, "providers_skipped", skipped=skipped)  # now it matters
                 raise last_error or RunnerError("no provider ran")
         raise last_error or RunnerError("no provider ran")
 
