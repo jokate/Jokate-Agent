@@ -69,6 +69,7 @@ class StageCall:
     # (kind, detail) activity callback, e.g. ("tool_use", {"tool": "Read", "target": "a.py"})
     on_event: Callable[[str, dict], None] | None = None
     cancel_event: threading.Event | None = None
+    live: "LiveChannel | None" = None  # user messages injected into the running session (Claude Code)
 
     def emit(self, kind: str, detail: dict) -> None:
         if self.on_event:
@@ -77,6 +78,73 @@ class StageCall:
     @property
     def cancelled(self) -> bool:
         return bool(self.cancel_event and self.cancel_event.is_set())
+
+
+class TokenWatch:
+    """Where a stage's tokens go. Every model turn re-reads the whole context (billed as cache reads), so
+    cost ~ turns x context size; the context grows with each tool result. Records both, reported once."""
+
+    def __init__(self):
+        self.turns: list[dict] = []  # per API call: context size and output
+        self.results: list[dict] = []  # per tool result: tool, target, chars
+        self._seen: set[str] = set()
+
+    def on_event(self, event: dict, pending: dict) -> None:
+        kind = event.get("type")
+        msg = event.get("message") or {}
+        if kind == "assistant" and msg.get("id") and msg["id"] not in self._seen and msg.get("usage"):
+            self._seen.add(msg["id"])
+            u = msg["usage"]
+            self.turns.append({"ctx": u.get("input_tokens", 0) + u.get("cache_creation_input_tokens", 0)
+                               + u.get("cache_read_input_tokens", 0),
+                               "new": u.get("input_tokens", 0) + u.get("cache_creation_input_tokens", 0)})
+        elif kind == "user":
+            for block in msg.get("content", []) or []:
+                if isinstance(block, dict) and block.get("type") == "tool_result":
+                    content = block.get("content")
+                    text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
+                    name, target = pending.get(block.get("tool_use_id", ""), ("?", ""))
+                    self.results.append({"tool": name, "target": target, "chars": len(text)})
+
+    def report(self) -> dict:
+        ctx = [x["ctx"] for x in self.turns]
+        top = sorted(self.results, key=lambda r: -r["chars"])[:8]
+        return {"turns": len(ctx), "contexts": ctx[:80], "peak_context": max(ctx, default=0),
+                "reread_tokens": sum(ctx), "tool_results": len(self.results),
+                "tool_result_chars": sum(r["chars"] for r in self.results), "top_results": top}
+
+
+class LiveChannel:
+    """A line to the stdin of the AI session running now. send() returns False when nothing accepts input
+    (another AI, not started yet, or the answer is already in) — the caller then falls back to the baton."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._write: Callable[[str], None] | None = None
+
+    def attach(self, write: Callable[[str], None]) -> None:
+        with self._lock:
+            self._write = write
+
+    def detach(self) -> None:
+        with self._lock:
+            self._write = None
+
+    def send(self, text: str) -> bool:
+        with self._lock:
+            if self._write is None:
+                return False
+            try:
+                self._write(text)
+                return True
+            except (OSError, ValueError):
+                self._write = None
+                return False
+
+
+def user_message_line(text: str) -> str:
+    """One stream-json input message for `claude -p --input-format stream-json`."""
+    return json.dumps({"type": "user", "message": {"role": "user", "content": text}}, ensure_ascii=False) + "\n"
 
 
 class RunnerError(RuntimeError):
@@ -103,9 +171,10 @@ def describe_tool(name: str, tool_input: dict) -> str:
 
 
 def run_process(args: list[str], call: StageCall, stdin_text: str | None,
-                on_line: Callable[[str], None]) -> tuple[int, str]:
+                on_line: Callable[[str], None], live: LiveChannel | None = None) -> tuple[int, str]:
     """Stream stdout lines to on_line. stderr is drained on a thread (no pipe deadlock).
-    Kills the whole process tree on timeout, cancellation, or a callback error."""
+    Kills the whole process tree on timeout, cancellation, or a callback error.
+    With `live`, stdin stays open for stream-json user messages until the result line arrives."""
     # npm installs CLIs as .cmd shims that CreateProcess can't find by bare name; resolve the full path.
     args = [shutil.which(args[0]) or args[0], *args[1:]]
     if os.name == "nt" and sum(len(a) + 3 for a in args) > 30000:
@@ -136,17 +205,41 @@ def run_process(args: list[str], call: StageCall, stdin_text: str | None,
 
     watcher = threading.Thread(target=watch, daemon=True)
     watcher.start()
+    write_lock = threading.Lock()
+
+    def write(text: str) -> None:
+        with write_lock:
+            proc.stdin.write(user_message_line(text))
+            proc.stdin.flush()
+
+    def close_input() -> None:
+        if live is not None:
+            live.detach()
+        with write_lock:
+            try:
+                proc.stdin.close()
+            except OSError:
+                pass
+
     try:
         if stdin_text is not None:
             proc.stdin.write(stdin_text)
-        proc.stdin.close()
+            proc.stdin.flush()
+        if live is None:
+            proc.stdin.close()
+        else:
+            live.attach(write)
         for line in proc.stdout:
             on_line(line)
+            if live is not None and '"result"' in line and (parse_json_line(line) or {}).get("type") == "result":
+                close_input()  # the answer is in: end the session (it would otherwise wait for more input)
         proc.wait()
     except BaseException:
         kill_tree(proc)  # e.g. the event callback failed: don't leave the AI editing files
         raise
     finally:
+        if live is not None:
+            close_input()
         stop.set()
         drain.join(timeout=5)
     if reason and reason[0] == "cancelled":
@@ -175,9 +268,12 @@ class MockRunner:
         self.script = {k: list(v) for k, v in (script or {}).items()}
         self.calls: list[StageCall] = []
         self.delay_s = delay_s
+        self.live_messages: list[str] = []
 
     def run(self, call: StageCall) -> tuple[StageResult, Usage]:
         self.calls.append(call)
+        if call.live is not None:
+            call.live.attach(self.live_messages.append)
         call.emit("tool_use", {"tool": "Read", "target": f"mock/{call.stage}.txt"})
         if call.cancel_event is not None:
             if call.cancel_event.wait(self.delay_s):
@@ -202,6 +298,8 @@ class MockRunner:
             }
         if isinstance(data, Exception):
             raise data
+        if call.live is not None:
+            call.live.detach()
         usage = Usage(self.name, call.model or "mock", input_tokens=len(call.system + call.prompt) // 4, output_tokens=50)
         return StageResult.model_validate(data), usage
 
@@ -212,6 +310,8 @@ Environment: {os_name}. Working directory: {cwd} (already the current directory;
 Rules:
 - Locate with Grep/Glob first, then Read only the needed line ranges (offset/limit). Never read whole large files.
 - Use tools directly without narration. Do not repeat file contents in your answer.
+- Batch independent tool calls (several Grep/Glob/Read at once) in ONE message: every extra turn re-reads
+  the whole context, so fewer turns = far fewer tokens.
 - Edit with the Edit tool (small exact replacements). Run only the verification command you need, once.
 - If a command is denied or needs approval, do NOT retry it or a variant. Note it in open_issues and continue.
 - Finish with ONE structured output call: summary, state, open_issues, next_steps are required; add decisions_added,
@@ -238,6 +338,7 @@ class ClaudeCliRunner:
         args = [
             self.exe, "-p",
             "--output-format", "stream-json", "--verbose",
+            "--input-format", "stream-json",  # keeps stdin open so a user note can join the running session
             "--json-schema", json.dumps(result_schema(), ensure_ascii=False),
             "--no-session-persistence",
             "--permission-mode", call.permission_mode,
@@ -298,8 +399,9 @@ class ClaudeCliRunner:
                     json.dumps({"mcpServers": {s: registry[s] for s in call.mcp_servers}}), encoding="utf-8"
                 )
             started = time.monotonic()
-            box: dict = {}
+            box: dict = {"texts": []}
             pending: dict[str, tuple[str, str]] = {}  # tool_use_id -> (tool name, target), for result sizes
+            watch = TokenWatch()
 
             def on_line(line: str) -> None:
                 event = parse_json_line(line)
@@ -314,9 +416,18 @@ class ClaudeCliRunner:
                     box["limit_resets"] = info.get("resetsAt")
                     self._emit_limits(call, info)
                 else:
-                    self._emit_activity(call, event, pending)
+                    if event.get("type") == "user":
+                        watch.on_event(event, pending)  # before _emit_activity pops the tool name
+                    self._emit_activity(call, event, pending, box["texts"])
+                    if event.get("type") == "assistant":
+                        watch.on_event(event, pending)
 
-            code, stderr = run_process(self.build_args(call, cfg_path), call, call.prompt, on_line)
+            try:
+                code, stderr = run_process(self.build_args(call, cfg_path), call, user_message_line(call.prompt),
+                                           on_line, live=call.live or LiveChannel())
+            finally:
+                if watch.turns or watch.results:
+                    call.emit("token_report", watch.report())
         data = box.get("result")
         rejected = box.get("limit_status") == "rejected"  # structured signal from Claude Code itself
 
@@ -330,8 +441,11 @@ class ClaudeCliRunner:
             text = stderr[-500:]
             raise error(f"claude -p ended without a result (exit {code}): {text}",
                         "quota" if rejected or looks_like_quota(text) else "error")
+        subtype = data.get("subtype") or ""
+        salvage = self._salvage(call, data, subtype, box["texts"])
+        if salvage is not None:
+            data = {**data, "structured_output": salvage, "is_error": False}
         if data.get("is_error") or "structured_output" not in data:
-            subtype = data.get("subtype") or ""
             # error results often carry no "result" text: the reason is in subtype / errors / terminal_reason
             detail = data.get("result") or " · ".join(str(x) for x in (data.get("errors") or [])) or data.get("terminal_reason") or ""
             text = f"{subtype}: {detail}"[:500] if subtype and subtype != "success" else str(detail)[:500]
@@ -359,7 +473,41 @@ class ClaudeCliRunner:
             cost_usd=data.get("total_cost_usd"),
             duration_ms=int((time.monotonic() - started) * 1000),
         )
-        return StageResult.model_validate(data["structured_output"]), usage
+        out = data["structured_output"]
+        return (out if isinstance(out, StageResult) else StageResult.lenient(out)), usage
+
+    @staticmethod
+    def _salvage(call: StageCall, data: dict, subtype: str, texts: list[str]):
+        """The structured result is missing or malformed (small models sometimes answer in prose, or give up
+        after the schema retries). Recover instead of failing the relay; limits and budget are real errors."""
+        if data.get("subtype") in ("error_max_budget_usd",) or data.get("terminal_reason") == "budget_exhausted":
+            return None
+        if data.get("api_error_status") or looks_like_quota(str(data.get("result") or "")) and data.get("is_error"):
+            return None
+        out = data.get("structured_output")
+        if isinstance(out, dict):
+            try:
+                StageResult.model_validate(out)
+                return None  # fine as is
+            except ValueError:
+                try:
+                    fixed = StageResult.lenient(out)
+                    call.emit("result_repaired", {"reason": "결과 필드 형식을 자동 보정"})
+                    return fixed
+                except ValueError:
+                    pass
+        schema_trouble = "structured" in subtype or "structured" in str(data.get("errors") or "").lower()
+        if data.get("is_error") and not schema_trouble:
+            return None
+        text = (data.get("result") if isinstance(data.get("result"), str) else "") or "\n\n".join(texts[-3:])
+        if not text.strip():
+            return None
+        try:
+            result = extract_result(text)
+        except RunnerError:
+            result = StageResult.from_text(text)
+        call.emit("result_repaired", {"reason": f"구조화 결과 없이 끝남({subtype or 'no structured_output'}) — 본문에서 복구"})
+        return result
 
     def _emit_limits(self, call: StageCall, info: dict) -> None:
         windows = [
@@ -371,7 +519,7 @@ class ClaudeCliRunner:
     LARGE_RESULT_CHARS = 8000
 
     @staticmethod
-    def _emit_activity(call: StageCall, event: dict, pending: dict | None = None) -> None:
+    def _emit_activity(call: StageCall, event: dict, pending: dict | None = None, texts: list | None = None) -> None:
         """tool_use / mcp_call when a tool is called; mcp_result (size) for MCP results and
         tool_result_large for any result big enough to matter for tokens; tool_error on failures."""
         if event.get("type") not in ("assistant", "user"):
@@ -400,8 +548,19 @@ class ClaudeCliRunner:
                     call.emit("tool_result_large", {"tool": name, "target": target, "chars": len(text)})
                 if block.get("is_error"):
                     call.emit("tool_error", {"message": text[:300]})
+            elif btype == "tool_use" and block.get("name") == "StructuredOutput":
+                inp = block.get("input") or {}
+                call.emit("stage_answer", {"summary": str(inp.get("summary", ""))[:500],
+                                           "verdict": inp.get("verdict", "pass"),
+                                           "open_issues": (inp.get("open_issues") or [])[:8]
+                                           if isinstance(inp.get("open_issues"), list) else []})
             elif btype == "text" and block.get("text", "").strip():
-                call.emit("note", {"text": block["text"].strip()[:300]})
+                text = block["text"].strip()
+                if texts is not None:
+                    texts.append(text)
+                call.emit("note", {"text": text[:4000]})
+            elif btype == "thinking" and (block.get("thinking") or "").strip():
+                call.emit("thinking", {"text": block["thinking"].strip()[:4000]})
 
 
 def probe_claude_limits(exe: str | None = None, timeout_s: int = 90) -> dict:
@@ -466,7 +625,7 @@ def extract_result(text: str) -> StageResult:
                 candidates.append(obj)
     for obj in reversed(candidates):
         try:
-            return StageResult.model_validate(obj)
+            return StageResult.lenient(obj)
         except ValueError:
             continue
     raise RunnerError("no valid result JSON in output")
@@ -694,7 +853,10 @@ class AnthropicApiRunner:
             duration_ms=int((time.monotonic() - started) * 1000),
         )
         usage.cost_usd = estimate_cost(usage)
-        return StageResult.model_validate_json(text), usage
+        try:
+            return StageResult.lenient(json.loads(text)), usage
+        except ValueError:
+            return extract_result(text), usage
 
 
 def estimate_cost(u: Usage) -> float | None:

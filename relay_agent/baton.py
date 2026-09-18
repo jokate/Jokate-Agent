@@ -6,7 +6,9 @@ never sees the previous stage's transcript, only what was written here.
 
 from __future__ import annotations
 
-from typing import Literal
+import json
+
+from typing import ClassVar, Literal
 
 from pydantic import BaseModel, Field
 
@@ -49,6 +51,7 @@ class StopNote(BaseModel):
 class Baton(BaseModel):
     goal: str
     session_context: list[str] = Field(default_factory=list, description="같은 세션의 이전 요청 한 줄 요약")
+    user_notes: list[str] = Field(default_factory=list, description="실행 중 사용자가 끼어들어 남긴 추가 지시")
     state: str = "시작 전"
     decisions: list[Decision] = []
     open_issues: list[str] = []
@@ -89,6 +92,10 @@ class Baton(BaseModel):
                 lines += [f"  - {a}" for a in st.partial_actions]
             if st.resume_hint:
                 lines.append(f"- 이어가기: {st.resume_hint}")
+            lines.append("")
+        if self.user_notes:
+            lines.append("## 사용자 추가 지시 (실행 중 개입 — 목표보다 우선, 반드시 반영)")
+            lines += [f"- {n}" for n in self.user_notes]
             lines.append("")
         if self.session_context:
             lines.append("## 이 세션의 이전 요청 (자세한 내용은 handoff MCP 의 load_handoff(run id))")
@@ -160,6 +167,53 @@ class StageResult(BaseModel):
     diagram: str = Field(
         "", description="흐름·구조가 바뀌어 그림이 이해를 돕는 경우에만 Mermaid 소스(노드 12개 이하). 아니면 빈 문자열"
     )
+
+    LIST_FIELDS: ClassVar[tuple] = ("open_issues", "next_steps", "highlights", "user_checks")
+
+    @classmethod
+    def lenient(cls, obj: dict) -> "StageResult":
+        """Validate, repairing the usual slips of small models (a string where a list belongs, null fields,
+        an odd verdict) instead of failing the whole stage over formatting."""
+        try:
+            return cls.model_validate(obj)
+        except ValueError:
+            pass
+        o = {k: v for k, v in dict(obj).items() if v is not None}
+        for key in cls.LIST_FIELDS:
+            v = o.get(key)
+            if isinstance(v, str):
+                o[key] = [x.strip("-• ").strip() for x in v.splitlines() if x.strip()]
+            elif isinstance(v, list):
+                o[key] = [x if isinstance(x, str) else json.dumps(x, ensure_ascii=False) for x in v]
+        for key in ("summary", "state", "output", "diagram"):
+            v = o.get(key)
+            if isinstance(v, (list, dict)):
+                o[key] = "\n".join(map(str, v)) if isinstance(v, list) else json.dumps(v, ensure_ascii=False)
+        if o.get("verdict") not in ("pass", "retry", "fail"):
+            o.pop("verdict", None)
+        for key, model in (("decisions_added", Decision), ("pointers_added", Pointer)):
+            good = []
+            for item in o.get(key) or []:
+                try:
+                    good.append(model.model_validate(item))
+                except ValueError:
+                    continue
+            o[key] = good
+        o.setdefault("summary", str(o.get("state") or "")[:200] or "(요약 없음)")
+        o.setdefault("state", o["summary"])
+        o.setdefault("open_issues", [])
+        o.setdefault("next_steps", [])
+        return cls.model_validate(o)
+
+    @classmethod
+    def from_text(cls, text: str) -> "StageResult":
+        """Last resort when the model answered in prose instead of the result call: keep its answer as the
+        stage output so the relay can continue (and say so, so the next stage knows it's unstructured)."""
+        text = text.strip()
+        first = next((line.strip("# ").strip() for line in text.splitlines() if line.strip()), "")
+        return cls(summary=(first[:200] or "(결과 형식 없이 종료)"), state=text[:1500] or "결과 형식 없이 종료",
+                   open_issues=["이 단계는 정해진 결과 형식 없이 끝나 본문을 그대로 넘깁니다"], next_steps=[],
+                   output=text[:6000])
 
     def apply(self, baton: Baton, stage: str) -> Baton:
         b = baton.model_copy(deep=True)

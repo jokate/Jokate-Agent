@@ -181,6 +181,16 @@ def list_providers() -> list[dict]:
     return sorted(out, key=lambda s: (not s["available"] and not s.get("limits"), order.get(s["name"], 9)))
 
 
+class Interject(BaseModel):
+    text: str
+
+
+@app.post("/runs/{run_id}/interject")
+def interject(run_id: str, body: Interject) -> dict:
+    _load(run_id)
+    return _conflict(engine.interject, run_id, body.text)
+
+
 @app.get("/models")
 def list_models() -> list[dict]:
     """Per-stage model picker: models of the AIs usable right now (benched models marked)."""
@@ -465,9 +475,57 @@ def get_stats(session_id: str | None = None) -> dict:
         "turns": len(run_ids) if run_ids is not None else sum(s["turns"] for s in sessions),
         "cost_usd": round(sum(r["cost_usd"] or 0 for r in rows), 4),
         "input_tokens": total_in,
+        "fresh_input_tokens": sum(r["input_tokens"] for r in rows),
+        "cache_write_tokens": sum(r["cache_creation_input_tokens"] for r in rows),
+        "cache_read_tokens": cache_read,
+        # what the input is billed like, in plain-input tokens (cache write 1.25x, cache read 0.1x)
+        "billed_input_equiv": int(sum(r["input_tokens"] + 1.25 * r["cache_creation_input_tokens"]
+                                      + 0.1 * r["cache_read_input_tokens"] for r in rows)),
         "output_tokens": sum(r["output_tokens"] for r in rows),
         "cache_hit_ratio": round(cache_read / total_in, 3) if total_in else 0.0,
     }
+
+
+WATCH_RULES = {"big_result_chars": 20000, "many_turns": 25, "big_prompt_tokens": 8000, "big_context": 60000}
+
+
+@app.get("/runs/{run_id}/tokens")
+def get_tokens(run_id: str) -> dict:
+    """Token watch: per stage, what was sent, how the context grew per turn, which tool results were big,
+    and plain-language warnings about where tokens leak."""
+    _load(run_id)
+    usage = {}
+    for r in engine.usage.summary(run_id):
+        u = usage.setdefault(r["stage"], {"input": 0, "cache_write": 0, "cache_read": 0, "output": 0, "cost_usd": 0.0})
+        u["input"] += r["input_tokens"]
+        u["cache_write"] += r["cache_creation_input_tokens"]
+        u["cache_read"] += r["cache_read_input_tokens"]
+        u["output"] += r["output_tokens"]
+        u["cost_usd"] += r["cost_usd"] or 0
+    stages: dict[str, dict] = {}
+    for e in engine.history.events(run_id):
+        if e["kind"] not in ("prompt_breakdown", "token_report"):
+            continue
+        s = stages.setdefault(e["stage"], {"stage": e["stage"], "prompt": None, "report": None})
+        s["prompt" if e["kind"] == "prompt_breakdown" else "report"] = e["detail"]  # the last attempt wins
+    out, R = [], WATCH_RULES
+    for name, s in stages.items():
+        s["usage"] = usage.get(name)
+        warn = []
+        rep, pr = s["report"] or {}, s["prompt"] or {}
+        for r in rep.get("top_results", []):
+            if r["chars"] >= R["big_result_chars"]:
+                warn.append(f"{r['tool']} 결과가 {r['chars']:,}자 — `{r['target'][:60]}` 를 통째로 읽음 (범위를 좁히면 이후 모든 턴이 가벼워짐)")
+        if rep.get("turns", 0) >= R["many_turns"]:
+            warn.append(f"턴 {rep['turns']}회 — 턴마다 전체 맥락(최대 {rep.get('peak_context', 0):,})을 다시 읽음. 도구를 묶어 호출하거나 단계를 쪼개기")
+        if rep.get("peak_context", 0) >= R["big_context"]:
+            warn.append(f"맥락이 {rep['peak_context']:,} 토큰까지 커짐 — 큰 도구 결과가 쌓였을 가능성")
+        if pr.get("est_tokens", 0) >= R["big_prompt_tokens"]:
+            big = next(iter(pr.get("sections", {})), "")
+            warn.append(f"보낸 프롬프트가 약 {pr['est_tokens']:,} 토큰 — 가장 큰 부분: {big}")
+        s["warnings"] = warn
+        out.append(s)
+    return {"stages": out, "rules": R}
 
 
 @app.get("/runs/{run_id}/summary")

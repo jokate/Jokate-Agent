@@ -58,7 +58,7 @@ def test_session_keeps_question_history_and_context(setup):
 def test_activity_events_show_actual_work(setup):
     engine, _, run = setup({})
     engine.advance(run.id)
-    kinds = [(e["stage"], e["kind"]) for e in engine.history.events(run.id)]
+    kinds = [(e["stage"], e["kind"]) for e in engine.history.events(run.id) if e["kind"] != "prompt_breakdown"]
     assert kinds[:4] == [("-", "run_created"), ("scout", "stage_started"), ("scout", "tool_use"), ("scout", "stage_finished")]
     assert kinds[-1] == ("plan", "awaiting_approval")
     tool = next(e for e in engine.history.events(run.id) if e["kind"] == "tool_use")
@@ -77,6 +77,7 @@ def test_cli_stream_parsing_emits_tool_calls(tmp_path):
         {"type": "tool_result", "is_error": True, "content": "denied"},
     ]}})
     assert seen == [("tool_use", {"tool": "Grep", "target": "Cooldown  @ Source"}),
+                    ("stage_answer", {"summary": "", "verdict": "pass", "open_issues": []}),
                     ("tool_error", {"message": "denied"})]
 
 

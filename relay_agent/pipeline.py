@@ -13,6 +13,7 @@ Features:
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import threading
@@ -29,7 +30,7 @@ from pydantic import BaseModel, Field
 from .baton import Baton, StopNote
 from .history import HistoryStore
 from .providers import LEGACY_RUNNER, ProviderRegistry
-from .runners import Runner, RunnerError, StageCall, Usage, make_runner
+from .runners import LiveChannel, Runner, RunnerError, StageCall, Usage, make_runner
 from .usage import UsageStore
 from .repos import RepoRegistry, RepoSpec
 from .journal import JournalWorkspace
@@ -128,6 +129,7 @@ class RunState(BaseModel):
     repo: str | None = None  # registered repository name, if the run targets one
     auto_apply: bool = False
     stage_models: dict[str, dict] = {}  # stage -> {"provider": ..., "model": ...} chosen for this run
+    notes_seen: int = 0  # lines of notes.jsonl already merged into the baton
     workspace_mode: Literal["none", "copy", "inplace"] = "none"
     changes: dict | None = None  # {files, insertions, deletions, stat}
     changes_status: Literal["none", "ready", "applied", "discarded", "rolled_back"] = "none"
@@ -143,6 +145,19 @@ RESUMABLE = ("pending", "failed", "cancelled")
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def prompt_breakdown(system: str, prompt: str) -> dict:
+    """Size of each part of what a stage is sent (chars; ~3 chars per token for mixed Korean/code)."""
+    sections: dict[str, int] = {}
+    current = "(머리말)"
+    for line in prompt.splitlines(keepends=True):
+        if line.startswith("## ") or line.startswith("# "):
+            current = line.strip("# \n")[:40]
+        sections[current] = sections.get(current, 0) + len(line)
+    return {"system_chars": len(system), "prompt_chars": len(prompt),
+            "est_tokens": (len(system) + len(prompt)) // 3,
+            "sections": dict(sorted(sections.items(), key=lambda kv: -kv[1])[:10])}
 
 
 STAGE_FOOTER = """
@@ -183,6 +198,7 @@ class RelayEngine:
         self._runners: dict[str, Runner] = {}
         self._locks: dict[str, threading.Lock] = {}
         self._cancel: dict[str, threading.Event] = {}
+        self._live: dict[str, LiveChannel] = {}  # run -> stdin of the AI session running right now
 
     # --- persistence -------------------------------------------------------
     def _dir(self, run_id: str) -> Path:
@@ -336,6 +352,42 @@ class RelayEngine:
         self._event(run, "-", "approved")
         self.save(run)
         return run
+
+    def interject(self, run_id: str, text: str) -> dict:
+        """Add an instruction while a relay runs. If the current AI session accepts input (Claude Code),
+        the note goes straight into that conversation — no restart, the context and cache stay. Either way
+        it is merged into the baton when the next stage starts, so every later stage sees it too.
+        Notes go to their own file: the run thread owns run.json and would overwrite a direct edit."""
+        text = text.strip()
+        if not text:
+            raise ValueError("빈 메시지입니다")
+        run = self.load(run_id)
+        if run.status == "done":
+            raise ValueError("이미 끝난 실행입니다 — 이어서 새 요청으로 보내세요")
+        live = self._live.get(run_id)
+        delivered = live is not None and live.send(
+            f"[사용자 추가 지시 — 실행 중 개입] {text}\n지금 하던 작업에 바로 반영하고, 결과 요약에도 반영 여부를 적어라.")
+        with (self._dir(run_id) / "notes.jsonl").open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"at": _now(), "text": text, "live": delivered}, ensure_ascii=False) + "\n")
+        running = run_id in self._cancel and run.status == "running"
+        when = "live" if delivered else ("next_stage" if running else "on_resume")
+        self.history.add_event(run_id, "-", "user_interject", {"text": text[:2000], "applied": when})
+        return {"status": run.status, "applied": when}
+
+    def _merge_notes(self, run: RunState) -> list[str]:
+        path = self._dir(run.id) / "notes.jsonl"
+        if not path.exists():
+            return []
+        lines = [ln for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+        new = []
+        for line in lines[run.notes_seen:]:
+            try:
+                new.append(json.loads(line)["text"])
+            except (ValueError, KeyError):
+                continue
+        run.notes_seen = len(lines)
+        run.baton.user_notes += new
+        return new
 
     def cancel(self, run_id: str) -> RunState:
         """Stop a running relay (kills the current AI process) or a paused one. Resumable later."""
@@ -733,6 +785,7 @@ class RelayEngine:
             raise
         finally:
             self._cancel.pop(run_id, None)
+            self._live.pop(run_id, None)
             try:
                 self._release_folder(run_id, self.load(run_id).workdir)
             except (OSError, ValueError):
@@ -789,6 +842,11 @@ class RelayEngine:
                 self.save(run)
                 return run
 
+            new_notes = self._merge_notes(run)
+            if new_notes:
+                self._event(run, stage.name, "user_notes_applied", notes=new_notes)
+            live = self._live[run_id] = LiveChannel()
+
             # Cheap first pass; spend more only when this stage is being redone.
             redo = any(h.stage == stage.name for h in run.history)
             effort = stage.retry_effort if redo and stage.retry_effort else stage.effort
@@ -829,7 +887,9 @@ class RelayEngine:
                 fallback_model=stage.fallback_model,
                 on_event=self._on_stage_event(run.id, stage.name),
                 cancel_event=cancel,
+                live=live,
             )
+            self._event(run, stage.name, "prompt_breakdown", **prompt_breakdown(call.system, call.prompt))
             try:
                 result, usage = self._run_stage(run, stage, call, primary)
             except RunnerError as e:

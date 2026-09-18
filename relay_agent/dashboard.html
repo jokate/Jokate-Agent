@@ -304,6 +304,30 @@ textarea.field { resize: vertical; min-height: 84px; }
   .stage-models label b { font-weight: 600; }
   .stage-models select { width: 100%; }
   .stage-models select.chosen { border-color: var(--accent, #7cf); }
+  /* the AI's own words, the user's cut-ins */
+  .ev.say .desc { color: var(--ink); background: var(--glass-strong); border: 1px solid var(--line); border-radius: 4px 12px 12px 12px;
+    padding: 8px 11px; white-space: pre-wrap; word-break: break-word; max-height: 260px; overflow: auto; font-size: 13px; line-height: 1.55; }
+  .ev.say.clip .desc { max-height: 96px; }
+  .ev.me .desc { border-radius: 12px 4px 12px 12px; border-color: var(--c2); background: color-mix(in srgb, var(--c2) 12%, transparent); }
+  .ev.answer .desc { border-color: var(--c1, #8b7cff); }
+  .interject { display: flex; gap: 8px; align-items: stretch; margin-bottom: 12px; }
+  .interject textarea { flex: 1; min-height: 44px; height: 44px; resize: vertical; }
+  .interject .btn { align-self: flex-end; }
+  .interject[hidden] { display: none; }
+  /* the composer grows with its panel (drag the bar below it) */
+  #sessionPanel { display: flex; flex-direction: column; }
+  #sessionPanel .composer { flex: 1 1 auto; grid-template-rows: minmax(84px, 1fr) auto; min-height: 0; }
+  #sessionPanel .composer textarea { height: 100%; }
+  .tw-stage { border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; margin-bottom: 10px; }
+  .tw-stage h4 { margin: 0 0 6px; font-size: 13px; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+  .tw-stage .muted { color: var(--muted); font-size: 12px; }
+  .tw-warn { color: #ffb86b; font-size: 12.5px; margin: 4px 0; }
+  .tw-spark { display: flex; align-items: flex-end; gap: 2px; height: 42px; margin: 6px 0; }
+  .tw-spark i { flex: 1; min-width: 2px; background: var(--grad); border-radius: 2px 2px 0 0; opacity: .85; }
+  .tw-table { width: 100%; font-size: 12px; border-collapse: collapse; }
+  .tw-table td { padding: 3px 4px; border-top: 1px solid var(--line); vertical-align: top; }
+  .tw-table td.n { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .tw-table code { word-break: break-all; }
 </style>
 </head>
 <body>
@@ -366,12 +390,16 @@ textarea.field { resize: vertical; min-height: 84px; }
     </div>
     <div class="vsplit" data-target="runPanel" title="드래그: 높이 조절 · 더블클릭: 자동"></div>
     <div class="glass panel scroll" style="flex:1">
+      <div class="interject" id="interject" hidden>
+        <textarea class="field" id="ijText" placeholder="진행 중인 AI 에게 추가 지시 (Ctrl+Enter) — 지금 대화에 바로 끼어듭니다"></textarea>
+        <button class="btn btn-primary" id="ijSend">💬 끼어들기</button>
+      </div>
       <div class="tabs" id="tabs" style="margin-bottom:14px">
         <button class="tab on" data-tab="summary">요약</button>
         <button class="tab" data-tab="timeline">작업 타임라인</button>
         <button class="tab" data-tab="handoff">HANDOFF</button>
         <button class="tab" data-tab="changes">변경 사항</button>
-        <button class="tab" data-tab="usage">토큰·비용</button>
+        <button class="tab" data-tab="usage">토큰 감시</button>
       </div>
       <div id="tab-summary"></div>
       <div id="tab-timeline" class="timeline" hidden></div>
@@ -427,6 +455,9 @@ const EV = {
   providers_skipped: ["⏭️", "건너뛴 AI"], stage_skipped: ["⏭️", "단계 건너뜀"], run_cancelled: ["⛔", "취소됨"],
   workspace_ready: ["📦", "작업 공간 준비"], changes_ready: ["🧾", "변경 사항 준비"], changes_applied: ["✅", "원본에 적용"],
   changes_discarded: ["🗑️", "변경 폐기"], changes_rolled_back: ["⏪", "되돌림 완료"], workspace_error: ["⚠️", "작업 공간 오류"],
+  note: ["🤖", "AI"], thinking: ["💭", "AI 생각"], stage_answer: ["🎯", "단계 결론"], user_interject: ["🙋", "내 추가 지시"],
+  user_notes_applied: ["📌", "추가 지시 반영"], result_repaired: ["🩹", "결과 형식 복구"], prompt_breakdown: ["📤", "보낸 프롬프트"],
+  token_report: ["🔥", "토큰 사용 내역"],
 };
 const PROVIDER_LABEL = { claude: "Claude", codex: "Codex", opencode: "OpenCode", gemini: "Gemini", anthropic_api: "Claude API", openai: "OpenAI", openrouter: "OpenRouter", ollama: "Ollama", mock: "Mock" };
 const WINDOW_LABEL = { five_hour: "5h", seven_day: "7d", seven_day_opus: "7d·Opus", seven_day_sonnet: "7d·Son" };
@@ -552,7 +583,15 @@ function describe(e) {
     case "stage_budget_exceeded": return `${esc(d.reason)} — 승인하면 이 단계 한도를 2배로 올려 다시 실행`;
     case "budget_exceeded": return `${fmt$(d.spent_usd)} 사용 / 한도 ${fmt$(d.limit_usd)} — 승인하면 <code>${esc(d.next)}</code> 부터 계속`;
     case "tool_error": return esc(d.message);
-    case "note": return esc(d.text);
+    case "note": case "thinking": return esc(d.text);
+    case "stage_answer": return esc(d.summary) + (d.verdict && d.verdict !== "pass" ? ` <b>[${esc(d.verdict)}]</b>` : "")
+      + (d.open_issues?.length ? "\n· " + d.open_issues.map(esc).join("\n· ") : "");
+    case "user_interject": return esc(d.text) + `\n<small>${{ live: "⚡ 진행 중인 AI 대화에 바로 전달됨", next_stage: "⏭️ 다음 단계부터 반영", on_resume: "⏸ 재개할 때 반영" }[d.applied] || ""}</small>`;
+    case "user_notes_applied": return (d.notes || []).map(esc).join(" / ") + " — 이 단계 프롬프트에 포함";
+    case "result_repaired": return esc(d.reason);
+    case "prompt_breakdown": return `약 ${fmtN(d.est_tokens)} 토큰 · 가장 큰 부분: ${esc(Object.keys(d.sections || {})[0] || "-")} (${fmtN(Object.values(d.sections || {})[0] || 0)}자)`;
+    case "token_report": return `턴 ${d.turns}회 · 매 턴 다시 읽은 양 합계 ${fmtN(d.reread_tokens)} · 최대 맥락 ${fmtN(d.peak_context)}`
+      + (d.top_results?.[0] ? ` · 가장 큰 도구 결과 <code>${esc(d.top_results[0].tool)}</code> ${fmtN(d.top_results[0].chars)}자` : "");
     default: return "";
   }
 }
@@ -580,9 +619,10 @@ async function loadStats() {
   $("stats").innerHTML = [
     ["질문", st.turns, "var(--c1)"],
     ["누적 비용", fmt$(st.cost_usd), "var(--c3)"],
-    ["토큰 in / out", `${fmtN(st.input_tokens)}<small style="font-size:12px;color:var(--muted);font-weight:600"> / ${fmtN(st.output_tokens)}</small>`, "var(--c2)"],
+    ["실질 입력 / 출력", `${fmtN(st.billed_input_equiv ?? st.input_tokens)}<small style="font-size:12px;color:var(--muted);font-weight:600"> / ${fmtN(st.output_tokens)}</small>`, "var(--c2)", null,
+      `전체 입력 ${fmtN(st.input_tokens)} = 새 입력 ${fmtN(st.fresh_input_tokens ?? 0)} + 캐시 쓰기 ${fmtN(st.cache_write_tokens ?? 0)}(1.25배) + 캐시 읽기 ${fmtN(st.cache_read_tokens ?? 0)}(0.1배). 실질 입력은 과금 기준으로 환산한 값`],
     ["캐시 적중", pct + "%", "var(--ok)", pct],
-  ].map(([k, v, c, p]) => `<div class="glass stat" style="--accent:${c}"><div class="k">${k}</div><div class="v">${v}</div>${p != null ? `<div class="ring" style="--p:${p}"></div>` : ""}</div>`).join("");
+  ].map(([k, v, c, p, tip]) => `<div class="glass stat" style="--accent:${c}" ${tip ? `title="${esc(tip)}"` : ""}><div class="k">${k}${tip ? " ⓘ" : ""}</div><div class="v">${v}</div>${p != null ? `<div class="ring" style="--p:${p}"></div>` : ""}</div>`).join("");
 }
 
 /* sessions */
@@ -755,13 +795,18 @@ async function refreshRun(first) {
   if ($("cancelRun")) $("cancelRun").onclick = () => confirm("이 릴레이를 취소할까요? 나중에 재개할 수 있습니다.") &&
     api(`/runs/${runId}/cancel`, { method: "POST" }).then(() => { toast("⛔ 취소 요청"); restart(); }).catch((e) => toast(e.message, true));
   if ($("toChanges")) $("toChanges").onclick = () => document.querySelector('[data-tab="changes"]').click();
+  $("interject").hidden = !["running", "pending", "awaiting_approval", "failed", "cancelled"].includes(run.status);
+  $("ijText").placeholder = run.status === "running"
+    ? "진행 중인 AI 에게 추가 지시 (Ctrl+Enter) — 지금 대화에 바로 끼어듭니다"
+    : "추가 지시를 남기면 재개·승인할 때 반영됩니다 (Ctrl+Enter)";
   const changesKey = `${run.status}|${run.changes_status}|${run.changes?.files ?? 0}|${run.changes?.insertions ?? 0}`;
   if (first || S.changesFor !== changesKey) { S.changesFor = changesKey; renderChanges(run); }  // patch only refetched when it changed
 
   const tl = $("tab-timeline");
   for (const e of events) {
     S.lastEvent = e.id;
-    if (e.kind === "tool_use" || e.kind === "note") { addToGroup(tl, e); continue; }
+    if (e.kind === "tool_use") { addToGroup(tl, e); continue; }
+    if (e.kind === "thinking" && !(e.detail.text || "").trim()) continue;
     if (e.kind === "mcp_result") {  // attach the result size to the matching call row
       const rows = [...tl.querySelectorAll(".ev.k-mcp_call .mcp-size:empty")];
       const row = rows.find((r) => r.closest(".ev").dataset.key === `${e.detail.server}.${e.detail.tool}`);
@@ -771,8 +816,9 @@ async function refreshRun(first) {
     S.group = null;
     const [ic, label] = EV[e.kind] || ["•", e.kind];
     const key = e.kind === "mcp_call" ? `${e.detail.server}.${e.detail.tool}` : "";
+    const say = { note: "say", thinking: "say clip", stage_answer: "say answer", user_interject: "say me" }[e.kind] || "";
     tl.insertAdjacentHTML("beforeend", `
-      <div class="ev k-${e.kind}" data-key="${esc(key)}"><div class="ic">${ic}</div>
+      <div class="ev k-${e.kind} ${say}" data-key="${esc(key)}"><div class="ic">${ic}</div>
         <div class="body"><div class="top"><span class="kind">${label}</span>${e.stage !== "-" ? `<span class="stage">${esc(e.stage)}</span>` : ""}<span class="time">${e.at.slice(11, 19)}</span></div>
         <div class="desc">${describe(e)}</div></div></div>`);
   }
@@ -791,14 +837,44 @@ async function refreshRun(first) {
   }
 }
 
-function renderUsage(run) {
+async function renderUsage(run) {
   const h = run.history;
-  if (!h.length) { $("tab-usage").innerHTML = `<div class="empty"><div class="big">📊</div>아직 사용량이 없습니다</div>`; return; }
+  let watch = { stages: [] };
+  try { watch = await api(`/runs/${run.id}/tokens`); } catch {}
+  if (!h.length && !watch.stages.length) { $("tab-usage").innerHTML = `<div class="empty"><div class="big">📊</div>아직 사용량이 없습니다</div>`; return; }
+  const stageHtml = watch.stages.map((s) => {
+    const u = s.usage || {}, r = s.report || {}, p = s.prompt || {};
+    const maxCtx = Math.max(1, ...(r.contexts || [0]));
+    return `<div class="tw-stage">
+      <h4>${STAGE_IC[s.stage] || "◆"} ${esc(s.stage)}
+        <span class="muted">새 입력 ${fmtN(u.input || 0)} · 캐시 쓰기 ${fmtN(u.cache_write || 0)} · 캐시 읽기 ${fmtN(u.cache_read || 0)} (10% 과금) · 출력 ${fmtN(u.output || 0)} · ${fmt$(u.cost_usd || 0)}</span></h4>
+      ${(s.warnings || []).map((w) => `<div class="tw-warn">⚠️ ${esc(w)}</div>`).join("") || '<div class="muted">✅ 눈에 띄는 누수 없음</div>'}
+      ${p.est_tokens ? `<div class="muted">📤 보낸 프롬프트 약 ${fmtN(p.est_tokens)} 토큰 — ${Object.entries(p.sections || {}).slice(0, 4).map(([k, v]) => `${esc(k)} ${fmtN(v)}자`).join(" · ")}</div>` : ""}
+      ${r.turns ? `<div class="muted">🔁 턴 ${r.turns}회 — 턴마다 아래 크기의 맥락을 통째로 다시 읽음 (합계 ${fmtN(r.reread_tokens)})</div>
+        <div class="tw-spark" title="턴별 맥락 크기">${r.contexts.map((c) => `<i style="height:${(c / maxCtx * 100).toFixed(0)}%" title="${fmtN(c)}"></i>`).join("")}</div>` : ""}
+      ${(r.top_results || []).length ? `<table class="tw-table">${r.top_results.slice(0, 5).map((x) => `<tr><td>${TOOL_IC[x.tool] || "🛠️"} <code>${esc(x.tool)}</code> <code>${esc(x.target || "")}</code></td><td class="n">${fmtN(x.chars)}자</td></tr>`).join("")}</table>` : ""}
+    </div>`;
+  }).join("");
+  if (!h.length) { $("tab-usage").innerHTML = stageHtml; return; }
   const max = Math.max(...h.map((x) => x.total_input + x.output_tokens));
   $("tab-usage").innerHTML = `<div class="bars">${h.map((x) => `
     <div class="bar-row"><div class="top"><span>${STAGE_IC[x.stage] || "◆"} <b>${esc(x.stage)}</b> <span class="tag">${esc(x.model)}</span></span><b>${fmtN(x.total_input)} in · ${fmtN(x.output_tokens)} out · ${x.cost_usd != null ? fmt$(x.cost_usd) : "-"}</b></div>
-    <div class="bar-track"><div class="bar-fill" style="width:${((x.total_input + x.output_tokens) / max * 100).toFixed(1)}%"></div></div></div>`).join("")}</div>`;
+    <div class="bar-track"><div class="bar-fill" style="width:${((x.total_input + x.output_tokens) / max * 100).toFixed(1)}%"></div></div></div>`).join("")}</div>
+    <p class="label" style="margin-top:16px">토큰 감시 — 어디서 새는지</p>${stageHtml || '<div class="muted">이 실행에는 상세 기록이 없습니다 (이전 버전에서 실행)</div>'}`;
 }
+
+async function sendInterject() {
+  const text = $("ijText").value.trim();
+  if (!text || !S.run) return;
+  try {
+    const r = await api(`/runs/${S.run}/interject`, { method: "POST", body: JSON.stringify({ text }) });
+    $("ijText").value = "";
+    toast({ live: "⚡ 진행 중인 AI 에게 바로 전달했습니다", next_stage: "⏭️ 지금 AI 는 입력을 못 받아 다음 단계부터 반영됩니다", on_resume: "⏸ 재개·승인할 때 반영됩니다" }[r.applied] || "전달됨");
+    document.querySelector('[data-tab="timeline"]').click();
+  } catch (e) { toast(e.message, true); }
+}
+$("ijSend").onclick = sendInterject;
+$("ijText").onkeydown = (ev) => { if (ev.key === "Enter" && (ev.ctrlKey || ev.metaKey)) { ev.preventDefault(); sendInterject(); } };
 
 /* changes (workspace patch) */
 async function renderChanges(run) {

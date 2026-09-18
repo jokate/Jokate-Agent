@@ -48,7 +48,7 @@ def test_cli_error_results_are_explained_not_none(tmp_path, monkeypatch, result,
 
     import relay_agent.runners as runners
 
-    def fake_run_process(args, call, stdin_text, on_line):
+    def fake_run_process(args, call, stdin_text, on_line, live=None):
         on_line(json.dumps(result) + "\n")
         return 1, ""
 

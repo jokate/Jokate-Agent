@@ -104,6 +104,26 @@ uv run relay repo clone mnys --url <git url>          # on a new machine: clone 
 - **Stages using an MCP that changes real state (e.g. Unreal) always run `inplace`, even if you choose `copy`.** MCP changes the real project, so a copy would split the results. (Read-only MCPs like `docs_read` are exempt.)
 - `relay patch|rollback <run_id>` or the dashboard "Changes" tab. Rollback restores both code and assets.
 
+## Stepping in mid-run · watching what the AI says
+- **Cut in:** type in the "추가 지시" box above the right-hand tabs (Ctrl+Enter).
+  - For Claude, the note goes **straight into the running AI conversation** — no restart, so context and cache are kept and there's no extra cost.
+  - For AIs that can't take input mid-run, it applies from the next phase. On a paused, failed, or cancelled run, it applies on resume or approval.
+  - All later phases also get it in the baton's "사용자 추가 지시" section (top priority).
+- **See the AI's reasoning:** in the "작업 타임라인" tab, the AI's own words (🤖), each phase's conclusion (🎯), and your notes (🙋) appear as chat bubbles.
+- **Chat box size:** drag the bar below the request box; the input box grows with it.
+- **Structured-result errors:** when a small model like Haiku answers in plain text instead of the required result format, the relay no longer fails.
+  - Wrong-typed fields (e.g. a string instead of a list) are fixed automatically, and a JSON object found in the answer text is used.
+  - Otherwise the text is passed on as-is (🩹 "결과 형식 복구" event).
+
+## Token watch — where the tokens go
+- The headline "실질 입력" is the input converted at billing rates (cache reads 0.1×, cache writes 1.25×). The full-input total (mostly cache reads) is in the tooltip.
+- The "토큰 감시" tab shows, per phase:
+  - 📤 **Prompt breakdown** — which section of the baton is large.
+  - 🔁 **Context size per turn** — every turn re-reads the whole context, so cost ≈ turns × context.
+  - 🐘 **Largest tool results** — e.g. a whole file that got read.
+  - ⚠️ **Warnings** — one tool result ≥20K chars, ≥25 turns, context ≥60K, prompt ≥8K tokens.
+- API: `GET /runs/{id}/tokens`
+
 ## Choosing a model per phase
 - In the dashboard, pick a relay and a model dropdown appears for each phase (scout · plan · build · review). Leave it blank to use the relay's default.
 - The list shows **only models from AIs usable right now** (installed and logged in). Models whose usage is exhausted appear as `소진` and can't be picked.
