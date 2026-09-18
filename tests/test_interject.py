@@ -75,7 +75,7 @@ def test_lenient_result_repairs_small_model_slips():
 def run_cli(tmp_path, monkeypatch, lines):
     import relay_agent.runners as runners
 
-    def fake(args, call, stdin_text, on_line, live=None):
+    def fake(args, call, stdin_text, on_line, live=None, **kw):
         for line in lines:
             on_line(json.dumps(line))
         return 0, ""

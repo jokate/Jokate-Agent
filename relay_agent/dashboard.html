@@ -350,6 +350,9 @@ textarea.field { resize: vertical; min-height: 84px; }
   .live { display: flex; gap: 10px; align-items: center; margin-top: 10px; padding: 8px 12px; border-radius: 12px;
     border: 1px solid var(--line); background: var(--glass-strong); font-size: 12.5px; color: var(--muted); }
   .live b { color: var(--ink); }
+  .live .live-detail { margin-top: 4px; color: var(--muted); font-size: 12px; white-space: pre-wrap; word-break: break-all;
+    max-height: 3.2em; overflow: hidden; }
+  .live .live-detail code { font-size: 11.5px; }
   .live .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--ok, #3ddc97); flex: 0 0 auto; }
   .live.working .dot { animation: beat 1.1s ease-in-out infinite; }
   .live.slow .dot { background: #ffb86b; }
@@ -494,7 +497,7 @@ const EV = {
   user_notes_applied: ["📌", "추가 지시 반영"], result_repaired: ["🩹", "결과 형식 복구"], prompt_breakdown: ["📤", "보낸 프롬프트"],
   token_report: ["🔥", "토큰 사용 내역"], gate_skipped: ["⏩", "승인 없이 진행"],
   process_stopped: ["🛑", "AI 프로세스 종료"], stage_resumed: ["⏯️", "중단된 대화 이어서"], resume_fallback: ["↻", "처음부터 다시"],
-  handoff_written: ["📝", "인계서 작성"], handoff_failed: ["📝", "인계서 AI 작성 실패"], project_context: ["📁", "프로젝트 지침·스킬 적용"],
+  stall_restart: ["🧟", "무응답으로 다시 시작"], handoff_written: ["📝", "인계서 작성"], handoff_failed: ["📝", "인계서 AI 작성 실패"], project_context: ["📁", "프로젝트 지침·스킬 적용"],
 };
 const PROVIDER_LABEL = { claude: "Claude", codex: "Codex", opencode: "OpenCode", gemini: "Gemini", anthropic_api: "Claude API", openai: "OpenAI", openrouter: "OpenRouter", ollama: "Ollama", mock: "Mock" };
 const WINDOW_LABEL = { five_hour: "5h", seven_day: "7d", seven_day_opus: "7d·Opus", seven_day_sonnet: "7d·Son" };
@@ -627,10 +630,11 @@ function describe(e) {
     case "user_notes_applied": return (d.notes || []).map(esc).join(" / ") + " — 이 단계 프롬프트에 포함";
     case "result_repaired": return esc(d.reason);
     case "process_stopped": return d.confirmed
-      ? `✅ 종료 확인 — AI 프로세스${d.children ? `와 하위 프로세스 ${d.children}개` : ""} 모두 끝남 (${d.why === "timeout" ? "시간 초과" : "취소"})`
+      ? `✅ 종료 확인 — AI 프로세스${d.children ? `와 하위 프로세스 ${d.children}개` : ""} 모두 끝남 (${{timeout: "시간 초과", stalled: "무응답", cancelled: "취소"}[d.why] || d.why})`
       : `⚠️ 일부 프로세스가 아직 살아 있음: PID ${(d.survivors || []).join(", ")} — 작업 관리자에서 확인하세요`;
     case "stage_resumed": return "이전 대화를 그대로 이어서 진행 — 이미 한 탐색·수정을 반복하지 않음";
-    case "resume_fallback": return `이전 대화를 이어갈 수 없어 이 단계를 새로 시작 (${esc(d.reason)})`;
+    case "resume_fallback": return `이전 대화를 이어갈 수 없어 이 단계를 처음부터 새로 시작함 — 실패 아님 (사유: ${esc(d.reason)})`;
+    case "stall_restart": return `${esc(d.reason)} — 같은 모델로 한 번 더 시작`;
     case "handoff_written": return `${esc(d.model)} 가 요청·작업된 내역·남은 일로 정리 — HANDOFF 탭 · 재개하면 이것부터 읽음 (입력 ${fmtN(d.input_tokens)} · $${(d.cost_usd || 0).toFixed(4)})`;
     case "handoff_failed": return `기본 인계서로 대신함 (${esc(d.reason)})`;
     case "project_context": return `${esc(d.root)} · 지침 ${(d.instructions || []).length}개 · 스킬 ${esc((d.skills || []).join(", ") || "없음")}${(d.mcp || []).length ? " · MCP " + esc(d.mcp.join(", ")) : ""}${(d.commands || []).length ? " · 명령 " + esc(d.commands.join(", ")) : ""}`;
@@ -1048,7 +1052,8 @@ $("ijSend").onclick = sendInterject;
 $("ijText").onkeydown = (ev) => { if (ev.key === "Enter" && (ev.ctrlKey || ev.metaKey)) { ev.preventDefault(); sendInterject(); } };
 
 /* liveness: is the AI really working right now? */
-const DOING = { thinking: "생각하는 중", tool: "도구 호출 중", tool_result: "도구 결과 읽는 중", writing: "답을 쓰는 중",
+const DOING = { thinking: "💭 생각하는 중", tool: "🔧 도구 실행 중", tool_input: "🔧 도구 호출 작성 중", tool_result: "📥 도구 결과 읽는 중", writing: "✍️ 답을 쓰는 중",
+  start: "⏳ AI 프로세스 시작 — 첫 응답 대기", retry: "⏳ API 재시도 대기 (과부하·한도)",
   rate_limit_event: "응답 대기", system: "준비 중" };
 const fmtSec = (s) => s == null ? "-" : s < 60 ? `${Math.round(s)}초` : `${Math.floor(s / 60)}분 ${Math.round(s % 60)}초`;
 async function renderLive(runId, status) {
@@ -1061,13 +1066,19 @@ async function renderLive(runId, status) {
   const q = l.quiet_seconds ?? 0;
   const state = !l.alive && status === "running" ? "stuck" : q > 300 ? "stuck" : q > 60 ? "slow" : "working";
   const what = l.doing ? DOING[l.doing] || l.doing : l.last ? (EV[l.last.kind] || ["", l.last.kind])[1] : "시작 중";
+  const running = l.doing === "tool" && l.tool;
   const tail = !l.alive && status === "running" ? " — AI 프로세스가 없습니다 (서버 재시작 등). 재개가 필요할 수 있어요"
-    : q > 300 ? " — 5분 넘게 응답이 없습니다. 끼어들어 확인하거나 취소를 고려하세요"
-    : q > 60 ? " — 길게 생각하거나 오래 걸리는 명령을 실행 중일 수 있어요" : "";
+    : q > 300 ? (running ? " — 이 명령이 5분 넘게 끝나지 않습니다. 끼어들어 확인하거나 취소를 고려하세요" : " — 5분 넘게 응답이 없습니다. 끼어들어 확인하거나 취소를 고려하세요")
+    : q > 60 ? (running ? "" : " — 응답을 기다리는 중 (API 지연일 수 있어요)") : "";
+  // detail: the tool that is running (and for how long), or the tail of what is being thought/written
+  let detail = "";
+  if (running) detail = `<div class="live-detail"><b>${esc(l.tool)}</b>${l.tools > 1 ? ` 외 ${l.tools - 1}개` : ""} · ${fmtSec(l.tool_seconds)}째 — <code>${esc((l.target || "").slice(0, 160))}</code></div>`;
+  else if (l.snippet) detail = `<div class="live-detail">${l.doing === "tool_input" && l.tool ? `<b>${esc(l.tool)}</b> ` : ""}${l.doing === "retry" ? "" : "…"}${esc(l.snippet)}</div>`;
+  else if (l.doing === "start" && q > 20) detail = `<div class="live-detail">${fmtSec(q)}째 아무 출력이 없음 — 8분간 계속되면 자동으로 프로세스를 끊고 다시 시작합니다</div>`;
   bar.hidden = false;
   bar.className = `live ${state}`;
-  bar.innerHTML = `<span class="dot"></span><span><b>${esc(l.stage || "-")}</b> · ${esc(what)}${l.turn != null ? ` · 턴 ${l.turn + 1}` : ""}
-    · 단계 경과 ${fmtSec(l.stage_seconds)} · 마지막 신호 <b>${fmtSec(q)} 전</b>${l.precise ? "" : " (터미널 실행 — 기록 기준)"}${tail}</span>`;
+  bar.innerHTML = `<span class="dot"></span><span style="min-width:0"><b>${esc(l.stage || "-")}</b> · ${esc(what)}${l.turn != null ? ` · 턴 ${l.turn + 1}` : ""}
+    · 단계 경과 ${fmtSec(l.stage_seconds)} · 마지막 신호 <b>${fmtSec(q)} 전</b>${l.precise ? "" : " (터미널 실행 — 기록 기준)"}${tail}${detail}</span>`;
 }
 
 /* alerts: a run finished / failed / needs approval (any run, even ones not open) */

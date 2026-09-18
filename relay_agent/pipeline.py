@@ -69,6 +69,7 @@ class StageSpec(BaseModel):
     on_retry: str | None = None
     max_retries: int = 1
     timeout_s: int = 1800
+    stall_s: int = 480  # no output from the AI for this long -> process killed and the stage started once more
     # token controls
     retry_effort: str | None = Field(None, description="effort used when this stage runs again after a send-back")
     retry_model: str | None = Field(None, description="stronger model used when this stage runs again")
@@ -159,6 +160,22 @@ class RunState(BaseModel):
 RESUMABLE = ("pending", "failed", "cancelled")
 
 
+def _replace(tmp: Path, dst: Path) -> None:
+    """os.replace with retries: on Windows the rename fails with WinError 5 while another process (the
+    dashboard reading run.json, antivirus, a drive sync) holds the target open. As a last resort write in place."""
+    for attempt in range(8):
+        try:
+            os.replace(tmp, dst)
+            return
+        except PermissionError:
+            time.sleep(0.05 * (2 ** attempt))  # ~13 s in total
+    try:
+        dst.write_text(tmp.read_text(encoding="utf-8"), encoding="utf-8")
+        tmp.unlink(missing_ok=True)
+    except OSError as e:
+        raise OSError(f"{dst.name} 저장 실패 (다른 프로그램이 파일을 잡고 있음: {e})") from e
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -222,7 +239,8 @@ class RelayEngine:
         self._locks: dict[str, threading.Lock] = {}
         self._cancel: dict[str, threading.Event] = {}
         self._live: dict[str, LiveChannel] = {}
-        self._pulse: dict[str, dict] = {}  # run -> last sign of life from the running AI  # run -> stdin of the AI session running right now
+        self._pulse: dict[str, dict] = {}  # run -> last sign of life from the running AI
+        self._pulse_written: dict[str, float] = {}  # run -> stdin of the AI session running right now
 
     # --- persistence -------------------------------------------------------
     def _dir(self, run_id: str) -> Path:
@@ -234,7 +252,7 @@ class RelayEngine:
         # Atomic replace: a poller never reads a half-written file, a crash never leaves a truncated one.
         tmp = d / f"run.json.{threading.get_ident()}.tmp"
         tmp.write_text(run.model_dump_json(indent=2), encoding="utf-8")
-        os.replace(tmp, d / "run.json")
+        _replace(tmp, d / "run.json")
         # HANDOFF.md stays until the user marks the session's work complete; the record stays in run.json
         if run.handoff_closed:
             (d / "HANDOFF.md").unlink(missing_ok=True)
@@ -255,7 +273,15 @@ class RelayEngine:
         return f"{run.baton.state}\n\n{output}".strip()
 
     def load(self, run_id: str) -> RunState:
-        return RunState.model_validate_json((self._dir(run_id) / "run.json").read_text(encoding="utf-8"))
+        path = self._dir(run_id) / "run.json"
+        for attempt in range(5):  # a replace by the run thread may be in flight
+            try:
+                return RunState.model_validate_json(path.read_text(encoding="utf-8"))
+            except (PermissionError, FileNotFoundError):
+                if attempt == 4 or not self._dir(run_id).is_dir():
+                    raise
+                time.sleep(0.05 * (attempt + 1))
+        raise FileNotFoundError(path)
 
     def list_runs(self) -> list[RunState]:
         runs = []
@@ -540,6 +566,11 @@ class RelayEngine:
         here = run_id in self._cancel
         alive = here or bool(run.owner_pid and run.owner_pid != os.getpid() and pid_alive(run.owner_pid))
         pulse = self._pulse.get(run_id) if here else None
+        if pulse is None and alive and run.status == "running":
+            try:  # the run belongs to another process (relay run in a terminal): its last pulse is on disk
+                pulse = json.loads((self._dir(run_id) / "pulse.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                pulse = None
         now = time.time()
 
         def age(iso: str | None) -> float | None:
@@ -555,8 +586,12 @@ class RelayEngine:
             "stage_seconds": age(started["at"]) if started else None,
             "quiet_seconds": quiet, "doing": pulse.get("doing") if pulse else None,
             "turn": pulse.get("turn") if pulse else None,
+            "snippet": (pulse.get("snippet") or "")[-160:] if pulse else "",
+            "tool": pulse.get("tool") if pulse else None, "target": pulse.get("target") if pulse else None,
+            "tools": pulse.get("tools") if pulse else None,
+            "tool_seconds": (now - pulse["tool_since"]) if pulse and pulse.get("tool_since") else None,
             "last": {"kind": last["kind"], "stage": last["stage"], "detail": last["detail"]} if last else None,
-            "precise": pulse is not None,  # False: run owned by another process (CLI) — judged by its log only
+            "precise": pulse is not None,  # False: no pulse yet — judged by the activity log only
         }
 
     def cancel(self, run_id: str) -> RunState:
@@ -983,8 +1018,14 @@ class RelayEngine:
 
     def _on_stage_event(self, run_id: str, stage: str):
         def handle(kind: str, detail: dict) -> None:
-            if kind == "pulse":  # liveness only: in memory, not in the activity log
-                self._pulse[run_id] = {"at": time.time(), "stage": stage, **detail}
+            if kind == "pulse":  # liveness only: in memory (+ a small file so a terminal run shows in the dashboard)
+                pulse = self._pulse[run_id] = {"at": time.time(), "stage": stage, **detail}
+                if pulse["at"] - self._pulse_written.get(run_id, 0) > 1.0:
+                    self._pulse_written[run_id] = pulse["at"]
+                    try:
+                        (self._dir(run_id) / "pulse.json").write_text(json.dumps(pulse, ensure_ascii=False), encoding="utf-8")
+                    except OSError:
+                        pass
                 return
             if kind == "rate_limit":  # subscription usage snapshot, stored, not logged as activity
                 self.history.record_limits(detail["provider"], detail.get("status"), detail.get("windows", []))
@@ -1222,6 +1263,7 @@ class RelayEngine:
                 settings_path=hook_settings,
                 permission_mode=stage.permission_mode,
                 timeout_s=stage.timeout_s,
+                stall_s=stage.stall_s,
                 system_mode=stage.system_mode,
                 isolate=stage.isolate,
                 max_budget_usd=(stage.max_budget_usd * run.stage_budget_boost.get(stage.name, 1.0)

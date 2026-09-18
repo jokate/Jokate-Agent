@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -61,6 +62,7 @@ class StageCall:
     settings_path: Path | None = None  # Claude Code --settings (pre-edit backup hook for in-place runs)
     permission_mode: str = "default"
     timeout_s: int = 1800
+    stall_s: int = 480  # no output from the AI process for this long -> killed and started once more
     # claude_cli token controls
     system_mode: str = "replace"  # replace: our prompt only; append: keep Claude Code's default prompt
     isolate: bool = False  # skip CLAUDE.md / skills / hooks of the target folder
@@ -170,6 +172,66 @@ class Runner(Protocol):
     def run(self, call: StageCall) -> tuple[StageResult, Usage]: ...
 
 
+class LiveDetail:
+    """What the AI is doing right now, from the stream: the thinking/text being written (tail), the tool call
+    being composed, or the tool that is running and for how long. In memory only, never logged."""
+
+    TAIL = 240
+
+    def __init__(self):
+        self.doing = "start"
+        self.snippet = ""
+        self.tool: str | None = None
+        self.target: str | None = None
+        self.tool_since: float | None = None
+        self.tools = 0
+
+    def on_stderr(self, line: str) -> dict:
+        """A retry/overload notice on stderr: the CLI is waiting on the API, not working."""
+        self.doing, self.snippet = "retry", line[-self.TAIL:]
+        return self.pulse()
+
+    def pulse(self) -> dict:
+        return {"doing": self.doing, "snippet": self.snippet, "tool": self.tool, "target": self.target,
+                "tool_since": self.tool_since, "tools": self.tools}
+
+    def on_event(self, event: dict) -> dict:
+        etype = event.get("type")
+        if etype == "stream_event":
+            ev = event.get("event") or {}
+            kind = ev.get("type")
+            if kind == "content_block_start":
+                block = ev.get("content_block") or {}
+                btype = block.get("type")
+                self.doing = {"thinking": "thinking", "text": "writing", "tool_use": "tool_input"}.get(btype, self.doing)
+                self.snippet = ""
+                if btype == "tool_use":
+                    self.tool, self.target = block.get("name"), None
+            elif kind == "content_block_delta":
+                d = ev.get("delta") or {}
+                piece = d.get("thinking") or d.get("text") or d.get("partial_json") or ""
+                if piece:
+                    self.snippet = (self.snippet + piece)[-self.TAIL:]
+        elif etype == "assistant":
+            blocks = (event.get("message") or {}).get("content", []) or []
+            uses = [b for b in blocks if b.get("type") == "tool_use"]
+            if uses:
+                last = uses[-1]
+                self.doing, self.tool, self.tools = "tool", last.get("name"), len(uses)
+                self.target = describe_tool(self.tool or "", last.get("input") or {})
+                self.tool_since, self.snippet = time.time(), ""
+            else:
+                self.doing = "thinking" if any(b.get("type") == "thinking" for b in blocks) else "writing"
+        elif etype == "user":
+            self.doing, self.tool, self.target, self.tool_since, self.snippet = "tool_result", None, None, None, ""
+        elif etype == "system" and event.get("subtype") == "thinking_tokens":
+            self.doing = "thinking"
+        elif etype == "system" and "retry" in str(event.get("subtype", "")):
+            self.doing = "retry"
+            self.snippet = " ".join(f"{k}={v}" for k, v in event.items() if k not in ("type", "subtype", "uuid", "session_id"))[-self.TAIL:]
+        return self.pulse()
+
+
 def describe_tool(name: str, tool_input: dict) -> str:
     """Short human-readable target of a tool call."""
     for key in ("file_path", "command", "pattern", "path", "url", "query"):
@@ -181,10 +243,15 @@ def describe_tool(name: str, tool_input: dict) -> str:
     return json.dumps(tool_input, ensure_ascii=False)[:200]
 
 
+RETRY_RE = re.compile(r"retry|retrying|overloaded|rate.?limit|529|503|ECONNRESET|ETIMEDOUT|fetch failed", re.I)
+
+
 def run_process(args: list[str], call: StageCall, stdin_text: str | None,
-                on_line: Callable[[str], None], live: LiveChannel | None = None) -> tuple[int, str]:
-    """Stream stdout lines to on_line. stderr is drained on a thread (no pipe deadlock).
-    Kills the whole process tree on timeout, cancellation, or a callback error.
+                on_line: Callable[[str], None], live: LiveChannel | None = None,
+                on_stderr: Callable[[str], None] | None = None) -> tuple[int, str]:
+    """Stream stdout lines to on_line. stderr is drained on a thread (no pipe deadlock); lines that look like
+    API retries/overload go to on_stderr so the dashboard can show why nothing is happening.
+    Kills the whole process tree on timeout, cancellation, a stall (no output for call.stall_s) or a callback error.
     With `live`, stdin stays open for stream-json user messages until the result line arrives."""
     # npm installs CLIs as .cmd shims that CreateProcess can't find by bare name; resolve the full path.
     args = [shutil.which(args[0]) or args[0], *args[1:]]
@@ -201,7 +268,19 @@ def run_process(args: list[str], call: StageCall, stdin_text: str | None,
     except FileNotFoundError as e:
         raise RunnerError(f"{Path(args[0]).name} not installed", "unavailable") from e
     stderr_chunks: list[str] = []
-    drain = threading.Thread(target=lambda: stderr_chunks.append(proc.stderr.read()), daemon=True)
+    last_output = [time.monotonic()]
+
+    def drain_stderr() -> None:
+        for line in proc.stderr:
+            stderr_chunks.append(line)
+            if on_stderr is not None and RETRY_RE.search(line):
+                last_output[0] = time.monotonic()  # the CLI is alive, waiting on the API
+                try:
+                    on_stderr(line.strip())
+                except Exception:
+                    pass
+
+    drain = threading.Thread(target=drain_stderr, daemon=True)
     drain.start()
     stop = threading.Event()
     reason: list[str] = []
@@ -209,8 +288,10 @@ def run_process(args: list[str], call: StageCall, stdin_text: str | None,
     def watch():
         deadline = time.monotonic() + call.timeout_s
         while not stop.is_set():
-            if call.cancelled or time.monotonic() > deadline:
-                reason.append("cancelled" if call.cancelled else "timeout")
+            now = time.monotonic()
+            stalled = call.stall_s and now - last_output[0] > call.stall_s
+            if call.cancelled or now > deadline or stalled:
+                reason.append("cancelled" if call.cancelled else "timeout" if now > deadline else "stalled")
                 call.emit("process_stopped", {"why": reason[0], **kill_tree(proc)})
                 return
             stop.wait(0.3)
@@ -242,6 +323,7 @@ def run_process(args: list[str], call: StageCall, stdin_text: str | None,
         else:
             live.attach(write)
         for line in proc.stdout:
+            last_output[0] = time.monotonic()
             on_line(line)
             if live is not None and '"result"' in line and (parse_json_line(line) or {}).get("type") == "result":
                 close_input()  # the answer is in: end the session (it would otherwise wait for more input)
@@ -254,10 +336,16 @@ def run_process(args: list[str], call: StageCall, stdin_text: str | None,
             close_input()
         stop.set()
         drain.join(timeout=5)
+        if reason:
+            watcher.join(timeout=20)  # its process_stopped report (kill + survivors check) comes before the error
     if reason and reason[0] == "cancelled":
         raise RunnerError("사용자가 취소함", "cancelled")
     if reason and reason[0] == "timeout":
         raise RunnerError(f"timeout after {call.timeout_s}s", "timeout")
+    if reason and reason[0] == "stalled":
+        tail = "".join(stderr_chunks)[-300:].strip()
+        raise RunnerError(f"AI 프로세스가 {call.stall_s // 60}분간 아무 출력이 없어 중단" + (f" (stderr: {tail})" if tail else ""),
+                          "stalled")
     return proc.returncode, "".join(stderr_chunks)
 
 
@@ -380,7 +468,8 @@ class MockRunner:
 
 # --- Claude Code (headless) ------------------------------------------------------
 REPLACE_PREAMBLE = """You are one stage of an automated relay run by a programmer's agent server.
-Environment: {os_name}. Working directory: {cwd} (already the current directory; use relative paths, never `cd`).
+Environment: {os_name}. Working directory: {cwd} (already the current directory; use relative paths; `cd` only
+as `cd <project root> && <command>` when the prompt names a project root).
 Rules:
 - Locate with Grep/Glob first, then Read only the needed line ranges (offset/limit). Never read whole large files.
 - Use tools directly without narration. Do not repeat file contents in your answer.
@@ -390,6 +479,9 @@ Rules:
   2) edit ONCE: all Edit/Write calls in one message;  3) verify ONCE: the single relevant command;  4) answer.
   Look a little wider in step 1 rather than coming back for one more grep. No no-op or "just checking" turns.
 - Edit with the Edit tool (small exact replacements). Run only the verification command you need, once.
+- Bash runs without a human: only pre-approved commands work — the verification/project commands listed in the
+  prompt and read-only ls, cat, head, tail, wc, grep, rg, find, git log/show/diff/status. Every part of a chained
+  command is checked; one unapproved part blocks the whole line. Stay inside the working directory.
 - If a command is denied or needs approval, do NOT retry it or a variant. Note it in open_issues and continue.
 {finish}
 """
@@ -421,6 +513,13 @@ def os_name() -> str:
     return {"Windows": "Windows (bash tool runs Git Bash)", "Darwin": "macOS"}.get(platform.system(), platform.system())
 
 
+# Read-only inspection commands a headless stage may always run (with Bash). Claude Code checks every part
+# of a chained command; without these, `cat a; ls b` stops at "requires approval" and the turn is wasted.
+READ_ONLY_BASH = ["Bash(ls:*)", "Bash(dir:*)", "Bash(cat:*)", "Bash(head:*)", "Bash(tail:*)", "Bash(wc:*)",
+                  "Bash(grep:*)", "Bash(rg:*)", "Bash(find:*)", "Bash(pwd)", "Bash(echo:*)", "Bash(which:*)",
+                  "Bash(git log:*)", "Bash(git show:*)", "Bash(git diff:*)", "Bash(git status:*)", "Bash(git blame:*)"]
+
+
 class ClaudeCliRunner:
     name = "claude"
 
@@ -433,6 +532,7 @@ class ClaudeCliRunner:
         args = [
             self.exe, "-p",
             "--output-format", "stream-json", "--verbose",
+            "--include-partial-messages",  # thinking/text as it is written -> the dashboard shows what the AI is doing
             "--input-format", "stream-json",  # keeps stdin open so a user note can join the running session
             "--permission-mode", call.permission_mode,
             "--strict-mcp-config",
@@ -470,25 +570,45 @@ class ClaudeCliRunner:
         args += ["--tools", ",".join(call.tools) if call.tools else ""]
         # Headless runs cannot answer permission prompts: pre-approve listed MCP servers and tools.
         allowed = [f"mcp__{s}" for s in call.mcp_servers] + call.allowed_tools
+        if "Bash" in (call.tools or []):
+            allowed += [r for r in READ_ONLY_BASH if r not in allowed]
         if allowed:
             args += ["--allowedTools", ",".join(allowed)]
         if mcp_config_path:
             args += ["--mcp-config", str(mcp_config_path)]
         return args
 
+    @staticmethod
+    def session_file(cwd: Path, session_id: str) -> Path:
+        """Where Claude Code keeps a conversation: ~/.claude/projects/<cwd with non-alphanumerics as '-'>/<id>.jsonl"""
+        slug = re.sub(r"[^A-Za-z0-9]", "-", str(Path(cwd).resolve()))
+        return Path.home() / ".claude" / "projects" / slug / f"{session_id}.jsonl"
+
     def run(self, call: StageCall) -> tuple[StageResult, Usage]:
         """Run on call.model; if that fails (unavailable, limit, error), retry once on fallback_model."""
         if call.resume_session:
+            if not self.session_file(call.cwd, call.resume_session).exists():
+                # killed before the CLI saved anything (e.g. a cancel in the first seconds): nothing to continue
+                call.emit("resume_fallback", {"reason": "이전 대화가 저장되지 않았음 (시작 직후 중단)"})
+                call = replace(call, resume_session=None, prompt=call.fresh_prompt or call.prompt)
+            else:
+                try:
+                    return self._run_once(call, call.model)
+                except RunnerError as e:
+                    if e.kind in ("cancelled", "quota", "budget"):
+                        raise
+                    # the saved conversation is gone or unusable: start the stage fresh
+                    call.emit("resume_fallback", {"reason": str(e)[:200]})
+                    call = replace(call, resume_session=None, prompt=call.fresh_prompt or call.prompt)
+        try:
             try:
                 return self._run_once(call, call.model)
             except RunnerError as e:
-                if e.kind in ("cancelled", "quota", "budget"):
+                if e.kind != "stalled":
                     raise
-                # the saved conversation is gone or unusable: start the stage fresh
-                call.emit("resume_fallback", {"reason": str(e)[:200]})
-                call = replace(call, resume_session=None, prompt=call.fresh_prompt or call.prompt)
-        try:
-            return self._run_once(call, call.model)
+                # no output for stall_s: usually the CLI stuck before/at the API. One fresh start, same model.
+                call.emit("stall_restart", {"reason": str(e)[:300]})
+                return self._run_once(call, call.model)
         except RunnerError as e:
             # A timeout would just burn the same time again (on a half-edited workspace); a cancel is final.
             # A usage limit goes to the engine, which benches just that model and remembers it for later stages.
@@ -515,21 +635,20 @@ class ClaudeCliRunner:
             pending: dict[str, tuple[str, str]] = {}  # tool_use_id -> (tool name, target), for result sizes
             watch = TokenWatch()
 
+            detail = LiveDetail()
+            last_pulse = [0.0]
+
             def on_line(line: str) -> None:
                 event = parse_json_line(line)
                 if event is None:
                     return
                 etype = event.get("type")
-                if etype == "assistant":
-                    blocks = [b.get("type") for b in (event.get("message") or {}).get("content", []) or []]
-                    doing = "thinking" if "thinking" in blocks else "tool" if "tool_use" in blocks else "writing"
-                elif etype == "user":
-                    doing = "tool_result"
-                elif etype == "system" and event.get("subtype") == "thinking_tokens":
-                    doing = "thinking"
-                else:
-                    doing = etype or "?"
-                call.emit("pulse", {"doing": doing, "turn": len(watch.turns)})
+                pulse = detail.on_event(event)
+                if etype != "stream_event" or time.monotonic() - last_pulse[0] > 0.5:  # chunks arrive many per second
+                    last_pulse[0] = time.monotonic()
+                    call.emit("pulse", {**pulse, "turn": len(watch.turns)})
+                if etype == "stream_event":
+                    return  # partial chunks: liveness only; the full message follows as its own line
                 if etype == "result":
                     box["result"] = event
                 elif event.get("type") == "rate_limit_event":
@@ -547,7 +666,9 @@ class ClaudeCliRunner:
 
             try:
                 code, stderr = run_process(self.build_args(call, cfg_path), call, user_message_line(call.prompt),
-                                           on_line, live=call.live or LiveChannel())
+                                           on_line, live=call.live or LiveChannel(),
+                                           on_stderr=lambda ln: call.emit("pulse", {**detail.on_stderr(ln),
+                                                                                   "turn": len(watch.turns)}))
             finally:
                 if watch.turns or watch.results:
                     call.emit("token_report", watch.report())
