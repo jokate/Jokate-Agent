@@ -214,7 +214,7 @@ def main() -> None:
     p_run.add_argument("--repo", help="registered repository name (relay repos)")
     p_run.add_argument("--mcp", action="append", default=[],
                        help="extra MCP server for this run by name, e.g. --mcp unreal (repeatable)")
-    p_run.add_argument("--approval", choices=["ai", "always", "never"], default="ai",
+    p_run.add_argument("--approval", choices=["auto", "ai", "always", "never"], default="auto",
                        help="design gates: ai = pause only when the AI asks for a decision (default), always, never")
     p_run.add_argument("--attach", action="append", default=[], metavar="FILE",
                        help="attach a file (screenshot, log, spec...) the AI may read; repeatable")

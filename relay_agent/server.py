@@ -97,7 +97,7 @@ class CreateRun(BaseModel):
     stage_models: dict[str, dict] | None = None  # {"plan": {"provider": "claude", "model": "opus"}}
     repo: str | None = None  # registered repository name (path, verify commands, notes come from it)
     attachments: list[str] = []  # ids returned by POST /attachments
-    approval: str | None = None  # design gates: ai (pause only if the AI asks) | always | never
+    approval: str | None = None  # auto (default: no pauses, AI told all is pre-approved) | ai | always | never
     mcp: list[str] | None = None  # extra MCP servers for this run (GET /mcp lists them); None = the repo's default
     start: bool = True
 

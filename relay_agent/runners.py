@@ -642,13 +642,21 @@ class ClaudeCliRunner:
         except RunnerError as e:
             # A timeout would just burn the same time again (on a half-edited workspace); a cancel is final.
             # A usage limit goes to the engine, which benches just that model and remembers it for later stages.
-            if e.kind in ("cancelled", "timeout", "quota") or not call.fallback_model or call.fallback_model == call.model:
+            # budget: the engine pauses for approval — another model would just spend more on top
+            if e.kind in ("cancelled", "timeout", "quota", "budget") or not call.fallback_model or call.fallback_model == call.model:
                 raise
             call.emit("model_fallback", {"from": call.model, "to": call.fallback_model, "reason": str(e)[:300]})
             return self._run_once(call, call.fallback_model)
 
     def _run_once(self, call: StageCall, model: str | None) -> tuple[StageResult, Usage]:
         call = replace(call, model=model)
+        if call.session_id and not call.resume_session and self.session_file(call.cwd, call.session_id).exists():
+            # a second attempt of the same stage (fallback model, stall restart): the CLI refuses a used id
+            # ("Session ID … is already in use"). New conversation, and the engine learns the id for a later resume.
+            import uuid
+
+            call = replace(call, session_id=str(uuid.uuid4()))
+            call.emit("session_changed", {"session": call.session_id})
         with tempfile.TemporaryDirectory(prefix="katae-") as tmp:  # never inside the workspace (would enter the patch)
             cfg_path = None
             registry = {**self.mcp_registry, **call.mcp_overrides}
@@ -761,6 +769,15 @@ class ClaudeCliRunner:
         """The structured result is missing or malformed (small models sometimes answer in prose, or give up
         after the schema retries). Recover instead of failing the relay; limits and budget are real errors."""
         if data.get("subtype") in ("error_max_budget_usd",) or data.get("terminal_reason") == "budget_exhausted":
+            # the budget ran out — but if the final answer was already written, the work is done: keep it
+            for text in reversed(texts[-2:]):
+                if text.lstrip().startswith("{") and '"summary"' in text:
+                    try:
+                        result = extract_result(text)
+                    except RunnerError:
+                        continue
+                    call.emit("result_repaired", {"reason": "단계 예산에 닿았지만 최종 답은 이미 작성됨 — 그 답을 사용"})
+                    return result
             return None
         if data.get("api_error_status") or looks_like_quota(str(data.get("result") or "")) and data.get("is_error"):
             return None

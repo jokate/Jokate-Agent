@@ -100,3 +100,34 @@ def test_a_cli_that_exits_before_reading_the_prompt_is_explained(tmp_path):
         raise AssertionError("expected an error")
     except RunnerError as e:
         assert e.kind == "error" and "프롬프트를 읽기 전에 끝남" in str(e) and "bad flag" in str(e)
+
+
+def test_second_attempt_gets_a_new_session_id_and_budget_does_not_fall_back(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+    used = ClaudeCliRunner.session_file(tmp_path, "used-id")
+    used.parent.mkdir(parents=True)
+    used.write_text("{}", encoding="utf-8")
+    seen, events = [], []
+
+    def fake_process(args, call, stdin_text, on_line, **kw):
+        seen.append(args[args.index("--session-id") + 1])
+        on_line('{"type":"result","subtype":"success","is_error":false,"result":"{\\"summary\\":\\"ok\\",\\"state\\":\\"s\\",'
+                '\\"open_issues\\":[],\\"next_steps\\":[]}","usage":{}}')
+        return 0, ""
+
+    monkeypatch.setattr("relay_agent.runners.run_process", fake_process)
+    call = StageCall(stage="s", model="fable", effort=None, system="s", prompt="p", cwd=tmp_path, session_id="used-id",
+                     result_mode="text", system_mode="replace", on_event=lambda k, d: events.append((k, d)))
+    ClaudeCliRunner(exe="claude").run(call)
+    assert seen[0] != "used-id" and events[0] == ("session_changed", {"session": seen[0]})
+
+    def budget(self, call, model):
+        raise RunnerError("단계 예산 $1.0 도달", "budget")
+
+    monkeypatch.setattr(ClaudeCliRunner, "_run_once", budget)
+    try:
+        ClaudeCliRunner(exe="claude").run(StageCall(stage="s", model="fable", effort=None, system="s", prompt="p",
+                                                   cwd=tmp_path, fallback_model="opus", on_event=lambda k, d: events.append((k, d))))
+        raise AssertionError("expected budget")
+    except RunnerError as e:
+        assert e.kind == "budget" and not any(k == "model_fallback" for k, _ in events)

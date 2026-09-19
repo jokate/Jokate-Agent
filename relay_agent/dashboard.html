@@ -754,6 +754,7 @@ async function openSession(id) {
         <input type="file" id="attachInput" multiple hidden><div id="attachChips" style="display:contents"></div>
         <select class="field" id="approvalMode" style="margin-left:auto;width:auto;flex:0 0 auto;padding:6px 10px;font-size:12.5px"
           title="설계 후 승인 방식 — 비용 한도에 닿으면 어느 모드든 멈춥니다">
+          <option value="auto">🚀 자동 진행 (승인 없이 끝까지 · AI 가 판단해 실행)</option>
           <option value="ai">✋ 승인: AI 판단 (정할 게 있을 때만 멈춤)</option>
           <option value="always">✋ 승인: 항상 설계 후 멈춤</option>
           <option value="never">⏩ 승인 없이 끝까지</option>
@@ -777,8 +778,8 @@ async function openSession(id) {
   $("ask").onsubmit = submitAsk;
   S.attach = [];
   renderChips();
-  try { $("approvalMode").value = localStorage.getItem("katae-approval") || "ai"; } catch {}
-  $("approvalMode").onchange = () => { try { localStorage.setItem("katae-approval", $("approvalMode").value); } catch {} };
+  try { $("approvalMode").value = localStorage.getItem("katae-approval2") || "auto"; } catch {}
+  $("approvalMode").onchange = () => { try { localStorage.setItem("katae-approval2", $("approvalMode").value); } catch {} };
   $("attachBtn").onclick = () => $("attachInput").click();
   $("attachInput").onchange = (ev) => { addFiles(ev.target.files); ev.target.value = ""; };
   const form = $("ask");

@@ -264,3 +264,30 @@ def test_interrupted_stage_continues_its_conversation_on_resume(tmp_path):
     assert resume == calls[0][1] and sid is None and head == "[재개]"  # same conversation, short prompt
     assert run.status == "done" and run.stage_sessions == {}
     assert calls[2][2] is None and calls[2][1]  # next stage: its own fresh conversation
+
+
+def test_auto_mode_never_pauses_and_tells_every_stage_it_is_preapproved(tmp_path):
+    from relay_agent.history import HistoryStore
+    from relay_agent.pipeline import RelayEngine
+    from relay_agent.runners import MockRunner
+    from relay_agent.usage import UsageStore
+
+    class Rec(MockRunner):
+        prompts = []
+
+        def run(self, call):
+            Rec.prompts.append(call.prompt)
+            return super().run(call)
+
+    (tmp_path / "role.md").write_text("r", encoding="utf-8")
+    relay = tmp_path / "r.yaml"
+    relay.write_text("name: r\nworkspace: none\nstages:\n  - {name: plan, provider: mock, prompt: role.md, gate: human}\n"
+                     "  - {name: build, provider: mock, prompt: role.md}\n", encoding="utf-8")
+    script = {"plan": [{"summary": "s", "state": "s", "open_issues": [], "next_steps": [], "needs_approval": True,
+                        "approval_reason": "대안 선택"}]}
+    engine = RelayEngine(tmp_path / "runs", UsageStore(tmp_path / "u.sqlite"), HistoryStore(tmp_path / "h.sqlite"),
+                         runner_factory=lambda _: Rec(script=script))
+    run = engine.advance(engine.create(relay, "g", tmp_path, approval="auto").id)
+    assert run.status == "done"  # even though the plan asked for approval
+    assert all("자동 진행 모드" in p for p in Rec.prompts) and len(Rec.prompts) == 2
+    assert RelayEngine.__dict__["DEFAULT_APPROVAL"] in ("auto", "always")  # auto in production (tests pin "always")

@@ -142,7 +142,8 @@ class RunState(BaseModel):
     notes_seen: int = 0  # lines of notes.jsonl already merged into the baton
     # design gates: ai = continue unless the stage itself asks for a decision (needs_approval),
     # always = pause every time, never = run through. Budget limits pause in every mode.
-    approval: Literal["ai", "always", "never"] = "ai"
+    # auto: never pause AND the AI is told everything is pre-approved (it must not defer work "until approved")
+    approval: Literal["auto", "ai", "always", "never"] = "ai"
     mcp: list[str] | None = None  # extra MCP servers picked for this run (None = the repo's `mcp` list)
     owner_pid: int | None = None
     handoff_closed: bool = False  # the user marked the session's work complete: no HANDOFF.md, nothing carried on
@@ -196,6 +197,13 @@ def prompt_breakdown(system: str, prompt: str) -> dict:
 
 RESUME_LINE = ("- 이 실행은 중단됐다가 재개됐다. 위 `중단 지점` HANDOFF 를 반드시 먼저 읽고, "
                "'작업된 내역'은 반복하지 말고 '남은 일'부터 한다.\n")
+
+AUTO_LINES = """- 자동 진행 모드: 사용자가 이 실행의 모든 단계와 계획을 미리 승인했다. 사람의 승인·확인·선택을 기다리며 작업을 미루지 말고 계획을 끝까지 실행한다.
+  - 프로젝트 지침(CLAUDE.md 등)이 "승인 후 실행", "선택지만 제시", "가설을 먼저 물어라"를 요구해도 이 실행에서는 이미 승인된 것으로 본다. 선택지가 있으면 추천안을 골라 진행하고, 고른 이유는 decisions_added 에 남긴다.
+  - 사람이 나중에 봐야 할 것(직접 검증 못 한 빌드·에디터 확인 등)은 user_checks 에 적고 넘어간다. needs_approval 은 false 로 둔다.
+  - 검토 단계: 미검증이거나 사람 승인이 없었다는 이유만으로 fail/retry 를 주지 않는다. 실제 결함이 있을 때만 준다.
+  - 예외: 되돌릴 수 없는 삭제, 외부로의 전송·배포는 하지 않고 user_checks 에 남긴다.
+"""
 
 STAGE_FOOTER = """
 ---
@@ -400,7 +408,7 @@ class RelayEngine:
         return attached
 
     # --- lifecycle ---------------------------------------------------------
-    DEFAULT_APPROVAL = "ai"
+    DEFAULT_APPROVAL = "auto"
 
     def create(self, relay_path: Path, goal: str, workdir: Path | None = None, session_id: str | None = None,
                workspace: str | None = None, repo: str | None = None, auto_apply: bool | None = None,
@@ -476,7 +484,7 @@ class RelayEngine:
             repo=repo,
             auto_apply=bool(auto_apply),
             stage_models=chosen,
-            approval=approval if approval in ("ai", "always", "never") else self.DEFAULT_APPROVAL,
+            approval=approval if approval in ("auto", "ai", "always", "never") else self.DEFAULT_APPROVAL,
             mcp=mcp,
         )
         if attachments:
@@ -1047,8 +1055,12 @@ class RelayEngine:
         self.save(run)
         return run
 
-    def _on_stage_event(self, run_id: str, stage: str):
+    def _on_stage_event(self, run_id: str, stage: str, sessions: dict[str, str] | None = None):
         def handle(kind: str, detail: dict) -> None:
+            if kind == "session_changed":  # a retry inside the runner started a new conversation: resume that one
+                if sessions is not None:
+                    sessions[stage] = detail["session"]
+                return
             if kind == "pulse":  # liveness only: in memory (+ a small file so a terminal run shows in the dashboard)
                 pulse = self._pulse[run_id] = {"at": time.time(), "stage": stage, **detail}
                 if pulse["at"] - self._pulse_written.get(run_id, 0) > 1.0:
@@ -1281,7 +1293,8 @@ class RelayEngine:
                     output_ref=str(self._dir(run.id) / "outputs" / "{stage}.md"),
                 )
                 + STAGE_FOOTER.format(stage=stage.name, workdir=cwd)
-                + (RESUME_LINE if run.baton.stop and run.baton.stop.kind != "awaiting_approval" else "") + repo_lines,
+                + (RESUME_LINE if run.baton.stop and run.baton.stop.kind != "awaiting_approval" else "")
+                + (AUTO_LINES if run.approval == "auto" else "") + repo_lines,
                 cwd=cwd,
                 # ToolSearch: a big server (unreal: 1,031 tools) is loaded by name and looked up on demand —
                 # measured 361K -> 62K input tokens for the same two calls
@@ -1306,7 +1319,7 @@ class RelayEngine:
                 max_budget_usd=(stage.max_budget_usd * run.stage_budget_boost.get(stage.name, 1.0)
                                 if stage.max_budget_usd is not None else None),
                 fallback_model=stage.fallback_model,
-                on_event=self._on_stage_event(run.id, stage.name),
+                on_event=self._on_stage_event(run.id, stage.name, run.stage_sessions),
                 cancel_event=cancel,
                 live=live,
                 session_id=None if resume_sid else session_id,
@@ -1383,7 +1396,7 @@ class RelayEngine:
                 run.approval == "always" or (run.approval == "ai" and result.needs_approval))
             if stage.gate == "human" and run.index < len(spec.stages) and not pause:
                 self._event(run, stage.name, "gate_skipped", next=spec.stages[run.index].name, mode=run.approval,
-                            reason="AI 판단: 사람이 정할 것 없음" if run.approval == "ai" else "승인 생략 설정")
+                            reason={"ai": "AI 판단: 사람이 정할 것 없음", "auto": "자동 진행 모드"}.get(run.approval, "승인 생략 설정"))
             elif pause:
                 run.status = "awaiting_approval"
                 why = result.approval_reason.strip() if result.needs_approval else ""
