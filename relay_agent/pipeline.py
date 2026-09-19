@@ -633,6 +633,16 @@ class RelayEngine:
             "precise": pulse is not None,  # False: no pulse yet — judged by the activity log only
         }
 
+    def set_approval(self, run_id: str, approval: str) -> None:
+        """Change the mode of a stopped run before it continues (e.g. resume an old run in auto mode)."""
+        if approval not in ("auto", "ai", "always", "never"):
+            raise ValueError(f"approval: {approval}")
+        run = self.load(run_id)
+        if run.approval != approval:
+            self._event(run, "-", "approval_mode", mode=approval, was=run.approval)
+            run.approval = approval
+            self.save(run)
+
     def cancel(self, run_id: str) -> RunState:
         """Stop a running relay (kills the current AI process) or a paused one. Resumable later."""
         event = self._cancel.get(run_id)
@@ -1210,6 +1220,14 @@ class RelayEngine:
                 self._write_stop(run, "failed", "-", run.error)
                 self.save(run)
                 return run
+        if resume and run.status == "failed" and run.index < len(spec.stages):
+            stage = spec.stages[run.index]
+            if stage.on_retry and (run.error or "").startswith(f"[{stage.name}] verdict=fail"):
+                # a reviewer's "fail" is about the work, not the review: redo the work, don't just review again
+                run.index = names.index(stage.on_retry)
+                run.stage_sessions.pop(stage.name, None)
+                self._event(run, stage.name, "sent_back", to=stage.on_retry, attempt=run.retries.get(stage.name, 0),
+                            issues=run.baton.open_issues, reason="재개: 검토 실패 → 작업 단계부터 다시")
         run.status, run.error, run.owner_pid = "running", None, os.getpid()
         self.save(run)
 
@@ -1378,9 +1396,11 @@ class RelayEngine:
                         input_tokens=usage.total_input, output_tokens=usage.output_tokens,
                         cost_usd=usage.cost_usd, duration_ms=usage.duration_ms)
 
-            if result.verdict == "fail":
+            auto_redo = (result.verdict == "fail" and run.approval == "auto" and stage.on_retry
+                         and run.retries.get(stage.name, 0) < stage.max_retries)
+            if result.verdict == "fail" and not auto_redo:
                 return self._fail(run, stage.name, f"verdict=fail: {result.summary}")
-            if result.verdict == "retry" and stage.on_retry:
+            if (result.verdict == "retry" or auto_redo) and stage.on_retry:  # auto mode: a fail is sent back while retries remain
                 count = run.retries.get(stage.name, 0) + 1
                 run.retries[stage.name] = count
                 if count > stage.max_retries:

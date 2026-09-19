@@ -722,10 +722,12 @@ def approve(run_id: str) -> RunState:
 
 
 @app.post("/runs/{run_id}/resume")
-def resume(run_id: str) -> RunState:
+def resume(run_id: str, approval: str | None = None) -> RunState:
     run = _load(run_id)
     if run.status not in ("pending", "failed", "cancelled"):
         raise HTTPException(409, f"run is {run.status}")
+    if approval:
+        _conflict(engine.set_approval, run_id, approval)  # continue in the mode chosen now, not the run's old one
     _advance_bg(run_id, resume=True)
     return run
 

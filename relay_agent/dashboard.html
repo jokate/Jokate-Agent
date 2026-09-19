@@ -497,7 +497,7 @@ const EV = {
   user_notes_applied: ["📌", "추가 지시 반영"], result_repaired: ["🩹", "결과 형식 복구"], prompt_breakdown: ["📤", "보낸 프롬프트"],
   token_report: ["🔥", "토큰 사용 내역"], gate_skipped: ["⏩", "승인 없이 진행"],
   process_stopped: ["🛑", "AI 프로세스 종료"], stage_resumed: ["⏯️", "중단된 대화 이어서"], resume_fallback: ["↻", "처음부터 다시"],
-  mcp_missing: ["🔌", "MCP 서버를 찾지 못함"], stall_restart: ["🧟", "무응답으로 다시 시작"], handoff_written: ["📝", "인계서 작성"], handoff_failed: ["📝", "인계서 AI 작성 실패"], project_context: ["📁", "프로젝트 지침·스킬 적용"],
+  approval_mode: ["🚀", "진행 모드 변경"], mcp_missing: ["🔌", "MCP 서버를 찾지 못함"], stall_restart: ["🧟", "무응답으로 다시 시작"], handoff_written: ["📝", "인계서 작성"], handoff_failed: ["📝", "인계서 AI 작성 실패"], project_context: ["📁", "프로젝트 지침·스킬 적용"],
 };
 const PROVIDER_LABEL = { claude: "Claude", codex: "Codex", opencode: "OpenCode", gemini: "Gemini", anthropic_api: "Claude API", openai: "OpenAI", openrouter: "OpenRouter", ollama: "Ollama", mock: "Mock" };
 const WINDOW_LABEL = { five_hour: "5h", seven_day: "7d", seven_day_opus: "7d·Opus", seven_day_sonnet: "7d·Son" };
@@ -634,6 +634,7 @@ function describe(e) {
       : `⚠️ 일부 프로세스가 아직 살아 있음: PID ${(d.survivors || []).join(", ")} — 작업 관리자에서 확인하세요`;
     case "stage_resumed": return "이전 대화를 그대로 이어서 진행 — 이미 한 탐색·수정을 반복하지 않음";
     case "resume_fallback": return `이전 대화를 이어갈 수 없어 이 단계를 처음부터 새로 시작함 — 실패 아님 (사유: ${esc(d.reason)})`;
+    case "approval_mode": return `${esc(d.was)} → ${esc(d.mode)}`;
     case "mcp_missing": return `${esc(d.server)} — 프로젝트(.mcp.json)·전역 설정·relay.config 어디에도 없음`;
     case "stall_restart": return `${esc(d.reason)} — 같은 모델로 한 번 더 시작`;
     case "handoff_written": return `${esc(d.model)} 가 요청·작업된 내역·남은 일로 정리 — HANDOFF 탭 · 재개하면 이것부터 읽음 (입력 ${fmtN(d.input_tokens)} · $${(d.cost_usd || 0).toFixed(4)})`;
@@ -989,7 +990,7 @@ async function refreshRun(first) {
   // polling stops while a run is settled, so restart it after approve/resume
   const restart = () => { clearInterval(S.timer); S.timer = setInterval(() => refreshRun(false), 1500); refreshRun(false); };
   if ($("approve")) $("approve").onclick = () => api(`/runs/${runId}/approve`, { method: "POST" }).then(() => { toast("👍 승인 — 다음 주자 출발"); restart(); }).catch((e) => toast(e.message, true));
-  if ($("resume")) $("resume").onclick = () => api(`/runs/${runId}/resume`, { method: "POST" }).then(() => { toast("↻ 재개"); restart(); }).catch((e) => toast(e.message, true));
+  if ($("resume")) $("resume").onclick = () => api(`/runs/${runId}/resume?approval=${encodeURIComponent($("approvalMode")?.value || "auto")}`, { method: "POST" }).then(() => { toast("↻ 재개"); restart(); }).catch((e) => toast(e.message, true));
   if ($("cancelRun")) $("cancelRun").onclick = () => confirm("이 릴레이를 취소할까요? 나중에 재개할 수 있습니다.") &&
     api(`/runs/${runId}/cancel`, { method: "POST" }).then(() => { toast("⛔ 취소 요청"); restart(); }).catch((e) => toast(e.message, true));
   if ($("toChanges")) $("toChanges").onclick = () => document.querySelector('[data-tab="changes"]').click();

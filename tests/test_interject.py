@@ -291,3 +291,35 @@ def test_auto_mode_never_pauses_and_tells_every_stage_it_is_preapproved(tmp_path
     assert run.status == "done"  # even though the plan asked for approval
     assert all("자동 진행 모드" in p for p in Rec.prompts) and len(Rec.prompts) == 2
     assert RelayEngine.__dict__["DEFAULT_APPROVAL"] in ("auto", "always")  # auto in production (tests pin "always")
+
+
+def test_auto_mode_sends_a_review_fail_back_and_resume_redoes_the_work(tmp_path):
+    from relay_agent.history import HistoryStore
+    from relay_agent.pipeline import RelayEngine
+    from relay_agent.runners import MockRunner
+    from relay_agent.usage import UsageStore
+
+    (tmp_path / "role.md").write_text("r", encoding="utf-8")
+    relay = tmp_path / "r.yaml"
+    relay.write_text("name: r\nworkspace: none\nstages:\n  - {name: build, provider: mock, prompt: role.md}\n"
+                     "  - {name: review, provider: mock, prompt: role.md, on_retry: build, max_retries: 1}\n", encoding="utf-8")
+    base = {"summary": "s", "state": "s", "open_issues": [], "next_steps": []}
+
+    def engine_with(script):
+        runner = MockRunner(script=script)
+        return RelayEngine(tmp_path / "runs", UsageStore(tmp_path / "u.sqlite"), HistoryStore(tmp_path / "h.sqlite"),
+                           runner_factory=lambda _: runner)
+
+    # auto: the reviewer's fail goes back to build once, then passes
+    engine = engine_with({"review": [{**base, "verdict": "fail"}, {**base, "verdict": "pass"}]})
+    run = engine.advance(engine.create(relay, "g", tmp_path, approval="auto").id)
+    assert run.status == "done" and [h.stage for h in run.history] == ["build", "review", "build", "review"]
+
+    # an old run that failed in review: resumed in auto mode it redoes build, not only the review
+    engine = engine_with({"review": [{**base, "verdict": "fail"}, {**base, "verdict": "pass"}]})
+    old = engine.advance(engine.create(relay, "g", tmp_path, approval="ai").id)
+    assert old.status == "failed" and old.error.startswith("[review] verdict=fail")
+    engine.set_approval(old.id, "auto")
+    done = engine.advance(old.id, resume=True)
+    assert done.status == "done" and [h.stage for h in done.history] == ["build", "review", "build", "review"]
+    assert "자동 진행 모드" not in "" and done.approval == "auto"
