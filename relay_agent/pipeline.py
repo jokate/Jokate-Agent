@@ -135,6 +135,8 @@ class RunState(BaseModel):
     error: str | None = None
     budget_extra_usd: float = 0.0  # raised each time the user approves past the run budget
     stage_budget_boost: dict[str, float] = {}  # stage -> multiplier on max_budget_usd, doubled per approval
+    done_sessions: dict[str, str] = {}  # stage -> conversation of its last finished attempt (a redo continues it)
+    auto_extends: int = 0  # auto mode: how many times a budget was extended without asking
     pending_budget_stage: str | None = None  # stage paused because it hit its own budget
     repo: str | None = None  # registered repository name, if the run targets one
     auto_apply: bool = False
@@ -409,6 +411,11 @@ class RelayEngine:
 
     # --- lifecycle ---------------------------------------------------------
     DEFAULT_APPROVAL = "auto"
+    # Auto mode finishes the work: budgets are extended without asking and a sent-back stage gets more tries,
+    # up to these ceilings (then it pauses for approval like the other modes — it never silently fails on money).
+    AUTO_MAX_EXTENDS = 4        # stage-budget doublings + run-budget extensions, per run
+    AUTO_RUN_COST_FACTOR = 4.0  # x relay max_run_cost_usd
+    AUTO_MIN_RETRIES = 3
 
     def create(self, relay_path: Path, goal: str, workdir: Path | None = None, session_id: str | None = None,
                workspace: str | None = None, repo: str | None = None, auto_apply: bool | None = None,
@@ -1222,7 +1229,10 @@ class RelayEngine:
                 return run
         if resume and run.status == "failed" and run.index < len(spec.stages):
             stage = spec.stages[run.index]
-            if stage.on_retry and (run.error or "").startswith(f"[{stage.name}] verdict=fail"):
+            gave_up = (run.error or "").startswith(f"[{stage.name}] retries exhausted")
+            if gave_up:
+                run.retries[stage.name] = 0  # the user said "go on": a new set of tries
+            if stage.on_retry and (gave_up or (run.error or "").startswith(f"[{stage.name}] verdict=fail")):
                 # a reviewer's "fail" is about the work, not the review: redo the work, don't just review again
                 run.index = names.index(stage.on_retry)
                 run.stage_sessions.pop(stage.name, None)
@@ -1261,6 +1271,12 @@ class RelayEngine:
             if cancel.is_set():  # a cancel that arrived between stages
                 return self._fail(run, stage.name, "사용자가 취소함", status="cancelled")
             limit = spec.max_run_cost_usd
+            if (limit and run.cost_usd >= limit + run.budget_extra_usd and run.approval == "auto"
+                    and run.cost_usd < limit * self.AUTO_RUN_COST_FACTOR):
+                run.budget_extra_usd = run.cost_usd  # as an approval would: one more full budget from here
+                self._event(run, stage.name, "budget_auto_extended", scope="run", spent_usd=round(run.cost_usd, 4),
+                            limit_usd=round(limit + run.budget_extra_usd, 4),
+                            ceiling_usd=round(limit * self.AUTO_RUN_COST_FACTOR, 2))
             if limit and run.cost_usd >= limit + run.budget_extra_usd:
                 run.status = "awaiting_approval"
                 self._event(run, stage.name, "budget_exceeded", spent_usd=round(run.cost_usd, 4),
@@ -1275,15 +1291,22 @@ class RelayEngine:
             if new_notes:
                 self._event(run, stage.name, "user_notes_applied", notes=new_notes)
             live = self._live[run_id] = LiveChannel()
+            redo = any(h.stage == stage.name for h in run.history)
+            interrupted = stage.name in run.stage_sessions  # cancelled / failed / out of budget mid-stage
+            if redo and not interrupted and run.approval == "auto" and run.done_sessions.get(stage.name):
+                # sent back by a reviewer: continue where this stage left off (it knows the code, the asset formats,
+                # what it tried) instead of exploring again on a fresh — or pricier — conversation
+                run.stage_sessions[stage.name] = run.done_sessions[stage.name]
             resume_sid = run.stage_sessions.get(stage.name)
+            continuing = bool(resume_sid) and redo and not interrupted
             session_id = resume_sid or str(uuid.uuid4())
             if not resume_sid:
                 run.stage_sessions[stage.name] = session_id
                 self.save(run)  # known before the AI starts, so a cancel/crash can continue this conversation
 
-            # Cheap first pass; spend more only when this stage is being redone.
-            redo = any(h.stage == stage.name for h in run.history)
-            effort = stage.retry_effort if redo and stage.retry_effort else stage.effort
+            # Cheap first pass; spend more only when this stage is being redone from scratch.
+            escalate = redo and not continuing and run.approval != "auto"  # auto: finish the work, don't switch to a
+            effort = stage.retry_effort if escalate and stage.retry_effort else stage.effort  # model that burns the budget
             choice = run.stage_models.get(stage.name) or {}
             if choice.get("effort"):
                 effort = choice["effort"]  # the user's pick, also on retries
@@ -1293,10 +1316,10 @@ class RelayEngine:
                 model = choice.get("model") if choice.get("model") is not None else (
                     stage.model if primary == stage.primary else None)
             else:
-                model = stage.retry_model if redo and stage.retry_model else stage.model
+                model = stage.retry_model if escalate and stage.retry_model else stage.model
             self._event(run, stage.name, "stage_started", runner=primary, model=model, chosen=bool(choice),
                         effort=effort, reads=stage.reads_outputs, system_mode=stage.system_mode,
-                        escalated=redo and bool(stage.retry_model or stage.retry_effort))
+                        escalated=escalate and bool(stage.retry_model or stage.retry_effort))
             fresh_prompt = None
             tools = self._stage_tools(stage, repo, ctx)
             if resume_sid:
@@ -1348,12 +1371,23 @@ class RelayEngine:
                 fresh_prompt = call.prompt
                 notes = "\n".join(f"- {n}" for n in new_notes)
                 handoff = run.baton.stop.to_markdown() if run.baton.stop else ""
-                call = replace(call, fresh_prompt=fresh_prompt, prompt=(
+                if continuing:
+                    issues = "\n".join(f"- {i}" for i in run.baton.open_issues) or "- (없음)"
+                    steps = "\n".join(f"- {i}" for i in run.baton.next_steps) or "- (없음)"
+                    call = replace(call, fresh_prompt=fresh_prompt, prompt=(
+                        "[재작업] 검토 단계가 이 작업을 되돌려 보냈다. 위 대화에서 알아낸 것(파일 위치, 포맷, 시도해 본 방법)을 "
+                        "그대로 활용해 다시 탐색하지 말고, 아래 지적을 해결하고 남은 작업을 끝까지 마친 뒤 결과 JSON 을 낸다. "
+                        "조사만 하고 끝내지 않는다 — 실제 변경·저장까지 한다.\n"
+                        f"검토 지적:\n{issues}\n남은 일:\n{steps}"
+                        + (AUTO_LINES if run.approval == "auto" else "")
+                        + (f"\n그사이 사용자 추가 지시:\n{notes}" if notes else "")))
+                else:
+                    call = replace(call, fresh_prompt=fresh_prompt, prompt=(
                     "[재개] 이 단계는 중단됐다가 다시 이어서 진행한다. 먼저 아래 HANDOFF(중단 시점 인계서)를 읽고 "
                     "그 기준으로 한다. 위 대화와 HANDOFF 의 '작업된 내역'은 반복하지 말고, 현재 파일 상태를 확인해 "
                     "'남은 일'만 마친 뒤 결과 JSON 을 낸다."
-                    + (f"\n\n# HANDOFF\n{handoff}" if handoff else "")
-                    + (f"\n그사이 사용자 추가 지시:\n{notes}" if notes else "")))
+                        + (f"\n\n# HANDOFF\n{handoff}" if handoff else "")
+                        + (f"\n그사이 사용자 추가 지시:\n{notes}" if notes else "")))
             self._event(run, stage.name, "prompt_breakdown", **prompt_breakdown(call.system, call.prompt))
             try:
                 result, usage = self._run_stage(run, stage, call, primary)
@@ -1365,6 +1399,19 @@ class RelayEngine:
                     spent = getattr(e, "cost_usd", None)
                     if spent:
                         self.usage.record(run.id, stage.name, Usage(stage.primary, call.model or "?", cost_usd=spent))
+                        run.history.append(StageRecord(stage=stage.name, at=_now(), verdict="retry", runner=stage.primary,
+                                                       model=call.model or "?", total_input=0, output_tokens=0,
+                                                       cost_usd=spent))  # money spent counts toward the run budget
+                    run_cap = (spec.max_run_cost_usd or 0) * self.AUTO_RUN_COST_FACTOR
+                    if (run.approval == "auto" and run.auto_extends < self.AUTO_MAX_EXTENDS
+                            and (not run_cap or run.cost_usd < run_cap)):
+                        run.auto_extends += 1
+                        run.stage_budget_boost[stage.name] = run.stage_budget_boost.get(stage.name, 1.0) * 2
+                        self._event(run, stage.name, "budget_auto_extended", scope="stage", spent_usd=spent,
+                                    limit_usd=(stage.max_budget_usd or 0) * run.stage_budget_boost[stage.name],
+                                    extends=run.auto_extends, of=self.AUTO_MAX_EXTENDS)
+                        self.save(run)
+                        continue  # same stage, same conversation (stage_sessions), twice the budget
                     run.status, run.pending_budget_stage = "awaiting_approval", stage.name
                     self._event(run, stage.name, "stage_budget_exceeded", limit_usd=call.max_budget_usd,
                                 spent_usd=spent, reason=str(e))
@@ -1381,7 +1428,9 @@ class RelayEngine:
             except (OSError, ValueError) as e:
                 return self._fail(run, stage.name, str(e))
 
-            run.stage_sessions.pop(stage.name, None)  # finished: a later redo starts fresh
+            finished_sid = run.stage_sessions.pop(stage.name, None)
+            if finished_sid:
+                run.done_sessions[stage.name] = finished_sid  # a later redo continues this conversation
             run.baton.stop = None  # the hand-over was for the stage that picked the work back up
             run.baton.previous_handoff = ""
             self.usage.record(run.id, stage.name, usage)
@@ -1397,14 +1446,15 @@ class RelayEngine:
                         cost_usd=usage.cost_usd, duration_ms=usage.duration_ms)
 
             auto_redo = (result.verdict == "fail" and run.approval == "auto" and stage.on_retry
-                         and run.retries.get(stage.name, 0) < stage.max_retries)
+                         and run.retries.get(stage.name, 0) < max(stage.max_retries, self.AUTO_MIN_RETRIES))
             if result.verdict == "fail" and not auto_redo:
                 return self._fail(run, stage.name, f"verdict=fail: {result.summary}")
             if (result.verdict == "retry" or auto_redo) and stage.on_retry:  # auto mode: a fail is sent back while retries remain
                 count = run.retries.get(stage.name, 0) + 1
                 run.retries[stage.name] = count
-                if count > stage.max_retries:
-                    return self._fail(run, stage.name, f"retries exhausted ({stage.max_retries})")
+                allowed = max(stage.max_retries, self.AUTO_MIN_RETRIES) if run.approval == "auto" else stage.max_retries
+                if count > allowed:
+                    return self._fail(run, stage.name, f"retries exhausted ({allowed})")
                 run.index = names.index(stage.on_retry)
                 self._event(run, stage.name, "sent_back", to=stage.on_retry, attempt=count,
                             issues=result.open_issues)

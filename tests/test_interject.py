@@ -323,3 +323,43 @@ def test_auto_mode_sends_a_review_fail_back_and_resume_redoes_the_work(tmp_path)
     done = engine.advance(old.id, resume=True)
     assert done.status == "done" and [h.stage for h in done.history] == ["build", "review", "build", "review"]
     assert "자동 진행 모드" not in "" and done.approval == "auto"
+
+
+def test_auto_mode_keeps_going_same_conversation_more_tries_and_extended_budget(tmp_path):
+    from relay_agent.history import HistoryStore
+    from relay_agent.pipeline import RelayEngine
+    from relay_agent.runners import MockRunner, RunnerError
+    from relay_agent.usage import UsageStore
+
+    (tmp_path / "role.md").write_text("r", encoding="utf-8")
+    relay = tmp_path / "r.yaml"
+    relay.write_text("name: r\nworkspace: none\nmax_run_cost_usd: 1.0\nstages:\n"
+                     "  - {name: build, provider: mock, model: sonnet, retry_model: fable, prompt: role.md, max_budget_usd: 1.0}\n"
+                     "  - {name: review, provider: mock, prompt: role.md, on_retry: build, max_retries: 1}\n", encoding="utf-8")
+    base = {"summary": "s", "state": "s", "open_issues": ["세팅 포맷 미확인"], "next_steps": ["저장까지"]}
+
+    class Rec(MockRunner):
+        seen = []
+        budget_hits = 1
+
+        def run(self, call):
+            Rec.seen.append((call.stage, call.model, call.resume_session, call.max_budget_usd, call.prompt[:5].rstrip("]")))
+            if call.stage == "build" and Rec.budget_hits:
+                Rec.budget_hits -= 1
+                err = RunnerError("단계 예산 $1.0 도달", "budget")
+                err.cost_usd = 1.0
+                raise err
+            return super().run(call)
+
+    runner = Rec(script={"review": [{**base, "verdict": "retry"}, {**base, "verdict": "retry"}, {**base, "verdict": "pass"}]})
+    engine = RelayEngine(tmp_path / "runs", UsageStore(tmp_path / "u.sqlite"), HistoryStore(tmp_path / "h.sqlite"),
+                         runner_factory=lambda _: runner)
+    run = engine.advance(engine.create(relay, "g", tmp_path, approval="auto").id)
+    assert run.status == "done"  # budget hit once, sent back twice (max_retries is 1): still finished
+    builds = [s for s in Rec.seen if s[0] == "build"]
+    assert builds[0][3] == 1.0 and builds[1][3] == 2.0 and builds[1][2] == builds[0][2] is None or builds[1][2]  # doubled
+    assert all(b[1] == "sonnet" for b in builds)  # no switch to the pricier retry model
+    first_sid = run.done_sessions["build"]
+    assert builds[2][2] == first_sid and builds[2][4] == "[재작업"  # the redo continued the same conversation
+    kinds = [e["kind"] for e in engine.history.events(run.id)]
+    assert kinds.count("budget_auto_extended") >= 1 and kinds.count("sent_back") == 2
