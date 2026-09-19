@@ -143,6 +143,7 @@ class RunState(BaseModel):
     # design gates: ai = continue unless the stage itself asks for a decision (needs_approval),
     # always = pause every time, never = run through. Budget limits pause in every mode.
     approval: Literal["ai", "always", "never"] = "ai"
+    mcp: list[str] | None = None  # extra MCP servers picked for this run (None = the repo's `mcp` list)
     owner_pid: int | None = None
     handoff_closed: bool = False  # the user marked the session's work complete: no HANDOFF.md, nothing carried on
     # stage -> Claude Code conversation id of an unfinished attempt (continued on resume, dropped when it finishes)
@@ -365,9 +366,38 @@ class RelayEngine:
         if repo is not None and not repo.project_context:
             return None
         try:
-            return discover(Path(run.workdir))
+            ctx = discover(Path(run.workdir), mcp_from=repo.mcp_from if repo else None)
         except OSError:
             return None
+        wanted = run.mcp if run.mcp is not None else (repo.mcp if repo else [])
+        return None if ctx is None or (ctx.empty and not wanted) else ctx  # a plain folder stays isolated
+
+    def mcp_choices(self, workdir: Path, repo: RepoSpec | None) -> list[dict]:
+        """MCP servers a run in this folder can use: the project's own (always on) and optional ones."""
+        if repo is not None and not repo.project_context:
+            return []
+        ctx = discover(Path(workdir), mcp_from=repo.mcp_from if repo else None)
+        if ctx is None:
+            return []
+        default = set(repo.mcp if repo else [])
+        return ([{"name": n, "scope": "프로젝트", "always": True, "default": True} for n in ctx.mcp]
+                + [{"name": n, "scope": v["scope"], "always": False, "default": n in default}
+                   for n, v in ctx.optional_mcp.items()])
+
+    def _attached_mcp(self, run: RunState, ctx: ProjectContext | None, repo: RepoSpec | None) -> dict[str, dict]:
+        """name -> config of every project/optional MCP server this run uses (stage `mcp:` entries come on top)."""
+        if ctx is None:
+            return {}
+        attached = dict(ctx.mcp)
+        for name in (run.mcp if run.mcp is not None else (repo.mcp if repo else [])):
+            if name in attached or name in self.mcp_registry:
+                if name in self.mcp_registry and name not in attached:
+                    attached[name] = self.mcp_registry[name]
+            elif name in ctx.optional_mcp:
+                attached[name] = ctx.optional_mcp[name]["config"]
+            else:
+                self._event(run, "-", "mcp_missing", server=name)
+        return attached
 
     # --- lifecycle ---------------------------------------------------------
     DEFAULT_APPROVAL = "ai"
@@ -375,7 +405,7 @@ class RelayEngine:
     def create(self, relay_path: Path, goal: str, workdir: Path | None = None, session_id: str | None = None,
                workspace: str | None = None, repo: str | None = None, auto_apply: bool | None = None,
                stage_models: dict[str, dict] | None = None, attachments: list[Path] | None = None,
-               approval: str | None = None) -> RunState:
+               approval: str | None = None, mcp: list[str] | None = None) -> RunState:
         """Start a run as a new turn. Without session_id a new session is opened.
         With a registered repo, its path, default workspace mode, verify commands and notes apply."""
         spec, _ = RelaySpec.load(relay_path)
@@ -447,6 +477,7 @@ class RelayEngine:
             auto_apply=bool(auto_apply),
             stage_models=chosen,
             approval=approval if approval in ("ai", "always", "never") else self.DEFAULT_APPROVAL,
+            mcp=mcp,
         )
         if attachments:
             # copied into the run folder: the AI may read them (--add-dir), the originals are never touched
@@ -1183,11 +1214,12 @@ class RelayEngine:
         repo_lines = "\n".join(repo.prompt_lines(repo.git_info().get("branch"))) + "\n" if repo else ""
         repo_tools = (repo.verify_tools() + repo.allowed_tools) if repo else []
         ctx = self.project_context(run)
+        attached = self._attached_mcp(run, ctx, repo)
         if ctx is not None:
             self._event(run, "-", "project_context", root=ctx.root.as_posix(),
                         instructions=[p.relative_to(ctx.root).as_posix() for p in ctx.instructions],
-                        skills=ctx.skills, mcp=list(ctx.mcp), commands=ctx.commands)
-            repo_lines += "\n".join(ctx.prompt_lines(cwd)) + "\n"
+                        skills=ctx.skills, mcp=list(attached), commands=ctx.commands)
+            repo_lines += "\n".join(ctx.prompt_lines(cwd, list(attached))) + "\n"
         mcp_overrides = {}
         if repo and repo.docs_root and "docs_read" in self.mcp_registry:
             entry = dict(self.mcp_registry["docs_read"])
@@ -1251,15 +1283,17 @@ class RelayEngine:
                 + STAGE_FOOTER.format(stage=stage.name, workdir=cwd)
                 + (RESUME_LINE if run.baton.stop and run.baton.stop.kind != "awaiting_approval" else "") + repo_lines,
                 cwd=cwd,
-                tools=tools,
-                mcp_servers=stage.mcp + ([m for m in ctx.mcp if m not in stage.mcp] if ctx and tools else []),
+                # ToolSearch: a big server (unreal: 1,031 tools) is loaded by name and looked up on demand —
+                # measured 361K -> 62K input tokens for the same two calls
+                tools=(tools + [t for t in ("ToolSearch",) if t not in tools]) if tools and attached else tools,
+                mcp_servers=stage.mcp + ([m for m in attached if m not in stage.mcp] if tools else []),
                 result_mode=stage.result_mode,
                 add_dirs=([str(self._dir(run.id) / "attachments")] if run.baton.attachments else [])
                 + ([ctx.root.as_posix()] if ctx and Path(cwd).resolve() != ctx.root else []),
                 allowed_tools=stage.allowed_tools + (
                     self.extra_allowed_tools + repo_tools + (ctx.allowed_bash() if ctx else [])
                     if "Bash" in (tools or []) else []) + (ctx.allowed_other() if ctx and tools else []),
-                mcp_overrides={**(ctx.mcp if ctx else {}), **self._stage_mcp(mcp_overrides, run, stage.name, cwd)},
+                mcp_overrides={**attached, **self._stage_mcp(mcp_overrides, run, stage.name, cwd)},
                 project=ctx is not None,
                 # a copy outside the project doesn't see the project's CLAUDE.md by walking up: load it via --add-dir
                 env={"CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD": "1"} if ctx and not ctx.contains(cwd) else {},

@@ -44,6 +44,10 @@ class RepoSpec(BaseModel):
     notes: str = ""
     # apply the folder's own CLAUDE.md (up the tree), .claude/skills, MCP servers and the commands they name
     project_context: bool = True
+    # extra MCP servers for runs in this repo, by name: looked up in relay.config mcp_registry, the project, the
+    # folders in mcp_from, then the user's global servers (e.g. ["unreal"]). The project's own servers are always on.
+    mcp: list[str] = Field(default_factory=list)
+    mcp_from: list[str] = Field(default_factory=list)  # other folders whose .mcp.json servers can be named in `mcp`
 
     @property
     def resolved(self) -> Path | None:

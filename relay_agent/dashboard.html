@@ -497,7 +497,7 @@ const EV = {
   user_notes_applied: ["📌", "추가 지시 반영"], result_repaired: ["🩹", "결과 형식 복구"], prompt_breakdown: ["📤", "보낸 프롬프트"],
   token_report: ["🔥", "토큰 사용 내역"], gate_skipped: ["⏩", "승인 없이 진행"],
   process_stopped: ["🛑", "AI 프로세스 종료"], stage_resumed: ["⏯️", "중단된 대화 이어서"], resume_fallback: ["↻", "처음부터 다시"],
-  stall_restart: ["🧟", "무응답으로 다시 시작"], handoff_written: ["📝", "인계서 작성"], handoff_failed: ["📝", "인계서 AI 작성 실패"], project_context: ["📁", "프로젝트 지침·스킬 적용"],
+  mcp_missing: ["🔌", "MCP 서버를 찾지 못함"], stall_restart: ["🧟", "무응답으로 다시 시작"], handoff_written: ["📝", "인계서 작성"], handoff_failed: ["📝", "인계서 AI 작성 실패"], project_context: ["📁", "프로젝트 지침·스킬 적용"],
 };
 const PROVIDER_LABEL = { claude: "Claude", codex: "Codex", opencode: "OpenCode", gemini: "Gemini", anthropic_api: "Claude API", openai: "OpenAI", openrouter: "OpenRouter", ollama: "Ollama", mock: "Mock" };
 const WINDOW_LABEL = { five_hour: "5h", seven_day: "7d", seven_day_opus: "7d·Opus", seven_day_sonnet: "7d·Son" };
@@ -634,6 +634,7 @@ function describe(e) {
       : `⚠️ 일부 프로세스가 아직 살아 있음: PID ${(d.survivors || []).join(", ")} — 작업 관리자에서 확인하세요`;
     case "stage_resumed": return "이전 대화를 그대로 이어서 진행 — 이미 한 탐색·수정을 반복하지 않음";
     case "resume_fallback": return `이전 대화를 이어갈 수 없어 이 단계를 처음부터 새로 시작함 — 실패 아님 (사유: ${esc(d.reason)})`;
+    case "mcp_missing": return `${esc(d.server)} — 프로젝트(.mcp.json)·전역 설정·relay.config 어디에도 없음`;
     case "stall_restart": return `${esc(d.reason)} — 같은 모델로 한 번 더 시작`;
     case "handoff_written": return `${esc(d.model)} 가 요청·작업된 내역·남은 일로 정리 — HANDOFF 탭 · 재개하면 이것부터 읽음 (입력 ${fmtN(d.input_tokens)} · $${(d.cost_usd || 0).toFixed(4)})`;
     case "handoff_failed": return `기본 인계서로 대신함 (${esc(d.reason)})`;
@@ -770,6 +771,7 @@ async function openSession(id) {
         <button class="btn btn-primary">⚡ 릴레이 출발</button>
       </div>
       <div class="hint" id="relayHint"></div>
+      <div class="attach-row" id="mcpRow" hidden></div>
       <div class="stage-models" id="stageModels"></div>
     </form>`;
   $("ask").onsubmit = submitAsk;
@@ -843,6 +845,22 @@ async function openSession(id) {
     });
   };
   $("relaySelect").onchange = () => { hint(); renderStageModels(); }; hint(); renderStageModels();
+  // MCP servers for this folder: the project's own are always on, global ones (e.g. unreal) are a choice
+  api(`/mcp?session_id=${id}`).then((list) => {
+    if (S.session !== id || !list.length) return;
+    let saved = {}; try { saved = JSON.parse(localStorage.getItem("katae-mcp") || "{}")[s.workdir] || {}; } catch {}
+    $("mcpRow").hidden = false;
+    $("mcpRow").innerHTML = `<span class="wd" title="연결하면 AI 가 그 MCP 의 도구를 쓸 수 있습니다 (도구 목록은 필요할 때만 불러옵니다)">🔌 MCP</span>` +
+      list.map((m) => `<label class="wd" style="display:inline-flex;gap:4px;align-items:center" title="${esc(m.scope)}${m.always ? " — 항상 연결" : ""}">
+        <input type="checkbox" data-mcp="${esc(m.name)}" ${m.always ? "checked disabled" : (saved[m.name] ?? m.default) ? "checked" : ""}> ${esc(m.name)}</label>`).join("");
+    $("mcpRow").querySelectorAll("input[data-mcp]:not([disabled])").forEach((box) => box.onchange = () => {
+      try {
+        const all = JSON.parse(localStorage.getItem("katae-mcp") || "{}");
+        all[s.workdir] = { ...(all[s.workdir] || {}), [box.dataset.mcp]: box.checked };
+        localStorage.setItem("katae-mcp", JSON.stringify(all));
+      } catch {}
+    });
+  }).catch(() => {});
   $("turnsLabel").firstChild.textContent = "질문 이력 ";
   renderTurns(s.turns.slice().reverse());
   loadSessions(); loadStats();
@@ -895,7 +913,9 @@ async function submitAsk(ev) {
     if ((S.attach || []).some((a) => !a.id)) { toast("첨부 업로드가 끝나면 다시 눌러 주세요", true); return; }
     const attachments = (S.attach || []).map((a) => a.id);
     const approval = $("approvalMode").value;
-    const run = await api("/runs", { method: "POST", body: JSON.stringify({ ...f, session_id: S.session, stage_models, attachments, approval }) });
+    const boxes = [...ev.target.querySelectorAll("input[data-mcp]:not([disabled])")];
+    const mcp = boxes.length ? boxes.filter((b) => b.checked).map((b) => b.dataset.mcp) : null;
+    const run = await api("/runs", { method: "POST", body: JSON.stringify({ ...f, session_id: S.session, stage_models, attachments, approval, mcp }) });
     const picked = Object.entries(stage_models).map(([k, v]) => `${k}: ${v.model || v.provider || "기본"}${v.effort ? "@" + v.effort : ""}`).join(", ");
     toast(picked ? `▶ 시작 — 모델 지정 ${picked}` : "▶ 시작 — 릴레이 기본 모델");
     S.attach = [];

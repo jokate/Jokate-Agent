@@ -212,6 +212,8 @@ def main() -> None:
     p_run.add_argument("--workdir")
     p_run.add_argument("--workspace", choices=["none", "copy", "inplace"])
     p_run.add_argument("--repo", help="registered repository name (relay repos)")
+    p_run.add_argument("--mcp", action="append", default=[],
+                       help="extra MCP server for this run by name, e.g. --mcp unreal (repeatable)")
     p_run.add_argument("--approval", choices=["ai", "always", "never"], default="ai",
                        help="design gates: ai = pause only when the AI asks for a decision (default), always, never")
     p_run.add_argument("--attach", action="append", default=[], metavar="FILE",
@@ -326,7 +328,8 @@ def main() -> None:
             stage_models[stage_name] = {"provider": provider or None, "model": model or None, "effort": effort or None}
         run = engine.create(cfg.relays_dir / f"{args.relay}.yaml", args.goal, workdir, session_id=args.session,
                             workspace=args.workspace, repo=repo, stage_models=stage_models,
-                            attachments=[Path(a) for a in args.attach], approval=args.approval)
+                            attachments=[Path(a) for a in args.attach], approval=args.approval,
+                            mcp=args.mcp or None)
         print(f"session {run.session_id} / run {run.id}")
         print_run(engine, engine.advance(run.id))
     elif args.cmd == "providers":

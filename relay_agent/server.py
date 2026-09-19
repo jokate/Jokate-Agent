@@ -98,6 +98,7 @@ class CreateRun(BaseModel):
     repo: str | None = None  # registered repository name (path, verify commands, notes come from it)
     attachments: list[str] = []  # ids returned by POST /attachments
     approval: str | None = None  # design gates: ai (pause only if the AI asks) | always | never
+    mcp: list[str] | None = None  # extra MCP servers for this run (GET /mcp lists them); None = the repo's default
     start: bool = True
 
 
@@ -507,7 +508,7 @@ def create_run(body: CreateRun, request: Request) -> RunState:
         _check_path(request, workdir)
         repo = repo or (m.name if (m := engine.repos.match(workdir)) else None)
     run = _conflict(engine.create, relay_path, body.goal, workdir, body.session_id, body.workspace or None, repo,
-                    body.auto_apply, body.stage_models, _attachment_paths(body.attachments), body.approval)
+                    body.auto_apply, body.stage_models, _attachment_paths(body.attachments), body.approval, body.mcp)
     if body.start:
         _advance_bg(run.id)
     return run
@@ -516,6 +517,19 @@ def create_run(body: CreateRun, request: Request) -> RunState:
 @app.get("/runs/{run_id}")
 def get_run(run_id: str) -> RunState:
     return _load(run_id)
+
+
+@app.get("/mcp")
+def mcp_choices(session_id: str) -> list[dict]:
+    """MCP servers a run in this session's folder can use (project ones are always on)."""
+    session = engine.history.get_session(session_id)
+    if session is None:
+        raise HTTPException(404, f"session {session_id} not found")
+    repo = engine.repos.repos.get(session.get("repo") or "")
+    try:
+        return engine.mcp_choices(Path(session["workdir"]), repo)
+    except OSError:
+        return []
 
 
 @app.get("/runs/{run_id}/track")

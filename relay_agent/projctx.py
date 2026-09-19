@@ -25,7 +25,10 @@ class ProjectContext:
     root: Path
     instructions: list[Path] = field(default_factory=list)
     skills: list[str] = field(default_factory=list)
-    mcp: dict[str, dict] = field(default_factory=dict)
+    mcp: dict[str, dict] = field(default_factory=dict)  # the project's own servers (.mcp.json / project entry): always on
+    # servers that exist but are attached only when asked for (repo `mcp:` or the run's pick): the user's global
+    # ones (~/.claude.json, e.g. unreal) and those of other folders (repo `mcp_from:`). name -> {"scope", "config"}
+    optional_mcp: dict[str, dict] = field(default_factory=dict)
     commands: list[str] = field(default_factory=list)
     allow: list[str] = field(default_factory=list)  # permissions.allow of the project's own settings
 
@@ -41,18 +44,31 @@ class ProjectContext:
     def allowed_other(self) -> list[str]:
         return [a for a in self.allow if not a.startswith("Bash")] + (["Skill"] if self.skills else [])
 
+    @property
+    def empty(self) -> bool:
+        """Nothing of the folder's own: only optional (global) MCP servers were found."""
+        return not (self.instructions or self.skills or self.mcp or self.commands or self.allow)
+
     def contains(self, path: Path) -> bool:
         path = Path(path).resolve()
         return path == self.root or self.root in path.parents
 
-    def prompt_lines(self, cwd: Path) -> list[str]:
+    def prompt_lines(self, cwd: Path, attached: list[str] | None = None) -> list[str]:
+        attached = list(self.mcp) if attached is None else attached
         parts = []
         if self.instructions:
             parts.append("지침 " + ", ".join(f"`{p.relative_to(self.root).as_posix()}`" for p in self.instructions))
         if self.skills:
             parts.append("스킬 " + ", ".join(self.skills))
-        if self.mcp:
-            parts.append("MCP " + ", ".join(self.mcp))
+        lines_mcp = []
+        if attached:
+            parts.append("MCP " + ", ".join(attached))
+            lines_mcp = [
+                f"- MCP 서버 {', '.join(attached)} 가 연결돼 있다. 그 서버가 다루는 대상(예: unreal → 애셋·블루프린트·에디터 상태)은 "
+                "파일을 grep/glob 하지 말고 MCP 도구로 조회·수정한다. 도구는 필요할 때 ToolSearch 로 찾는다 "
+                f"(예: ToolSearch \"{attached[0]} list assets\", 또는 \"select:mcp__{attached[0]}__<이름>\").",
+                "- MCP 는 작업 디렉터리와 별개로 실제 프로젝트/에디터에 바로 작용한다.",
+            ]
         lines = [f"- 프로젝트 루트: `{self.root.as_posix()}`" + (f" ({' · '.join(parts)} 적용됨 — 지침을 따르고 "
                                                             f"맞는 스킬이 있으면 Skill 로 쓴다)" if parts else "")]
         if Path(cwd).resolve() != self.root and self.commands:
@@ -60,7 +76,7 @@ class ProjectContext:
                          f"`cd {self.root.as_posix()} && <명령>`")
         if not self.contains(cwd):
             lines.append("- 작업 디렉터리는 복사본이다. 루트는 조회·도구 실행용이고, 파일 수정은 작업 디렉터리에서만 한다.")
-        return lines
+        return lines + lines_mcp
 
 
 def _json(path: Path) -> dict:
@@ -78,7 +94,17 @@ def _read(path: Path) -> str:
         return ""
 
 
-def discover(path: Path, home: Path | None = None) -> ProjectContext | None:
+def folder_mcp(folder: Path, home: Path) -> dict[str, dict]:
+    """MCP servers a folder defines: its .mcp.json plus its project entry in ~/.claude.json."""
+    folder = Path(folder).expanduser().resolve()
+    found = dict(_json(folder / ".mcp.json").get("mcpServers") or {})
+    projects = _json(home / ".claude.json").get("projects") or {}
+    for key in (folder.as_posix(), str(folder)):
+        found.update((projects.get(key) or {}).get("mcpServers") or {})
+    return found
+
+
+def discover(path: Path, home: Path | None = None, mcp_from: list[str] | None = None) -> ProjectContext | None:
     """Walk up from `path` like Claude Code does for CLAUDE.md (not stopping at a nested git repo such as
     MNYS/Source, but never into the home folder: ~/.claude is user-level) and take the outermost folder
     with CLAUDE.md, .claude/ or .mcp.json as the project root."""
@@ -90,8 +116,11 @@ def discover(path: Path, home: Path | None = None) -> ProjectContext | None:
             break
         chain.append(d)
     marked = [d for d in chain if any((d / m).exists() for m in MARKERS)]
+    user_mcp = _json(home / ".claude.json").get("mcpServers") or {}
     if not marked:
-        return None
+        if not user_mcp and not mcp_from:
+            return None
+        marked = [path]  # no project files, but global / borrowed MCP servers can still be attached
     root = marked[-1]
     down = [d for d in reversed(chain) if d == root or root in d.parents]  # root .. path
 
@@ -117,8 +146,13 @@ def discover(path: Path, home: Path | None = None) -> ProjectContext | None:
     for name in ("settings.json", "settings.local.json"):
         allow = (_json(root / ".claude" / name).get("permissions") or {}).get("allow") or []
         ctx.allow += [a for a in allow if isinstance(a, str) and a not in ctx.allow]
-    ctx.mcp.update(_json(root / ".mcp.json").get("mcpServers") or {})
-    projects = _json(home / ".claude.json").get("projects") or {}
-    for key in (root.as_posix(), str(root)):
-        ctx.mcp.update((projects.get(key) or {}).get("mcpServers") or {})
+    for d in down:
+        ctx.mcp.update(folder_mcp(d, home))
+    for folder in mcp_from or []:
+        for name, config in folder_mcp(Path(folder), home).items():
+            if name not in ctx.mcp:
+                ctx.optional_mcp[name] = {"scope": f"다른 폴더 {Path(folder).name}", "config": config}
+    for name, config in user_mcp.items():
+        if name not in ctx.mcp and name not in ctx.optional_mcp:
+            ctx.optional_mcp[name] = {"scope": "전역(사용자)", "config": config}
     return ctx

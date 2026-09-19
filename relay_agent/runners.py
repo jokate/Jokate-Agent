@@ -493,6 +493,7 @@ Environment: {os_name}. Working directory: {cwd} (already the current directory;
 as `cd <project root> && <command>` when the prompt names a project root).
 Rules:
 - Locate with Grep/Glob first, then Read only the needed line ranges (offset/limit). Never read whole large files.
+  When an MCP server is connected for something (assets, editor state, docs), query it instead of grepping files.
 - Use tools directly without narration. Do not repeat file contents in your answer.
 - Turn budget: every turn re-reads the whole context (10K+ tokens), so aim for about 4 turns:
   1) explore ONCE: put every search/read you may need in one message (several tool calls in parallel, or one
