@@ -448,7 +448,12 @@ class RelayEngine:
             try:
                 repo_spec = self.repos.get(repo)
             except KeyError as e:
-                raise ValueError(str(e)) from e
+                # the session remembers a repo name that was since renamed or re-registered: follow its folder
+                moved = self.repos.match(Path(session["workdir"])) if session and repo == session.get("repo") else None
+                if moved is None:
+                    raise ValueError(str(e)) from e
+                repo_spec, repo = moved, moved.name
+                self.history.set_session_repo(session_id, repo)
             if workdir is None:
                 if not repo_spec.exists:
                     raise ValueError(f"저장소 {repo} 의 경로가 이 머신에 없습니다: {repo_spec.path or '(미지정)'}")

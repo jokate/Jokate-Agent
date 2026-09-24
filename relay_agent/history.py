@@ -102,6 +102,9 @@ class HistoryStore:
                    (sid, title, workdir, now, now, repo))
         return self.get_session(sid)
 
+    def set_session_repo(self, session_id: str, repo: str | None) -> None:
+        self._exec("UPDATE sessions SET repo = ? WHERE id = ?", (repo, session_id))
+
     def get_session(self, session_id: str) -> dict | None:
         rows = self._rows("SELECT * FROM sessions WHERE id = ?", (session_id,))
         return rows[0] if rows else None

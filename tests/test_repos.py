@@ -77,3 +77,20 @@ def test_remote_client_cannot_target_unregistered_folder(tmp_path, monkeypatch):
     assert client.post("/sessions", json={"title": "x", "workdir": str(tmp_path)}, headers=headers).status_code == 403
     r = client.post("/sessions", json={"title": "x", "repo": "ok"}, headers=headers)
     assert r.status_code == 200 and r.json()["repo"] == "ok"
+
+
+def test_session_follows_its_folder_when_its_repo_was_renamed(tmp_path):
+    import pytest
+
+    repo_dir = tmp_path / "game"
+    repo_dir.mkdir()
+    engine, relay, _ = setup(tmp_path, {"boolpyeon": {"path": str(repo_dir), "workspace": "inplace"}})
+    # a session made while the repo was registered under another name (here: its path)
+    session = engine.history.create_session("작업", str(repo_dir), repo=str(repo_dir))
+
+    run = engine.create(relay, "로드맵대로 진행", session_id=session["id"], repo=session["repo"])
+
+    assert run.repo == "boolpyeon" and Path(run.workdir) == repo_dir.resolve()
+    assert engine.history.get_session(session["id"])["repo"] == "boolpyeon"  # fixed for the next request too
+    with pytest.raises(ValueError, match="등록되지 않은 저장소"):  # a name asked for explicitly is still checked
+        engine.create(relay, "x", session_id=session["id"], repo="nope")
