@@ -28,10 +28,15 @@ uv run relay serve                  # dashboard http://127.0.0.1:8020
 ```
 - Machine-specific settings go in **`relay.config.local.yaml`** (git-ignored): `docs_root`, `extra_allowed_tools`, `auth_token`, and so on.
 - The target machine needs **Claude Code installed and logged in** (`claude` once).
-- To reach it from another device: set a token, then `uv run relay serve --host 0.0.0.0`. Without a token, non-localhost access is refused. The dashboard asks for the token once.
+- To reach it from another device: **`uv run relay remote on`** (once). It writes `serve_host: 0.0.0.0` and a generated `auth_token` to `relay.config.local.yaml`, so `start.bat` and the dashboard's restart keep serving remotely. The dashboard asks for the token once.
   ```bash
-  KATAE_TOKEN=<random string> uv run relay serve --host 0.0.0.0
+  uv run relay remote on        # allow other devices (creates a token if there is none; --new-token replaces it)
+  uv run relay remote status    # addresses to open from the other device + the token
+  uv run relay remote off       # this PC only again (the token is kept)
   ```
+  - Without a token, non-localhost access is refused. One-off: `KATAE_HOST=0.0.0.0 KATAE_TOKEN=<random> uv run relay serve` (env wins over the file).
+  - Restart the running server to apply a change. On the first remote start, allow Python through Windows Firewall (private network).
+  - Outside your LAN (phone on LTE, another site), go through a VPN such as Tailscale; don't expose the port to the internet.
 - Claude Code on another PC → katae MCP: set `KATAE_URL=http://<server>:8020` and `KATAE_TOKEN`. The conversation summary is **extracted on the PC you're working from** and only the summary is sent. The `workdir` must be a path on the server machine.
 
 Terminal:

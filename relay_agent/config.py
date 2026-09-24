@@ -44,6 +44,9 @@ class Config(BaseModel):
     extra_allowed_tools: list[str] = []
     # Required for any request that is not from this machine (env KATAE_TOKEN wins). Empty = localhost only.
     auth_token: str = ""
+    # Address `relay serve` (and so start.bat and the dashboard restart) binds to (env KATAE_HOST wins).
+    # 0.0.0.0 = reachable from other devices; set with `relay remote on|off`, which also creates the token.
+    serve_host: str = "127.0.0.1"
     notify: bool = True  # Windows toast when a run finishes, fails or needs approval
     handoff_model: str = "haiku"  # writes the hand-over when a run stops ("" = no AI, engine-built only)
 
@@ -57,6 +60,7 @@ class Config(BaseModel):
                 data = _merge(data, yaml.safe_load(p.read_text(encoding="utf-8")) or {})
         cfg = cls.model_validate(data)
         cfg.auth_token = os.environ.get("KATAE_TOKEN", cfg.auth_token)
+        cfg.serve_host = os.environ.get("KATAE_HOST", cfg.serve_host)
         for name in ("runs_dir", "usage_db", "history_db", "relays_dir", "docs_root"):
             p = getattr(cfg, name)
             if not p.is_absolute():

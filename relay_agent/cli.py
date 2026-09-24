@@ -10,6 +10,7 @@
     relay cancel <run_id> | patch <run_id> | apply <run_id> | discard <run_id> | rollback <run_id>
     relay providers [--probe]               # AI 별 사용 가능 여부·남은 사용량(Claude 5h/7d %)
     relay import-cc --cwd C:/.../MNYS       # 그 폴더의 최근 Claude Code 대화를 세션으로 가져오기
+    relay remote on | off | status          # 다른 기기에서 접속 허용(토큰 자동 생성) / 이 PC 전용 / 주소·토큰 확인
 """
 
 from __future__ import annotations
@@ -145,6 +146,59 @@ def repo_command(args, cfg) -> str:
     return f"{args.action}: {args.name} -> {local}"
 
 
+LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
+REMOTE_HOST = "0.0.0.0"
+
+
+def lan_urls(port: int) -> list[str]:
+    """Addresses other devices can try: this machine's IPv4s except loopback."""
+    import socket
+
+    try:
+        ips = {a[4][0] for a in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)}
+    except OSError:
+        ips = set()
+    return [f"http://{ip}:{port}" for ip in sorted(ips) if not ip.startswith("127.")]
+
+
+def remote_command(action: str, cfg, local: Path | None = None, new_token: bool = False) -> list[str]:
+    """Turn access from other devices on or off in relay.config.local.yaml; `on` makes a token if there is none.
+    The mode sticks: start.bat and the dashboard restart both start `relay serve`, which reads serve_host."""
+    import os
+    import secrets
+    from urllib.parse import urlparse
+
+    import yaml
+
+    from .config import ROOT
+
+    local = local or ROOT / "relay.config.local.yaml"
+    data = (yaml.safe_load(local.read_text(encoding="utf-8")) if local.exists() else None) or {}
+    out: list[str] = []
+    if action in ("on", "off"):
+        data["serve_host"] = REMOTE_HOST if action == "on" else "127.0.0.1"
+        if action == "on" and (new_token or not (data.get("auth_token") or os.environ.get("KATAE_TOKEN"))):
+            data["auth_token"] = secrets.token_urlsafe(24)
+            out.append("새 토큰을 만들었습니다" + (" (이전 토큰은 더 이상 통하지 않습니다)" if new_token else ""))
+        local.write_text("# This machine only (git-ignored).\n" + yaml.safe_dump(data, allow_unicode=True, sort_keys=False),
+                         encoding="utf-8")
+    host = os.environ.get("KATAE_HOST") or data.get("serve_host") or cfg.serve_host
+    token = os.environ.get("KATAE_TOKEN") or data.get("auth_token") or ""
+    port = urlparse(cfg.server_url).port or 8020
+    if host in LOOPBACK_HOSTS:
+        out.append(f"원격 접속: 꺼짐 (이 PC 에서만 http://127.0.0.1:{port})")
+    else:
+        out.append(f"원격 접속: 켜짐 (serve_host {host})")
+        out += [f"  접속 주소: {u}" for u in lan_urls(port)] or ["  접속 주소: 이 PC 의 IP 를 확인하세요 (ipconfig)"]
+        out.append(f"  토큰: {token or '(없음 — relay remote on 으로 만드세요)'}   ← 대시보드가 처음 한 번 묻습니다")
+        out.append("  다른 PC 의 katae MCP: KATAE_URL=<위 접속 주소>  KATAE_TOKEN=<토큰>")
+        out.append("  첫 실행 때 Windows 방화벽 창이 뜨면 '개인 네트워크' 허용을 누르세요.")
+        out.append("  같은 공유기 밖(LTE 등)에서는 Tailscale 같은 VPN 을 거쳐 접속하세요 (포트를 인터넷에 직접 열지 마세요).")
+    if action in ("on", "off"):
+        out.append("실행 중인 서버에는 재시작해야 적용됩니다: 대시보드의 '서버 재시작' 또는 start.bat 을 다시 실행")
+    return out
+
+
 def doctor(cfg) -> int:
     """Environment check for a fresh machine. Makes no AI calls. Returns a process exit code."""
     import shutil
@@ -175,6 +229,9 @@ def doctor(cfg) -> int:
     else:  # optional (docs-qa only): a warning, not a problem
         print(f"➖ docs_root 없음 (선택): {cfg.docs_root} — 문서 질의는 저장소 등록 시 docs 폴더를 지정하면 됩니다")
     line(True, f"auth_token: {'설정됨' if cfg.auth_token else '없음 (이 PC 에서만 접속 가능)'}")
+    remote = cfg.serve_host not in LOOPBACK_HOSTS
+    line(not remote or bool(cfg.auth_token), f"serve_host: {cfg.serve_host} ({'원격 접속 켜짐' if remote else '이 PC 전용'})",
+         "원격 접속에는 토큰이 필요합니다: relay remote on")
     from .repos import RepoRegistry
 
     for repo in RepoRegistry(cfg.repos).repos.values():
@@ -244,8 +301,11 @@ def main() -> None:
     p_cc.add_argument("--project")
     p_cc.add_argument("--session-id")
     p_serve = sub.add_parser("serve", help="start the server (dashboard + API)")
-    p_serve.add_argument("--host", default="127.0.0.1")
+    p_serve.add_argument("--host", default=None, help="default: serve_host from config (relay remote on|off)")
     p_serve.add_argument("--port", type=int, default=8020)
+    p_remote = sub.add_parser("remote", help="access from other devices: on (makes a token) | off | status")
+    p_remote.add_argument("action", nargs="?", choices=["on", "off", "status"], default="status")
+    p_remote.add_argument("--new-token", action="store_true", help="on: replace the token (old one stops working)")
     sub.add_parser("doctor", help="check this machine: git, claude login, providers, config paths")
     sub.add_parser("disk", help="where the disk space goes (snapshots, working copies, patches)")
     p_clean = sub.add_parser("cleanup", help="delete decided/expired workspaces (result.patch is kept)")
@@ -254,11 +314,19 @@ def main() -> None:
 
     cfg = Config.load()
     if args.cmd == "serve":
-        if args.host not in ("127.0.0.1", "localhost", "::1") and not cfg.auth_token:
-            sys.exit("다른 기기에서 접속하게 하려면 먼저 토큰을 설정하세요: 환경 변수 KATAE_TOKEN 또는 relay.config.local.yaml 의 auth_token")
+        host = args.host or cfg.serve_host
+        if host not in LOOPBACK_HOSTS:
+            if not cfg.auth_token:
+                sys.exit("다른 기기에서 접속하게 하려면 먼저 토큰을 설정하세요: relay remote on "
+                         "(또는 환경 변수 KATAE_TOKEN / relay.config.local.yaml 의 auth_token)")
+            print("  원격 접속 켜짐 — 다른 기기: " + (", ".join(lan_urls(args.port)) or f"<이 PC IP>:{args.port}")
+                  + "  (토큰: relay remote status)")
         import uvicorn
 
-        uvicorn.run("relay_agent.server:app", host=args.host, port=args.port)
+        uvicorn.run("relay_agent.server:app", host=host, port=args.port)
+        return
+    if args.cmd == "remote":
+        print("\n".join(remote_command(args.action, cfg, new_token=args.new_token)))
         return
     if args.cmd == "doctor":
         sys.exit(doctor(cfg))

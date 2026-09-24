@@ -94,7 +94,11 @@ goto :repo_loop
 :repos_done
 uv run relay repos
 
-rem ---------------------------------------------------------------- 6. 실행
+rem ---------------------------------------------------------------- 6. 원격 접속
+echo.
+call :ask_no "다른 기기(휴대폰·다른 PC)에서도 이 서버에 접속하게 할까요? 토큰을 만들어 줍니다" && uv run relay remote on
+
+rem ---------------------------------------------------------------- 7. 실행
 echo.
 call :ask "지금 서버를 실행하고 대시보드를 열까요?" && call "%~dp0start.bat"
 
@@ -118,3 +122,10 @@ set "ANSWER="
 set /p "ANSWER=  %~1 [Y/n] "
 if /i "!ANSWER!"=="n" exit /b 1
 exit /b 0
+
+:ask_no
+if "%KATAE_NONINTERACTIVE%"=="1" exit /b 1
+set "ANSWER="
+set /p "ANSWER=  %~1 [y/N] "
+if /i "!ANSWER!"=="y" exit /b 0
+exit /b 1
