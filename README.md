@@ -112,7 +112,7 @@ uv run relay repo clone mnys --url <git url>          # on a new machine: clone 
 | Mode | Behavior | Fits |
 |---|---|---|
 | **`inplace` (default)** | **Changes apply to the original at each step.** Only changed files are recorded, so rollback is possible | Game projects, anything that uses MCP (Unreal editor) |
-| `copy` | Work in a copy → **applied automatically when done** (`auto_apply: true`). If the original changed meanwhile, it isn't applied and waits in the "Changes" tab | Small code repos you want isolated |
+| `copy` | Work in a copy → **applied automatically when done** (`auto_apply: true`). If the original changed meanwhile, the work is **three-way merged** onto it (snapshot = base), so your edits — even in the same file — are kept (`merged.patch`). Only lines both sides changed stop it: nothing is applied, the conflicting files are named, and it waits in the "Changes" tab | Small code repos you want isolated |
 | `none` | Read-only | docs-qa |
 
 - **Stages using an MCP that changes real state (e.g. Unreal) always run `inplace`, even if you choose `copy`.** MCP changes the real project, so a copy would split the results. (Read-only MCPs like `docs_read` are exempt.)
@@ -219,6 +219,11 @@ Subscription usage also counts tokens re-read on every turn, so the goal is to c
 - Phases that edit files (✏️) only list AIs that can edit files. Your last choice is remembered per relay.
 - A model you pick isn't swapped for `retry_model` on retries. When usage runs out, it falls back as usual (lower model → the relay's default AI → alternate AIs).
 - To expose other AIs' models: `providers.<name>.models: [gpt-5, ...]` in `relay.config.local.yaml`.
+- **Newest models without a code change:** stages name a tier (`haiku`/`sonnet`/`opus`/`fable`), not a version.
+  - Claude Code: the tier goes to `claude --model` as an alias, so updating Claude Code (`claude update`) brings its newest model of that tier.
+  - Claude API: the tier resolves to the newest model of that tier your key can list (Models API, cached 6h). If listing fails: Opus 5.5 / Fable 5.1 / Sonnet 5 / Haiku 4.5 (`MODEL_ALIASES` in runners.py). Opus 5.5 runs at effort `high` unless a stage sets one (its own default is `medium`); Opus 5+ and Fable get the server-side refusal fallback (`fallbacks: "default"`).
+  - Pin a tier to a fixed id per provider: `providers: {claude: {model_map: {opus: claude-opus-5-5}}}`.
+  - Which model actually answered is recorded per stage (`relay usage <run_id>`, the token watch tab).
 - CLI: `relay run default "goal" --stage-model plan=claude:opus --stage-model build=codex:gpt-5`
 
 ## Multiple AIs and automatic switching

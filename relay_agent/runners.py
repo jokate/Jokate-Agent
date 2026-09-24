@@ -553,10 +553,14 @@ READ_ONLY_BASH = [f"Bash({c}:*)" for c in (
 class ClaudeCliRunner:
     name = "claude"
 
-    def __init__(self, exe: str | None = None, mcp_registry: dict[str, dict] | None = None, name: str = "claude"):
+    def __init__(self, exe: str | None = None, mcp_registry: dict[str, dict] | None = None, name: str = "claude",
+                 model_map: dict[str, str] | None = None):
         self.exe = exe or shutil.which("claude") or "claude"
         self.mcp_registry = mcp_registry or {}
         self.name = name
+        # Tier aliases go to the CLI as-is, so each Claude Code update brings its newest models;
+        # providers.<name>.model_map pins a tier to a fixed id (e.g. opus: claude-opus-5-5).
+        self.model_map = model_map or {}
 
     def build_args(self, call: StageCall, mcp_config_path: Path | None) -> list[str]:
         args = [
@@ -574,7 +578,7 @@ class ClaudeCliRunner:
         else:
             args += ["--session-id", call.session_id] if call.session_id else ["--no-session-persistence"]
         if call.model:
-            args += ["--model", call.model]
+            args += ["--model", self.model_map.get(call.model, call.model)]
         if call.system_mode == "replace":
             # Replacing Claude Code's default system prompt was measured at ~7.5K -> ~0.6K input tokens.
             # It also drops the environment/tool-usage guidance, so restate the essentials.
@@ -594,7 +598,7 @@ class ClaudeCliRunner:
         if call.max_budget_usd is not None:
             args += ["--max-budget-usd", str(call.max_budget_usd)]
         if call.fallback_model and call.fallback_model != call.model:
-            args += ["--fallback-model", call.fallback_model]  # CLI-level switch on overload
+            args += ["--fallback-model", self.model_map.get(call.fallback_model, call.fallback_model)]  # on overload
         if call.effort:
             args += ["--effort", call.effort]
         args += ["--tools", ",".join(call.tools) if call.tools else ""]
@@ -1066,20 +1070,73 @@ PRICES = {
     "claude-haiku-4-5": (1.0, 5.0),
     "claude-sonnet-5": (2.0, 10.0),
     "claude-opus-5": (5.0, 25.0),
+    "claude-opus-5-5": (4.0, 20.0),
     "claude-fable-5-1": (10.0, 50.0),
 }
-MODEL_ALIASES = {"haiku": "claude-haiku-4-5", "sonnet": "claude-sonnet-5", "opus": "claude-opus-5", "fable": "claude-fable-5-1"}
+# Tier alias -> id when the Models API can't be asked; normally the newest listed model of the tier is used.
+MODEL_ALIASES = {"haiku": "claude-haiku-4-5", "sonnet": "claude-sonnet-5", "opus": "claude-opus-5-5", "fable": "claude-fable-5-1"}
+# Opus 5.5 defaults to effort medium (Opus 5: high); an unset effort keeps the Opus 5 depth.
+DEFAULT_EFFORT = {"claude-opus-5-5": "high"}
+LATEST_TTL_S = 6 * 3600
+_latest_cache: tuple[float, dict[str, str]] | None = None
+
+
+def tier_of(model: str | None) -> str | None:
+    """haiku/sonnet/opus/fable for an alias or a claude-<tier>-... id."""
+    if model in MODEL_ALIASES:
+        return model
+    return next((t for t in MODEL_ALIASES if (model or "").startswith(f"claude-{t}-")), None)
+
+
+def latest_models(client) -> dict[str, str]:
+    """Newest model id per tier that this key can use, from the Models API. {} if it can't be listed."""
+    try:
+        listed = sorted(client.models.list(), key=lambda m: m.created_at, reverse=True)
+    except Exception:  # noqa: BLE001 - offline, old SDK, fake client: fall back to MODEL_ALIASES
+        return {}
+    found: dict[str, str] = {}
+    for m in listed:
+        tier = tier_of(m.id)
+        if tier and tier not in found:
+            found[tier] = m.id
+    return found
+
+
+def refusal_fallback(model: str) -> bool:
+    """Server-side refusal fallback ("default" routes by refusal category) on Opus 5+ and Fable."""
+    return tier_of(model) in ("opus", "fable") and not model.startswith("claude-opus-4")
 
 
 class AnthropicApiRunner:
     name = "anthropic_api"
 
-    def __init__(self, client=None):
+    def __init__(self, client=None, model_map: dict[str, str] | None = None):
+        self.shared_cache = client is None  # one Models API lookup per LATEST_TTL_S for the real client
         if client is None:
             import anthropic
 
             client = anthropic.Anthropic()
         self.client = client
+        self.model_map = model_map or {}  # providers.anthropic_api.model_map pins a tier to a fixed id
+        self._latest: dict[str, str] | None = None
+
+    def resolve_model(self, model: str | None) -> str:
+        """Alias -> the newest id of that tier (so new releases are picked up without a code change).
+        A full id is used as given; a model_map entry wins over both."""
+        global _latest_cache
+        model = model or "opus"
+        if model in self.model_map:
+            return self.model_map[model]
+        if model not in MODEL_ALIASES:
+            return model
+        if self._latest is None:
+            if self.shared_cache and _latest_cache and time.monotonic() - _latest_cache[0] < LATEST_TTL_S:
+                self._latest = _latest_cache[1]
+            else:
+                self._latest = latest_models(self.client)
+                if self.shared_cache and self._latest:
+                    _latest_cache = (time.monotonic(), self._latest)
+        return self._latest.get(model) or MODEL_ALIASES[model]
 
     def run(self, call: StageCall) -> tuple[StageResult, Usage]:
         """Run on call.model; on unavailability/overload/refusal, retry once on fallback_model."""
@@ -1112,7 +1169,7 @@ class AnthropicApiRunner:
                 raise classify(e2) from e2
 
     def _run_once(self, call: StageCall, model: str | None) -> tuple[StageResult, Usage]:
-        model = MODEL_ALIASES.get(model or "opus", model)
+        model = self.resolve_model(model)
         kwargs: dict = {
             "model": model,
             # A backstop, not a tuning knob: hitting it wastes the whole attempt. Streaming avoids HTTP timeouts.
@@ -1125,13 +1182,12 @@ class AnthropicApiRunner:
         betas: list[str] = []
         if model != "claude-haiku-4-5":
             kwargs["thinking"] = {"type": "adaptive"}
-            if call.effort:
-                kwargs["output_config"]["effort"] = call.effort
-        # Server-side refusal fallback inside the same call: Fable -> Opus 5, Opus 5 -> Opus 4.8.
-        refusal_fallback = {"claude-fable-5-1": "claude-opus-5", "claude-opus-5": "claude-opus-4-8"}.get(model)
-        if refusal_fallback:
-            betas.append("server-side-fallback-2026-06-01")
-            kwargs["fallbacks"] = [{"model": refusal_fallback}]
+            effort = call.effort or DEFAULT_EFFORT.get(model)
+            if effort:
+                kwargs["output_config"]["effort"] = effort
+        if refusal_fallback(model):
+            betas.append("server-side-fallback-2026-07-01")
+            kwargs["fallbacks"] = "default"
 
         started = time.monotonic()
         client = self.client.with_options(timeout=call.timeout_s) if hasattr(self.client, "with_options") else self.client
@@ -1165,7 +1221,8 @@ class AnthropicApiRunner:
 
 
 def estimate_cost(u: Usage) -> float | None:
-    price = PRICES.get(MODEL_ALIASES.get(u.model, u.model))
+    # a model newer than this table is estimated at its tier's known price
+    price = PRICES.get(MODEL_ALIASES.get(u.model, u.model)) or PRICES.get(MODEL_ALIASES.get(tier_of(u.model) or "", ""))
     if not price:
         return None
     pin, pout = price
@@ -1190,9 +1247,9 @@ def make_runner(provider: str, registry: ProviderRegistry | None = None,
     if not ok:
         raise RunnerError(f"{spec.name}: {reason}", "unavailable")
     if spec.kind == "claude_cli":
-        return ClaudeCliRunner(mcp_registry=mcp_registry, name=spec.name)
+        return ClaudeCliRunner(mcp_registry=mcp_registry, name=spec.name, model_map=spec.model_map)
     if spec.kind == "api":
-        return AnthropicApiRunner()
+        return AnthropicApiRunner(model_map=spec.model_map)
     if spec.kind == "cli":
         return ExternalCliRunner(spec)
     if spec.kind == "openai":
