@@ -261,10 +261,21 @@ Switching rules (per stage, in order: primary → `alternates` → `fallback_cha
 - **Activity log:** stage start and finish, every tool call (Read/Grep/Edit/Bash plus target), model switches, send-backs, approval waits, and budget limits. All stored in SQLite and shown live on the dashboard timeline.
 - **History search:** search questions and results (`/history/search?q=` or the dashboard search bar).
 
+## Auto routing — the flow adapts to the request
+The relays know no engine or domain; two things adapt them to each request:
+- **The target's harness** (always): its `CLAUDE.md`, skills, `.mcp.json`, permissions and registered verify commands are attached to every stage (see "Folder context").
+- **The flow** (`auto`, the default in the dashboard and katae MCP): before the run starts, one Haiku call (a few hundred tokens, a few seconds, `-:router` in usage) reads the request, attachment names, the session's last questions and a summary of that harness, then picks the relay whose description fits.
+  - Candidates are every relay in `relays/` except routers and `demo`; **a new relay joins by adding its YAML** — its `description` is what the router reads, so say what it is for.
+  - The pick and its reason show in the timeline (🧭 릴레이 자동 선택) and `relay log`. From there the run is exactly that relay: its workspace mode, gates, budgets.
+  - No Claude CLI, an error or an answer naming no relay → `fallback` (quick), with the reason. Routing never stops a run from starting.
+  - Choosing a relay yourself skips routing. Per-stage model picks made under `auto` apply only to stages the chosen relay has.
+  - Tune in `relays/auto.yaml`: `router.model`, `candidates` (limit the choice), `exclude`, `fallback`.
+
 ## Model policy (token cost first)
 | Relay | Stages / models | Use for |
 |---|---|---|
-| **quick** (dashboard default) | Single Sonnet stage (→ Opus → other AIs) | Most edits and fixes |
+| **auto** (dashboard default) | No stages: one Haiku call picks one of the relays below for the request | Anything — let the request decide |
+| **quick** | Single Sonnet stage (→ Opus → other AIs) | Most edits and fixes |
 | quick-fable | Single Fable stage | Small but hard problems |
 | default | scout Haiku → plan **Fable** (approval) → build Sonnet (**Fable on send-back**) → review Sonnet | Large or risky jobs |
 | docs-qa | Single Sonnet(low) stage + docs-read MCP | Document questions |

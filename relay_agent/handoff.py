@@ -31,16 +31,18 @@ SYSTEM = """너는 작업 인계서(HANDOFF) 작성기다. 받은 사실만으�
 
 
 class HandoffWriter:
-    def __init__(self, model: str = "haiku", exe: str | None = None, timeout_s: int = 120, limit: int = 1200):
+    def __init__(self, model: str = "haiku", exe: str | None = None, timeout_s: int = 120, limit: int = 1200,
+                 system: str | None = None):
         self.model = model
         self.exe = exe or shutil.which("claude") or "claude"
         self.timeout_s = timeout_s
         self.limit = limit
+        self.system = system or SYSTEM.format(limit=limit)  # other one-shot jobs (e.g. the router) bring their own
 
     def __call__(self, facts: str) -> tuple[str, Usage]:
         # Neutral folder + --safe-mode: no CLAUDE.md, memory, skills or hooks in a one-shot summary call.
         args = [self.exe, "-p", "--model", self.model, "--output-format", "json", "--tools", "",
-                "--system-prompt", SYSTEM.format(limit=self.limit), "--strict-mcp-config",
+                "--system-prompt", self.system, "--strict-mcp-config",
                 "--no-session-persistence", "--safe-mode"]
         proc = subprocess.run(args, input=facts, capture_output=True, text=True, encoding="utf-8", errors="replace",
                               timeout=self.timeout_s, cwd=tempfile.gettempdir(),
@@ -59,5 +61,5 @@ class HandoffWriter:
                       duration_ms=data.get("duration_ms", 0))
         text = str(data.get("result") or "").strip()
         if not text:
-            raise RuntimeError("빈 인계서")
+            raise RuntimeError("빈 응답")
         return text, usage

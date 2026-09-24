@@ -5,6 +5,7 @@
     relay history <session_id>              # 그 세션에서 한 질문과 결과
     relay search "쿨다운"                    # 전체 질문 이력 검색
     relay run default "목표" --session <id>  # 세션에 이어서 질문(세션 없으면 --workdir 로 새 세션)
+    relay run auto "목표" --workdir <폴더>    # 요청과 대상 폴더에 맞는 릴레이를 자동으로 골라 실행
     relay log <run_id>                      # 실제로 한 작업(단계, 도구 호출) 타임라인
     relay approve <run_id> | resume <run_id> | status <run_id> | usage [run_id]
     relay cancel <run_id> | patch <run_id> | apply <run_id> | discard <run_id> | rollback <run_id>
@@ -25,6 +26,7 @@ from .pipeline import RelayEngine, RunState
 
 EVENT_LABELS = {
     "run_created": "릴레이 시작",
+    "relay_routed": "자동 선택",
     "stage_started": "단계 시작",
     "tool_use": "도구",
     "tool_error": "도구 오류",

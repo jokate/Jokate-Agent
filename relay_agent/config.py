@@ -97,8 +97,11 @@ def build_engine(cfg: Config):
     from .runners import make_runner
     from .usage import UsageStore
 
+    from . import router
+
     usage, history = UsageStore(cfg.usage_db), HistoryStore(cfg.history_db)
     providers = ProviderRegistry(cfg.providers, cfg.fallback_chain, usage=usage, history=history)
+    has_claude = shutil.which("claude") is not None
     return RelayEngine(
         cfg.runs_dir, usage, history,
         runner_factory=lambda name: make_runner(name, providers, cfg.mcp_registry),
@@ -110,5 +113,7 @@ def build_engine(cfg: Config):
         repos=RepoRegistry(cfg.repos),
         mcp_registry=cfg.mcp_registry,
         notifier=Notifier(cfg.server_url, cfg.notify),
-        handoff_writer=HandoffWriter(cfg.handoff_model) if cfg.handoff_model and shutil.which("claude") else None,
+        handoff_writer=HandoffWriter(cfg.handoff_model) if cfg.handoff_model and has_claude else None,
+        # same one-shot call as the hand-over, with the router's own instructions (model from relays/auto.yaml)
+        router=(lambda text, model: HandoffWriter(model, timeout_s=90, system=router.SYSTEM)(text)) if has_claude else None,
     )

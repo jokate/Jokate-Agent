@@ -1,5 +1,5 @@
 name: docs-qa
-description: 문서 질의 — 필요한 문서 섹션만 읽고 답변
+description: 문서 질의 — 문서 폴더(docs)의 필요한 섹션만 읽고 답변 · 코드는 읽지 않음, 파일 수정 없음
 max_run_cost_usd: 0.3
 
 # 측정: 정찰(Haiku)+답변(Sonnet) 2단계 63K 토큰 $0.09 → 단일 단계 31K $0.047, 같은 답.

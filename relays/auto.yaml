@@ -1,0 +1,10 @@
+name: auto
+description: 자동 — 요청과 작업 대상(지침·스킬·MCP)을 보고 맞는 릴레이를 골라 출발 · 고른 이유는 타임라인에 남음
+
+# 단계가 없는 라우터 릴레이. 출발할 때 경량 모델 한 번(수백 토큰, 몇 초)으로 아래 후보 중 하나를 고르고,
+# 그 뒤는 고른 릴레이로 그대로 진행한다. relays/ 에 YAML 을 추가하면 자동으로 후보가 된다(description 이 판단 근거).
+router:
+  model: haiku
+  candidates: []        # 비우면 모든 릴레이 (다른 라우터 제외)
+  exclude: [demo]       # 모의 실행용
+  fallback: quick       # AI 로 고를 수 없거나 답이 이상할 때

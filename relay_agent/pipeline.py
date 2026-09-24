@@ -93,17 +93,28 @@ class StageSpec(BaseModel):
         return bool(WRITE_TOOLS & set(self.tools or []))
 
 
+class RouterSpec(BaseModel):
+    """A relay with `router:` has no stages of its own: at start it picks another relay for the request."""
+    model: str = "haiku"
+    candidates: list[str] = Field(default_factory=list, description="relay names it may pick; empty = every relay")
+    exclude: list[str] = Field(default_factory=lambda: ["demo"])
+    fallback: str = "quick"  # when no AI can route or the answer names no candidate
+
+
 class RelaySpec(BaseModel):
     name: str
     description: str = ""
     workspace: Literal["none", "copy", "inplace"] = "none"
     auto_apply: bool = False  # copy mode: apply the patch to the original as soon as the run finishes
     max_run_cost_usd: float | None = Field(None, description="pause for approval once a run spends this much")
-    stages: list[StageSpec]
+    router: RouterSpec | None = None
+    stages: list[StageSpec] = Field(default_factory=list)
 
     @classmethod
     def load(cls, path: Path) -> tuple["RelaySpec", Path]:
         spec = cls.model_validate(yaml.safe_load(path.read_text(encoding="utf-8")))
+        if not spec.stages and spec.router is None:
+            raise ValueError(f"{path.name}: stages 또는 router 가 필요합니다")
         names = [s.name for s in spec.stages]
         for s in spec.stages:
             if s.on_retry and s.on_retry not in names[: names.index(s.name)]:
@@ -232,6 +243,7 @@ class RelayEngine:
         handoff_writer: Callable[[str], tuple[str, Usage]] | None = None,
         max_snapshot_mb: float = 500,
         max_file_mb: float = 20,
+        router: Callable[[str, str], tuple[str, Usage]] | None = None,
     ):
         self.max_snapshot_mb = max_snapshot_mb
         self.max_file_mb = max_file_mb
@@ -240,6 +252,7 @@ class RelayEngine:
         self.mcp_registry = mcp_registry or {}
         self.notifier = notifier
         self.handoff_writer = handoff_writer  # lightweight model that writes the stop hand-over
+        self.router = router  # (prompt, model) -> (answer, usage): picks the relay for an `auto` run
         self.runs_dir = runs_dir
         self.usage = usage
         self.history = history
@@ -444,6 +457,14 @@ class RelayEngine:
             workdir = Path(session["workdir"]) if session else None
         if workdir is None:
             raise ValueError("workdir 또는 repo 가 필요합니다")
+        routed = None
+        if spec.router is not None:
+            # an `auto` relay: pick the relay for this request, then everything below runs as if it was chosen
+            routed = self._route(spec, relay_path, goal, Path(workdir), session_id, repo_spec, attachments)
+            relay_path = routed.pop("path")
+            spec, _ = RelaySpec.load(relay_path)
+            names = {s.name for s in spec.stages}
+            stage_models = {k: v for k, v in (stage_models or {}).items() if k in names}
         if session_id is None:
             session_id = self.history.create_session(goal[:60], str(workdir.resolve()), repo)["id"]
         if workspace is None and not any(s.writes for s in spec.stages):
@@ -509,12 +530,40 @@ class RelayEngine:
                 shutil.copy2(src, dst)
                 run.baton.attachments.append(dst.as_posix())
         self.history.add_turn(session_id, goal, spec.name, run.id)
+        if routed:
+            usage = routed.pop("usage")
+            if usage is not None:
+                self.usage.record(run.id, "-:router", usage)
+            self._event(run, "-", "relay_routed", relay=routed["relay"], reason=routed["reason"], by=routed["by"],
+                        router=routed["from"], cost_usd=usage.cost_usd if usage else None)
         self._event(run, "-", "run_created", relay=spec.name, workdir=run.workdir, workspace=mode, repo=repo,
                     auto_apply=run.auto_apply, stages=[s.name for s in spec.stages], stage_models=chosen)
         if forced:
             self._event(run, "-", "workspace_forced", reason=forced)
         self.save(run)
         return run
+
+    def _route(self, spec: RelaySpec, relay_path: Path, goal: str, workdir: Path, session_id: str | None,
+               repo_spec: RepoSpec | None, attachments: list[Path] | None) -> dict:
+        """Ask the router which relay fits: the request, the target's harness and each candidate's description."""
+        from . import router
+
+        options = router.candidates(relay_path.parent, spec.router.candidates,
+                                    spec.router.exclude + [relay_path.stem], RelaySpec.load)
+        if not options:
+            raise ValueError("자동으로 고를 릴레이가 없습니다 (relays/ 에 stages 가 있는 릴레이 필요)")
+        try:
+            ctx = discover(workdir)
+        except OSError:
+            ctx = None
+        repo = {"name": repo_spec.name, "notes": repo_spec.notes, "verify": repo_spec.verify} if repo_spec else None
+        text = router.prompt(goal, router.harness_summary(workdir, ctx, repo), options,
+                             self.history.session_context(session_id) if session_id else [],
+                             [str(a) for a in attachments or []])
+        choice = router.route(self.router, spec.router.model, text, options, spec.router.fallback)
+        choice["path"] = next(o["path"] for o in options if o["name"] == choice["relay"])
+        choice["from"] = spec.name
+        return choice
 
     def approve(self, run_id: str) -> RunState:
         run = self.load(run_id)

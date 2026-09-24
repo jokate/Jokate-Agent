@@ -485,7 +485,7 @@ $("theme").onclick = () => {
 
 const STATUS_KO = { done: "완료", failed: "실패", awaiting_approval: "승인 대기", running: "진행 중", pending: "대기", cancelled: "취소됨", imported: "가져옴" };
 const EV = {
-  run_created: ["🏁", "릴레이 출발"], stage_started: ["🏃", "단계 시작"], tool_use: ["🛠️", "도구 사용"],
+  run_created: ["🏁", "릴레이 출발"], relay_routed: ["🧭", "릴레이 자동 선택"], stage_started: ["🏃", "단계 시작"], tool_use: ["🛠️", "도구 사용"],
   tool_error: ["⚠️", "도구 오류"], note: ["💬", "메모"], stage_finished: ["✅", "단계 완료"],
   sent_back: ["↩️", "되돌림"], awaiting_approval: ["✋", "승인 대기"], approved: ["👍", "승인됨"],
   run_done: ["🏆", "릴레이 완주"], run_failed: ["💥", "실패"], budget_exceeded: ["💸", "예산 도달"], stage_budget_exceeded: ["💸", "단계 한도 도달"], model_exhausted: ["🪫", "모델 사용량 소진"], workspace_forced: ["⚡", "원본에서 작업"], changes_auto_applied: ["✅", "자동 적용"], auto_apply_failed: ["⚠️", "자동 적용 보류"], model_substituted: ["↘️", "모델 대체"],
@@ -616,6 +616,7 @@ function describe(e) {
     case "tool_result_large": return `<code>${esc(d.tool)}</code> ${esc(d.target || "")} · 결과 ${fmtN(d.chars)}자 (토큰 소모 큼)`;
     case "run_failed": return esc(d.error);
     case "workspace_forced": return esc(d.reason);
+    case "relay_routed": return `<code>${esc(d.relay)}</code>${d.reason ? " — " + esc(d.reason) : ""}${d.by ? ` <span class="tag">${esc(d.by)}</span>` : ""}`;
     case "changes_auto_applied": return `${d.files}개 파일을 원본에 자동 적용`;
     case "auto_apply_failed": return `원본이 그사이 바뀌어 자동 적용하지 않음 — '변경 사항' 탭에서 확인 · ${esc(d.error)}`;
     case "model_exhausted": return `<code>${esc(d.model)}</code> 만 소진 — 같은 AI 에서 아래 모델로 계속${d.until ? ` (${esc(String(d.until).slice(5, 16).replace("T", " "))} 까지)` : ""}`;
@@ -772,7 +773,7 @@ async function openSession(id) {
         </select>
       </div>
       <div class="row">
-        <select class="field" name="relay" id="relaySelect" title="릴레이 선택">${relays.map((r) => `<option value="${r.name}" ${r.name === (s.repo_relay || "quick") ? "selected" : ""}>${r.name} — ${esc(r.stages.join(" → "))}</option>`).join("")}</select>
+        <select class="field" name="relay" id="relaySelect" title="릴레이 선택">${relays.map((r) => `<option value="${r.name}" ${r.name === (s.repo_relay || (relays.some((x) => x.name === "auto") ? "auto" : "quick")) ? "selected" : ""}>${r.name} — ${esc(r.stages.join(" → "))}</option>`).join("")}</select>
         <button class="btn btn-primary">⚡ 릴레이 출발</button>
       </div>
       <div class="hint" id="relayHint"></div>

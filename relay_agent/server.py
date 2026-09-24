@@ -89,7 +89,7 @@ class CreateSession(BaseModel):
 
 class CreateRun(BaseModel):
     goal: str
-    relay: str = "default"
+    relay: str = "auto"  # the router picks the relay for the request
     session_id: str | None = None
     workdir: str | None = None  # defaults to the session's workdir
     workspace: str | None = None  # none | copy | inplace; defaults to the repo's, then the relay's setting
@@ -189,7 +189,8 @@ def dashboard() -> str:
     return DASHBOARD.read_text(encoding="utf-8")
 
 
-STAGE_KO = {"scout": "정찰", "plan": "설계", "build": "구현", "review": "검토", "answer": "답변", "cross_review": "교차검토"}
+STAGE_KO = {"scout": "정찰", "plan": "설계", "build": "구현", "review": "검토", "answer": "답변", "cross_review": "교차검토",
+            "design": "기획", "playtest": "플레이 검증"}
 
 
 @app.get("/relays")
@@ -209,12 +210,15 @@ def list_relays() -> list[dict]:
             if s.primary == "mock":
                 tier = "모의"
             steps.append(f"{STAGE_KO.get(s.name, s.name)}({tier}{'·' + '·'.join(extra) if extra else ''})")
+        if spec.router is not None:
+            steps = [f"요청에 맞는 릴레이 자동 선택({TIER.get(spec.router.model, spec.router.model)})"]
         out.append({
             "name": p.stem,
             "description": spec.description,
             "workspace": spec.workspace,
             "stages": steps,
             "switchable": any(s.alternates for s in spec.stages),
+            "router": spec.router is not None,
             "stage_defaults": [{"name": s.name, "label": STAGE_KO.get(s.name, s.name), "provider": s.primary,
                                 "model": s.model, "tier": TIER.get((s.model or "").lower(), ""), "writes": s.writes,
                                 "effort": s.effort,

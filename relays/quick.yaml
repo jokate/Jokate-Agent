@@ -1,5 +1,5 @@
 name: quick
-description: 기본 추천 — 작은 작업을 한 주자가 처리 · 원본에 즉시 반영, 되돌리기 가능
+description: 기본 추천 — 작고 범위가 분명한 수정이나 코드에 대한 질문을 한 주자가 처리 · 원본에 즉시 반영, 되돌리기 가능
 workspace: inplace        # 즉시 반영(원본에서 작업) · 바뀐 파일만 기록해 되돌리기 가능 · copy 로 바꾸면 복사본 작업
 auto_apply: true          # copy 로 돌릴 때도 끝나면 자동 적용 (충돌 시에만 대기)
 max_run_cost_usd: 0.8
