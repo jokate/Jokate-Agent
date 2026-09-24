@@ -70,6 +70,7 @@ def test_remote_client_cannot_target_unregistered_folder(tmp_path, monkeypatch):
     monkeypatch.setattr(server.engine, "repos", RepoRegistry({"ok": {"path": str(registered)}}))
     monkeypatch.setattr(server.engine, "history", HistoryStore(tmp_path / "h.sqlite"))  # never the real DB
     monkeypatch.setattr(server.cfg, "auth_token", "t")
+    monkeypatch.setattr(server.cfg, "remote_networks", [])  # this machine's local config may limit to Tailscale
     monkeypatch.setattr(server, "LOOPBACK", set())  # pretend the test client is remote
     client = TestClient(server.app)
     headers = {"Authorization": "Bearer t"}

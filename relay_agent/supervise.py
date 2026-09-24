@@ -18,7 +18,9 @@ import sys
 import time
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+from .envpath import claude_install_dirs, refresh
+
+ROOT =Path(__file__).resolve().parent.parent
 STOP_FILE = ROOT / "runs" / "supervise.stop"
 QUICK_EXIT_S = 30  # a server that dies this soon after starting counts as failing (backoff grows)
 MAX_BACKOFF_S = 60
@@ -48,10 +50,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[supervise] port {port} is already serving — nothing to do")
         return 0
     STOP_FILE.unlink(missing_ok=True)
-    env = {**os.environ, "KATAE_SUPERVISED": "1"}
     failures = 0
     try:
         while True:
+            refresh(claude_install_dirs())  # tools installed while this supervisor was running
+            env = {**os.environ, "KATAE_SUPERVISED": "1"}
             started = time.monotonic()
             print(f"[supervise] starting server on port {port}", flush=True)
             code = subprocess.call(serve_command(port), cwd=ROOT, env=env)
