@@ -96,11 +96,24 @@ uv run relay repos
 
 rem ---------------------------------------------------------------- 6. 원격 접속
 echo.
-call :ask_no "다른 기기(휴대폰·다른 PC)에서도 이 서버에 접속하게 할까요? 토큰을 만들어 줍니다" && uv run relay remote on
+echo  다른 기기에서의 접속은 Tailscale 로만 받습니다 ^(이 PC 와 그 기기에 Tailscale 설치 + 같은 계정 로그인^).
+call :ask_no "다른 기기(휴대폰·다른 PC)에서도 Tailscale 로 이 서버에 접속하게 할까요? 토큰을 만들어 줍니다" && uv run relay remote on --tailscale
 
-rem ---------------------------------------------------------------- 7. 실행
+rem ---------------------------------------------------------------- 7. 자동 시작
 echo.
-call :ask "지금 서버를 실행하고 대시보드를 열까요?" && call "%~dp0start.bat"
+set "AUTOSTARTED="
+call :ask_no "Windows 에 로그온할 때 서버를 자동으로 띄우고, 죽으면 다시 띄울까요?" && (
+    uv run relay autostart on
+    set "AUTOSTARTED=1"
+)
+
+rem ---------------------------------------------------------------- 8. 실행
+echo.
+if defined AUTOSTARTED (
+    call :ask "대시보드를 열까요?" && start "" "http://127.0.0.1:8020"
+) else (
+    call :ask "지금 서버를 실행하고 대시보드를 열까요?" && call "%~dp0start.bat"
+)
 
 :done
 echo.

@@ -47,6 +47,9 @@ class Config(BaseModel):
     # Address `relay serve` (and so start.bat and the dashboard restart) binds to (env KATAE_HOST wins).
     # 0.0.0.0 = reachable from other devices; set with `relay remote on|off`, which also creates the token.
     serve_host: str = "127.0.0.1"
+    # When set, a non-local client must also come from one of these networks (CIDR), e.g. the Tailscale
+    # tailnet: `relay remote on --tailscale`. Empty = any address that has the token.
+    remote_networks: list[str] = []
     notify: bool = True  # Windows toast when a run finishes, fails or needs approval
     handoff_model: str = "haiku"  # writes the hand-over when a run stops ("" = no AI, engine-built only)
 

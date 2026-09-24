@@ -63,6 +63,24 @@ def recover() -> None:
 LOOPBACK = {"127.0.0.1", "::1", "localhost", "testclient"}
 
 
+def _in_networks(host: str, networks: list[str]) -> bool:
+    import ipaddress
+
+    try:
+        addr = ipaddress.ip_address(host.split("%")[0])
+    except ValueError:
+        return False
+    if getattr(addr, "ipv4_mapped", None):
+        addr = addr.ipv4_mapped
+    for net in networks:
+        try:
+            if addr in ipaddress.ip_network(net, strict=False):
+                return True
+        except ValueError:
+            continue
+    return False
+
+
 @app.middleware("http")
 async def guard(request: Request, call_next):
     """Localhost is trusted. Any other client needs `Authorization: Bearer <auth_token>`;
@@ -72,6 +90,9 @@ async def guard(request: Request, call_next):
     if request.method != "GET" and origin and urlparse(origin).netloc != request.headers.get("host"):
         # A web page on another site can't drive this server through the user's browser (CSRF).
         return JSONResponse({"detail": "다른 출처의 요청은 거부됩니다"}, 403)
+    if host not in LOOPBACK and cfg.remote_networks and not _in_networks(host, cfg.remote_networks):
+        # e.g. Tailscale only: other devices on the LAN (or a forwarded port) are refused before the token check
+        return JSONResponse({"detail": "허용된 네트워크(remote_networks, 예: Tailscale) 밖에서의 접속은 거부됩니다"}, 403)
     if request.url.path != "/" and host not in LOOPBACK:
         supplied = request.headers.get("authorization", "").removeprefix("Bearer ").strip()
         if not cfg.auth_token:
@@ -608,6 +629,7 @@ def _active_runs() -> list[str]:
 @app.post("/admin/restart")
 def restart(request: Request) -> dict:
     """Restart with the code on disk: start a fresh server (start.bat waits for the port) and exit this one.
+    Under `relay autostart` the supervisor starts the new server instead (through `uv run`, so packages sync).
     Local only; refused while a relay is running in this server."""
     import subprocess
 
@@ -619,15 +641,20 @@ def restart(request: Request) -> dict:
     if busy:
         raise HTTPException(409, f"진행 중인 실행이 있어 재시작하지 않습니다: {', '.join(busy)}")
     port = request.url.port or 8020
+    if os.environ.get("KATAE_SUPERVISED") == "1":
+        threading.Timer(0.8, os._exit, [0]).start()  # the supervisor starts it again
+        return {"restarting": True, "port": port, "supervised": True}
     if os.name == "nt":
         subprocess.Popen(["cmd", "/c", "start", "Agent 카태 - 서버", "cmd", "/c", str(ROOT / "start.bat"), str(port)],
                          cwd=ROOT, env={**os.environ, "KATAE_NO_BROWSER": "1", "KATAE_WAIT_FREE": "1"},
                          creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
     else:
-        subprocess.Popen([sys.executable, "-m", "relay_agent.cli", "serve", "--port", str(port)], cwd=ROOT,
-                         env={**os.environ, "KATAE_WAIT_FREE": "1"}, start_new_session=True)
+        from .supervise import serve_command
+
+        subprocess.Popen(serve_command(port), cwd=ROOT, env={**os.environ, "KATAE_WAIT_FREE": "1"},
+                         start_new_session=True)
     threading.Timer(0.8, os._exit, [0]).start()  # after the response is sent; no run is active
-    return {"restarting": True, "port": port}
+    return {"restarting": True, "port": port, "supervised": False}
 
 
 @app.get("/runs/{run_id}/live")

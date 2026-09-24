@@ -14,6 +14,7 @@ Claude near its usage limit → Codex/OpenCode/Gemini · run budget exceeded →
 | `install.bat` | **New machine: grab just this file and run it** → clone into `Jokate-Agent` under **the folder where you ran it** (or a folder given as an argument), then run setup.bat. If run inside an existing clone, installs in place |
 | `setup.bat` | Check git/uv/Claude CLI (offers to install uv via winget) → `uv sync` → create local config → `doctor` → prompt to register repos → offer to start |
 | `start.bat [port]` | Start the server and open the dashboard (if already running, just opens the dashboard) |
+| `relay autostart on` | Start the server at every Windows logon and restart it when it exits (see "Running it") |
 | `update.bat` | `git pull --ff-only` → `uv sync` → `doctor` (stops if there are uncommitted changes) |
 
 `KATAE_NONINTERACTIVE=1` skips the prompts; `KATAE_NO_BROWSER=1` doesn't open the browser.
@@ -35,8 +36,15 @@ uv run relay serve                  # dashboard http://127.0.0.1:8020
   uv run relay remote off       # this PC only again (the token is kept)
   ```
   - Without a token, non-localhost access is refused. One-off: `KATAE_HOST=0.0.0.0 KATAE_TOKEN=<random> uv run relay serve` (env wins over the file).
-  - Restart the running server to apply a change. On the first remote start, allow Python through Windows Firewall (private network).
-  - Outside your LAN (phone on LTE, another site), go through a VPN such as Tailscale; don't expose the port to the internet.
+  - Restart the running server to apply a change. On the first remote start, allow Python through Windows Firewall.
+- **Over Tailscale (recommended, also from outside your LAN):** install Tailscale on this PC and the other devices, log in with the same account, then
+  ```bash
+  uv run relay remote on --tailscale   # only tailnet addresses (100.64.0.0/10) get in — still with the token
+  ```
+  `relay remote status` then lists the MagicDNS name and Tailscale IP to open (`http://<pc>.<tailnet>.ts.net:8020`). LAN devices and a forwarded port are refused before the token check; `--anywhere` lifts the limit. Don't expose the port to the internet.
+- **Always up (Windows):** `uv run relay autostart on` puts a script in your Startup folder (no admin, no service): at logon it starts a supervisor (`python -m relay_agent.supervise`, minimized window "Agent 카태 - 서버 (자동)") that runs the server and starts it again whenever it exits — a crash (backoff up to 60s) or a restart. `off` removes it; closing the window stops it.
+  - Under the supervisor, the dashboard's restart just exits: the supervisor starts the new code through `uv run`, which also syncs packages (the supervisor itself imports only the standard library, so `uv sync` can replace packages while it runs).
+  - Restart is still accepted only from this PC (`update.bat` does it after pulling).
 - Claude Code on another PC → katae MCP: set `KATAE_URL=http://<server>:8020` and `KATAE_TOKEN`. The conversation summary is **extracted on the PC you're working from** and only the summary is sent. The `workdir` must be a path on the server machine.
 
 Terminal:

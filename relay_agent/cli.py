@@ -12,6 +12,8 @@
     relay providers [--probe]               # AI 별 사용 가능 여부·남은 사용량(Claude 5h/7d %)
     relay import-cc --cwd C:/.../MNYS       # 그 폴더의 최근 Claude Code 대화를 세션으로 가져오기
     relay remote on | off | status          # 다른 기기에서 접속 허용(토큰 자동 생성) / 이 PC 전용 / 주소·토큰 확인
+    relay remote on --tailscale             # Tailscale 로 들어온 기기만 허용 (+ 토큰)
+    relay autostart on | off | status       # Windows 로그온 때 서버 시작, 죽거나 재시작하면 다시 띄움
 """
 
 from __future__ import annotations
@@ -150,6 +152,8 @@ def repo_command(args, cfg) -> str:
 
 LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
 REMOTE_HOST = "0.0.0.0"
+TAILNET = ["100.64.0.0/10", "fd7a:115c:a1e0::/48"]  # the address ranges Tailscale assigns to devices
+TAILSCALE_EXE = Path(r"C:\Program Files\Tailscale\tailscale.exe")
 
 
 def lan_urls(port: int) -> list[str]:
@@ -163,9 +167,31 @@ def lan_urls(port: int) -> list[str]:
     return [f"http://{ip}:{port}" for ip in sorted(ips) if not ip.startswith("127.")]
 
 
-def remote_command(action: str, cfg, local: Path | None = None, new_token: bool = False) -> list[str]:
+def tailscale_info() -> dict:
+    """{"installed", "running", "ips", "dns"} from the Tailscale CLI, when it is installed."""
+    import shutil
+    import subprocess
+
+    exe = shutil.which("tailscale") or (str(TAILSCALE_EXE) if TAILSCALE_EXE.exists() else None)
+    if not exe:
+        return {"installed": False, "running": False, "ips": [], "dns": ""}
+    try:
+        out = subprocess.run([exe, "status", "--json"], capture_output=True, text=True, encoding="utf-8",
+                             errors="replace", timeout=10)
+        data = json.loads(out.stdout)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return {"installed": True, "running": False, "ips": [], "dns": ""}
+    me = data.get("Self") or {}
+    return {"installed": True, "running": data.get("BackendState") == "Running",
+            "ips": [ip for ip in me.get("TailscaleIPs") or [] if ":" not in ip],
+            "dns": (me.get("DNSName") or "").rstrip(".")}
+
+
+def remote_command(action: str, cfg, local: Path | None = None, new_token: bool = False,
+                   tailscale: bool | None = None, ts: dict | None = None) -> list[str]:
     """Turn access from other devices on or off in relay.config.local.yaml; `on` makes a token if there is none.
-    The mode sticks: start.bat and the dashboard restart both start `relay serve`, which reads serve_host."""
+    tailscale=True also limits it to the tailnet, False lifts that limit, None leaves it as it is.
+    The mode sticks: start.bat, autostart and the dashboard restart all start `relay serve`, which reads it."""
     import os
     import secrets
     from urllib.parse import urlparse
@@ -182,23 +208,94 @@ def remote_command(action: str, cfg, local: Path | None = None, new_token: bool 
         if action == "on" and (new_token or not (data.get("auth_token") or os.environ.get("KATAE_TOKEN"))):
             data["auth_token"] = secrets.token_urlsafe(24)
             out.append("새 토큰을 만들었습니다" + (" (이전 토큰은 더 이상 통하지 않습니다)" if new_token else ""))
+        if action == "on" and tailscale is True:
+            data["remote_networks"] = list(TAILNET)
+        elif action == "on" and tailscale is False:
+            data.pop("remote_networks", None)
         local.write_text("# This machine only (git-ignored).\n" + yaml.safe_dump(data, allow_unicode=True, sort_keys=False),
                          encoding="utf-8")
     host = os.environ.get("KATAE_HOST") or data.get("serve_host") or cfg.serve_host
     token = os.environ.get("KATAE_TOKEN") or data.get("auth_token") or ""
+    networks = data.get("remote_networks", cfg.remote_networks)
+    only_tailnet = bool(networks) and set(networks) <= set(TAILNET)
     port = urlparse(cfg.server_url).port or 8020
     if host in LOOPBACK_HOSTS:
         out.append(f"원격 접속: 꺼짐 (이 PC 에서만 http://127.0.0.1:{port})")
     else:
-        out.append(f"원격 접속: 켜짐 (serve_host {host})")
-        out += [f"  접속 주소: {u}" for u in lan_urls(port)] or ["  접속 주소: 이 PC 의 IP 를 확인하세요 (ipconfig)"]
+        scope = "Tailscale 전용" if only_tailnet else (f"허용 네트워크 {', '.join(networks)}" if networks else "토큰이 있으면 어느 네트워크든")
+        out.append(f"원격 접속: 켜짐 ({scope})")
+        ts = tailscale_info() if ts is None else ts
+        if ts["running"]:
+            urls = ([f"http://{ts['dns']}:{port}"] if ts["dns"] else []) + [f"http://{ip}:{port}" for ip in ts["ips"]]
+            out += [f"  Tailscale 주소: {u}" for u in urls]
+        elif ts["installed"]:
+            out.append("  Tailscale: 설치됐지만 연결 안 됨 — 트레이의 Tailscale 에서 로그인/Connect")
+        else:
+            out.append("  Tailscale: 설치 안 됨 — https://tailscale.com/download 에서 이 PC 와 접속할 기기 모두에 설치·같은 계정 로그인")
+        if not only_tailnet:
+            out += [f"  같은 공유기 주소: {u}" for u in lan_urls(port) if not u.startswith("http://100.")]
         out.append(f"  토큰: {token or '(없음 — relay remote on 으로 만드세요)'}   ← 대시보드가 처음 한 번 묻습니다")
-        out.append("  다른 PC 의 katae MCP: KATAE_URL=<위 접속 주소>  KATAE_TOKEN=<토큰>")
-        out.append("  첫 실행 때 Windows 방화벽 창이 뜨면 '개인 네트워크' 허용을 누르세요.")
-        out.append("  같은 공유기 밖(LTE 등)에서는 Tailscale 같은 VPN 을 거쳐 접속하세요 (포트를 인터넷에 직접 열지 마세요).")
+        out.append("  다른 PC 의 katae MCP: KATAE_URL=<위 주소>  KATAE_TOKEN=<토큰>")
+        out.append("  첫 실행 때 Windows 방화벽 창이 뜨면 허용을 누르세요 (포트를 인터넷에 직접 열지 마세요).")
     if action in ("on", "off"):
         out.append("실행 중인 서버에는 재시작해야 적용됩니다: 대시보드의 '서버 재시작' 또는 start.bat 을 다시 실행")
     return out
+
+
+AUTOSTART_NAME = "Agent Katae Server.cmd"
+
+
+def startup_folder() -> Path:
+    import os
+
+    return Path(os.environ.get("APPDATA", "")) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
+
+
+def autostart_script(uv: str, port: int) -> str:
+    from .config import ROOT
+
+    return "\r\n".join([
+        "@echo off",
+        "chcp 65001 >nul",
+        "rem Agent 카태: 로그온 때 서버를 띄우고, 죽으면 다시 띄운다. 만든 명령: relay autostart on  / 끄기: relay autostart off",
+        f'cd /d "{ROOT}"',
+        f'start "Agent 카태 - 서버 (자동)" /min "{uv}" run python -m relay_agent.supervise {port}',
+        "",
+    ])
+
+
+def autostart_command(action: str, port: int = 8020, folder: Path | None = None, start_now: bool = True) -> list[str]:
+    """Windows: a script in the user's Startup folder runs the supervisor at logon (no admin, no system change)."""
+    import os
+    import shutil
+    import subprocess
+
+    from .supervise import port_busy
+
+    if folder is None and os.name != "nt":
+        return ["자동 시작 등록은 Windows 용입니다. 다른 OS 는 systemd/launchd 에 "
+                f"`uv run python -m relay_agent.supervise {port}` 를 등록하세요."]
+    script = (folder or startup_folder()) / AUTOSTART_NAME
+    if action == "on":
+        uv = shutil.which("uv")
+        if not uv:
+            return ["uv 를 찾을 수 없습니다. setup.bat 을 먼저 실행하세요."]
+        script.parent.mkdir(parents=True, exist_ok=True)
+        script.write_bytes(autostart_script(uv, port).encode("utf-8"))
+        out = [f"자동 시작 켜짐: 로그온하면 서버(포트 {port})가 뜨고, 죽거나 재시작하면 다시 뜹니다", f"  등록 파일: {script}"]
+        if start_now and not port_busy(port):
+            subprocess.Popen(["cmd", "/c", str(script)])
+            out.append("  지금 바로 시작했습니다 (작업 표시줄의 'Agent 카태 - 서버 (자동)' 창)")
+        elif port_busy(port):
+            out.append("  서버가 이미 떠 있어 지금은 시작하지 않았습니다 — 그 창을 닫으면 다음 로그온부터 자동으로 뜹니다")
+        return out
+    if action == "off":
+        existed = script.exists()
+        script.unlink(missing_ok=True)
+        return ["자동 시작 꺼짐" if existed else "자동 시작이 등록돼 있지 않습니다",
+                "  지금 떠 있는 서버는 'Agent 카태 - 서버 (자동)' 창을 닫으면 멈춥니다"]
+    return [f"자동 시작: {'켜짐' if script.exists() else '꺼짐'} ({script})",
+            f"서버(포트 {port}): {'실행 중' if port_busy(port) else '꺼짐'}"]
 
 
 def doctor(cfg) -> int:
@@ -234,6 +331,9 @@ def doctor(cfg) -> int:
     remote = cfg.serve_host not in LOOPBACK_HOSTS
     line(not remote or bool(cfg.auth_token), f"serve_host: {cfg.serve_host} ({'원격 접속 켜짐' if remote else '이 PC 전용'})",
          "원격 접속에는 토큰이 필요합니다: relay remote on")
+    if remote:
+        print(f"➖ 원격 허용 네트워크: {', '.join(cfg.remote_networks) or '제한 없음 (토큰만)'}"
+              + ("  — Tailscale 전용으로: relay remote on --tailscale" if not cfg.remote_networks else ""))
     from .repos import RepoRegistry
 
     for repo in RepoRegistry(cfg.repos).repos.values():
@@ -308,6 +408,15 @@ def main() -> None:
     p_remote = sub.add_parser("remote", help="access from other devices: on (makes a token) | off | status")
     p_remote.add_argument("action", nargs="?", choices=["on", "off", "status"], default="status")
     p_remote.add_argument("--new-token", action="store_true", help="on: replace the token (old one stops working)")
+    scope = p_remote.add_mutually_exclusive_group()
+    scope.add_argument("--tailscale", dest="tailscale", action="store_const", const=True, default=None,
+                       help="on: accept other devices only over Tailscale (plus the token)")
+    scope.add_argument("--anywhere", dest="tailscale", action="store_const", const=False,
+                       help="on: lift the Tailscale-only limit (any network with the token)")
+    p_auto = sub.add_parser("autostart", help="Windows: start the server at logon and restart it when it exits")
+    p_auto.add_argument("action", nargs="?", choices=["on", "off", "status"], default="status")
+    p_auto.add_argument("--port", type=int, default=8020)
+    p_auto.add_argument("--no-start", action="store_true", help="on: only register, don't start it now")
     sub.add_parser("doctor", help="check this machine: git, claude login, providers, config paths")
     sub.add_parser("disk", help="where the disk space goes (snapshots, working copies, patches)")
     p_clean = sub.add_parser("cleanup", help="delete decided/expired workspaces (result.patch is kept)")
@@ -328,7 +437,10 @@ def main() -> None:
         uvicorn.run("relay_agent.server:app", host=host, port=args.port)
         return
     if args.cmd == "remote":
-        print("\n".join(remote_command(args.action, cfg, new_token=args.new_token)))
+        print("\n".join(remote_command(args.action, cfg, new_token=args.new_token, tailscale=args.tailscale)))
+        return
+    if args.cmd == "autostart":
+        print("\n".join(autostart_command(args.action, args.port, start_now=not args.no_start)))
         return
     if args.cmd == "doctor":
         sys.exit(doctor(cfg))
