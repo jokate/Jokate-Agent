@@ -268,9 +268,9 @@ Switching rules (per stage, in order: primary → `alternates` → `fallback_cha
 | quick-fable | Single Fable stage | Small but hard problems |
 | default | scout Haiku → plan **Fable** (approval) → build Sonnet (**Fable on send-back**) → review Sonnet | Large or risky jobs |
 | docs-qa | Single Sonnet(low) stage + docs-read MCP | Document questions |
-| **game-cycle** | design **Fable** (game spec) → build Sonnet (scripts + scene through the engine MCP; **Fable on send-back**) → playtest Sonnet(low) (compile errors, scene wiring, play mode; up to 2 send-backs) | Making a game or a feature of one (Unity/Unreal with an MCP) |
+| **game-cycle** | design **Fable** (game spec) → build Sonnet (code + scene, via the project's editor MCP if any; **Fable on send-back**) → playtest Sonnet(low) (build errors, wiring, a short run; up to 2 send-backs) | Making a game or a feature of one (any engine or framework) |
 
-**game-cycle** relies on the target folder: its `CLAUDE.md` (folder layout, game patterns, how to verify) and `.mcp.json` (e.g. `unity-mcp`) are attached automatically, and the engine MCP forces `inplace`. Keep the editor open on the project so the MCP can build scenes; without it the build stage stops at scripts and lists the editor work left. Things only a person can judge (feel, difficulty) come back as user checks.
+**game-cycle** knows no engine: the target folder's `CLAUDE.md` (layout, patterns, how to verify), skills and `.mcp.json` (e.g. `unity-mcp`, `unreal`) are attached automatically and decide the tools and checks. An editor MCP forces `inplace`; keep the editor open so it can build scenes — without it the build stage stops at what files allow and lists the editor work left. Things only a person can judge (feel, difficulty) come back as user checks.
 
 ## Token savings — measurements (real calls, same task)
 | Change | Before → after |
