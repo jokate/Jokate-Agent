@@ -126,6 +126,17 @@ def test_shipped_relays_apply_immediately():
     import yaml
 
     root = Path(__file__).resolve().parent.parent / "relays"
-    for name in ("default", "quick", "quick-fable"):
+    for name in ("default", "quick", "quick-fable", "game-cycle"):
         data = yaml.safe_load((root / f"{name}.yaml").read_text(encoding="utf-8"))
         assert data["workspace"] == "inplace" and data["auto_apply"] is True
+
+
+def test_game_cycle_relay_sends_playtest_failures_back_to_build():
+    from relay_agent.pipeline import RelaySpec
+
+    root = Path(__file__).resolve().parent.parent / "relays"
+    spec, base = RelaySpec.load(root / "game-cycle.yaml")
+    stages = {s.name: s for s in spec.stages}
+    assert list(stages) == ["design", "build", "playtest"]
+    assert stages["playtest"].on_retry == "build" and not stages["playtest"].writes and stages["build"].writes
+    assert all((base / s.prompt).is_file() for s in spec.stages)

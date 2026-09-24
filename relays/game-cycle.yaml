@@ -1,0 +1,54 @@
+name: game-cycle
+description: 게임 제작 사이클 — 기획(사양) → 구현(스크립트 + Unity MCP 로 씬 구성) → 플레이 검증, 문제가 있으면 구현으로 되돌림 · 원본에 즉시 반영, 되돌리기 가능
+workspace: inplace        # 엔진 MCP 가 실제 프로젝트를 바꾸므로 원본에서 작업 (바뀐 파일만 기록 · 되돌리기 가능)
+auto_apply: true
+max_run_cost_usd: 4.0    # 씬 구성까지 하므로 quick/default 보다 넉넉하게 — 넘으면 승인 대기(실패 아님)
+
+# 대상 폴더의 CLAUDE.md(구조·규칙·검증 방법)와 .mcp.json(unity-mcp 등)이 자동으로 붙는다.
+# 엔진 MCP 도구는 ToolSearch 로 필요할 때만 불러오므로 도구 목록 비용은 이름 목록 정도다.
+stages:
+  - name: design
+    provider: claude
+    model: fable
+    fallback_model: opus
+    effort: medium
+    alternates: [{provider: codex}, {provider: opencode}, {provider: gemini}]
+    prompt: ../prompts/game-design.md
+    tools: [Read, Grep, Glob]
+    mcp: [digest]
+    system_mode: replace
+    gate: human                # 규칙이 목표에서 정해지지 않았을 때만 멈춘다(approval: ai/auto)
+    max_budget_usd: 1.0
+
+  - name: build
+    provider: claude
+    model: sonnet
+    effort: medium
+    retry_model: fable
+    retry_effort: high
+    fallback_model: opus
+    alternates: [{provider: codex}, {provider: opencode}, {provider: gemini}]
+    prompt: ../prompts/game-build.md
+    tools: [Read, Edit, Write, Bash]
+    mcp: [digest]
+    allowed_tools: ["Bash(git diff:*)", "Bash(git status:*)"]
+    bash: always               # 검증 명령이 없는 Unity 프로젝트에서도 git diff/status 로 바뀐 파일을 확인한다
+    permission_mode: acceptEdits
+    system_mode: replace
+    reads_outputs: [design, playtest]
+    max_budget_usd: 2.0
+    timeout_s: 2400            # 씬 구성은 MCP 왕복이 많다
+
+  - name: playtest
+    provider: claude
+    model: sonnet
+    effort: low
+    alternates: [{provider: codex}, {provider: opencode}, {provider: gemini}]
+    prompt: ../prompts/game-playtest.md
+    tools: [Read, Grep, Glob]
+    mcp: [digest]
+    system_mode: replace
+    reads_outputs: [design, build]
+    on_retry: build
+    max_retries: 2
+    max_budget_usd: 0.6

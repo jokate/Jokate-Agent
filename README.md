@@ -143,7 +143,7 @@ uv run relay repo clone mnys --url <git url>          # on a new machine: clone 
 | Build result | Hit the $1.0 budget with nothing written | Done, $0.45 |
 
   - Summarizer call savings (same document): $0.018 → $0.0067 by using a neutral folder + `--safe-mode` + no thinking.
-- All stages of the shipped relays (default, quick, quick-fable) have `mcp: [digest]`. The cost appears separately as `<stage>:digest` in the token watch.
+- All stages of the shipped relays (default, quick, quick-fable, game-cycle) have `mcp: [digest]`. The cost appears separately as `<stage>:digest` in the token watch.
 
 ## Cutting usage (input tokens themselves) — measured
 Subscription usage also counts tokens re-read on every turn, so the goal is to cut **total input**, not the bill.
@@ -268,6 +268,9 @@ Switching rules (per stage, in order: primary → `alternates` → `fallback_cha
 | quick-fable | Single Fable stage | Small but hard problems |
 | default | scout Haiku → plan **Fable** (approval) → build Sonnet (**Fable on send-back**) → review Sonnet | Large or risky jobs |
 | docs-qa | Single Sonnet(low) stage + docs-read MCP | Document questions |
+| **game-cycle** | design **Fable** (game spec) → build Sonnet (scripts + scene through the engine MCP; **Fable on send-back**) → playtest Sonnet(low) (compile errors, scene wiring, play mode; up to 2 send-backs) | Making a game or a feature of one (Unity/Unreal with an MCP) |
+
+**game-cycle** relies on the target folder: its `CLAUDE.md` (folder layout, game patterns, how to verify) and `.mcp.json` (e.g. `unity-mcp`) are attached automatically, and the engine MCP forces `inplace`. Keep the editor open on the project so the MCP can build scenes; without it the build stage stops at scripts and lists the editor work left. Things only a person can judge (feel, difficulty) come back as user checks.
 
 ## Token savings — measurements (real calls, same task)
 | Change | Before → after |
@@ -289,7 +292,7 @@ Deliberately not applied: `--bare` (needs an API key), `--resume` between stages
 
 ## Structure
 `relay_agent/`: `baton.py` baton · `pipeline.py` engine · `runners.py` claude_cli/api/mock · `history.py` sessions, questions, events · `usage.py` token/cost log · `server.py` API · `dashboard.html` UI · `cli.py`
-`mcp_servers/`: `docs_read.py`, `handoff.py` · `relays/`: default, quick, docs-qa, demo (mock, free) · `prompts/`: stage role prompts
+`mcp_servers/`: `docs_read.py`, `handoff.py` · `relays/`: default, quick, docs-qa, game-cycle, demo (mock, free) · `prompts/`: stage role prompts
 
 ## Roadmap
 1. Real-call verification of the Codex / Gemini presets (after install), OpenCode login and a real run
