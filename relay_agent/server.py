@@ -98,7 +98,7 @@ async def guard(request: Request, call_next):
         if not cfg.auth_token:
             return JSONResponse({"detail": "원격 접근은 auth_token(또는 KATAE_TOKEN) 설정이 필요합니다"}, 403)
         if not hmac.compare_digest(supplied.encode(), cfg.auth_token.encode()):
-            return JSONResponse({"detail": "인증 토큰이 필요합니다"}, 401)
+            return JSONResponse({"detail": "토큰이 맞지 않습니다 (대소문자 구분)" if supplied else "인증 토큰이 필요합니다"}, 401)
     return await call_next(request)
 
 

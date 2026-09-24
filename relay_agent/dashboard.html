@@ -456,16 +456,47 @@ const fmtN = (n) => n >= 1e6 ? (n / 1e6).toFixed(2) + "M" : n >= 1e3 ? (n / 1e3)
 const fmt$ = (n) => "$" + (n ?? 0).toFixed(n >= 1 ? 2 : 4);
 let TOKEN = "";
 try { TOKEN = localStorage.getItem("katae-token") || ""; } catch {}
+/* One token dialog for every request that got 401 at once (the page fires several polls together), with an
+   input phones don't auto-capitalize or auto-correct — prompt() did both to the mixed-case token. */
+let tokenAsk = null;
+function askToken(message) {
+  if (tokenAsk) return tokenAsk;
+  tokenAsk = new Promise((resolve) => {
+    const bg = document.createElement("div");
+    bg.className = "modal-bg";
+    // on a phone the page can be wider than the screen: size and place the dialog by what is actually visible
+    const vw = Math.round(window.visualViewport?.width || window.innerWidth), w = Math.min(440, vw - 32);
+    bg.style.cssText = "place-items:start;padding:15vh 0 0";
+    bg.innerHTML = `<form class="glass modal" style="width:${w}px;margin-left:${Math.round((vw - w) / 2)}px">
+      <h3>접근 토큰</h3><p class="hint">${esc(message)}</p>
+      <input class="field" name="t" type="password" autocomplete="off" autocapitalize="none" autocorrect="off"
+        spellcheck="false" placeholder="서버 PC 에서: uv run relay remote status" style="width:100%;margin:10px 0">
+      <label class="hint"><input type="checkbox" name="show"> 입력한 토큰 보기</label>
+      <div class="row" style="margin-top:12px"><button class="btn btn-primary">확인</button>
+        <button type="button" class="btn btn-ghost" name="cancel">취소</button></div></form>`;
+    document.body.append(bg);
+    const form = bg.querySelector("form"), input = form.t;
+    const done = (value) => { bg.remove(); resolve(value); };
+    form.show.onchange = () => { input.type = form.show.checked ? "text" : "password"; };
+    form.cancel.onclick = () => done("");
+    form.onsubmit = (ev) => { ev.preventDefault(); done(input.value.replace(/\s+/g, "")); };  // pasted line breaks too
+    input.focus();
+  }).finally(() => { tokenAsk = null; });
+  return tokenAsk;
+}
 async function api(path, opts = {}, retried = false) {
   const headers = { "Content-Type": "application/json", ...(TOKEN ? { Authorization: `Bearer ${TOKEN}` } : {}) };
   const res = await fetch(path, { ...opts, headers });
-  if ((res.status === 401 || res.status === 403) && !retried) {
-    const entered = prompt("Agent 카태 접근 토큰 (서버의 auth_token / KATAE_TOKEN)");
+  // 401 only: a 403 (e.g. outside the allowed network, or a folder not registered) is not fixed by a token
+  if (res.status === 401 && !retried) {
+    const sent = TOKEN;
+    const entered = await askToken(sent ? "저장된 토큰이 서버의 토큰과 다릅니다. 다시 입력하세요 (대소문자 구분)"
+                                        : "다른 기기에서 접속하려면 서버의 토큰이 필요합니다");
     if (entered) {
-      TOKEN = entered.trim();
+      TOKEN = entered;
       try { localStorage.setItem("katae-token", TOKEN); } catch {}
-      return api(path, opts, true);
     }
+    if (TOKEN && TOKEN !== sent) return api(path, opts, true);  // requests that waited on the same dialog retry too
   }
   if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || res.statusText);
   return (res.headers.get("content-type") || "").includes("json") ? res.json() : res.text();
