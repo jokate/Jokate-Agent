@@ -36,15 +36,62 @@ def test_copy_mode_returns_patch_and_applies(tmp_path):
     assert not ws.copy_dir.exists() and ws.patch_path.exists()
 
 
-def test_copy_mode_apply_refuses_when_original_changed(tmp_path):
+def test_copy_mode_apply_refuses_when_original_changed_the_same_lines(tmp_path):
     src = make_project(tmp_path)
     ws = Workspace(tmp_path / "run", src, "copy")
     ws.prepare()
     (ws.path / "README.md").write_text("# agent\n", encoding="utf-8")
+    (ws.path / "app" / "main.py").write_text("print('hello')\n", encoding="utf-8")
     (src / "README.md").write_text("# me meanwhile\n", encoding="utf-8")
-    with pytest.raises(WorkspaceError, match="스냅샷 이후"):
+    with pytest.raises(WorkspaceError, match="스냅샷 이후.*README.md"):
         ws.apply()
+    # all or nothing: the non-conflicting file is not applied either, and the work is kept for a decision
     assert src.joinpath("README.md").read_text(encoding="utf-8") == "# me meanwhile\n"
+    assert src.joinpath("app", "main.py").read_text(encoding="utf-8") == "print('hi')\n"
+    assert ws.copy_dir.exists() and ws.prepared
+
+
+LINES = "".join(f"line {i}\n" for i in range(1, 21))
+
+
+def test_copy_mode_apply_merges_when_original_changed_elsewhere(tmp_path):
+    src = make_project(tmp_path)
+    (src / "app" / "game.py").write_text(LINES, encoding="utf-8")
+    (src / "logo.png").write_bytes(b"\x89PNG" + b"\x00" * 32)
+    ws = Workspace(tmp_path / "run", src, "copy")
+    ws.prepare()
+    # the AI: edits line 10 of game.py, adds a file, deletes README
+    (ws.path / "app" / "game.py").write_text(LINES.replace("line 10\n", "line 10 (ai)\n"), encoding="utf-8")
+    (ws.path / "app" / "enemy.py").write_text("hp = 3\n", encoding="utf-8")
+    (ws.path / "README.md").unlink()
+    # the user, meanwhile: line 12 of the same file (inside the patch's context, so a plain apply fails),
+    # another file, a binary and a new file
+    (src / "app" / "game.py").write_text(LINES.replace("line 12\n", "line 12 (me)\n"), encoding="utf-8")
+    (src / "app" / "main.py").write_text("print('me')\n", encoding="utf-8")
+    (src / "logo.png").write_bytes(b"\x89PNG" + b"\x01" * 40)
+    (src / "notes.txt").write_text("todo\n", encoding="utf-8")
+
+    applied = ws.apply()
+
+    assert Path(applied).name == "merged.patch"
+    game = src.joinpath("app", "game.py").read_text(encoding="utf-8")
+    assert game == LINES.replace("line 10\n", "line 10 (ai)\n").replace("line 12\n", "line 12 (me)\n")
+    assert src.joinpath("app", "enemy.py").read_text(encoding="utf-8") == "hp = 3\n"
+    assert not src.joinpath("README.md").exists()
+    assert src.joinpath("app", "main.py").read_text(encoding="utf-8") == "print('me')\n"
+    assert src.joinpath("logo.png").read_bytes() == b"\x89PNG" + b"\x01" * 40
+    assert src.joinpath("notes.txt").read_text(encoding="utf-8") == "todo\n"
+    assert not ws.copy_dir.exists() and ws.patch_path.exists()
+
+
+def test_copy_mode_apply_when_original_already_has_the_change(tmp_path):
+    src = make_project(tmp_path)
+    ws = Workspace(tmp_path / "run", src, "copy")
+    ws.prepare()
+    (ws.path / "README.md").write_text("# same\n", encoding="utf-8")
+    (src / "README.md").write_text("# same\n", encoding="utf-8")
+    assert Path(ws.apply()).name == "merged.patch"
+    assert src.joinpath("README.md").read_text(encoding="utf-8") == "# same\n"
 
 
 def test_inplace_mode_rollback_restores_and_removes_new_files(tmp_path):

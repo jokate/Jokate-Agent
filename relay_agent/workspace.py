@@ -90,18 +90,22 @@ class Workspace:
         """Where stages run."""
         return self.copy_dir if self.mode == "copy" else self.source
 
-    def _run(self, work_tree: Path, *args: str, input_bytes: bytes | None = None) -> bytes:
-        env = {**os.environ, "GIT_INDEX_FILE": str(self.index_file)}  # per-run index on a shared store
-        proc = subprocess.run(
+    def _proc(self, work_tree: Path, *args: str, input_bytes: bytes | None = None,
+              index: Path | None = None) -> subprocess.CompletedProcess:
+        env = {**os.environ, "GIT_INDEX_FILE": str(index or self.index_file)}  # per-run index on a shared store
+        return subprocess.run(
             ["git", *IDENTITY, f"--git-dir={self.git_dir}", f"--work-tree={work_tree}", *args],
             capture_output=True, cwd=work_tree, env=env, input=input_bytes,
         )
+
+    def _run(self, work_tree: Path, *args: str, input_bytes: bytes | None = None, index: Path | None = None) -> bytes:
+        proc = self._proc(work_tree, *args, input_bytes=input_bytes, index=index)
         if proc.returncode != 0:
             raise WorkspaceError(f"git {' '.join(args[:2])} failed: {proc.stderr.decode('utf-8', 'replace')[-400:]}")
         return proc.stdout
 
-    def _git(self, work_tree: Path, *args: str) -> str:
-        return self._run(work_tree, *args).decode("utf-8", "replace")
+    def _git(self, work_tree: Path, *args: str, index: Path | None = None) -> str:
+        return self._run(work_tree, *args, index=index).decode("utf-8", "replace")
 
     def _excluded(self, rel: str) -> bool:
         parts = rel.split("/")
@@ -113,7 +117,8 @@ class Workspace:
                 return True
         return False
 
-    def _candidates(self, work_tree: Path, extra: set[str] = frozenset()) -> tuple[list[str], list[tuple[str, int]], int]:
+    def _candidates(self, work_tree: Path, extra: set[str] = frozenset(),
+                    index: Path | None = None) -> tuple[list[str], list[tuple[str, int]], int]:
         """Files to snapshot: tracked-in-index + untracked (respecting .gitignore unless include_ignored),
         minus excludes and oversized files. Returns (paths, skipped_big, total_bytes)."""
         args = ["ls-files", "-z", "--cached", "--others"]
@@ -121,7 +126,7 @@ class Workspace:
             args.append("--exclude-standard")
         dir_excludes = [e for e in self.excludes if "*" not in e]
         args += ["--", "."] + [f":(exclude,glob)**/{e}/**" for e in dir_excludes]
-        listed = {p for p in self._git(work_tree, *args).split("\0") if p} | set(extra)
+        listed = {p for p in self._git(work_tree, *args, index=index).split("\0") if p} | set(extra)
         paths, skipped, total = [], [], 0
         limit = self.max_file_mb * 1_048_576
         for rel in sorted(listed):
@@ -136,12 +141,12 @@ class Workspace:
             paths.append(rel)
         return paths, skipped, total
 
-    def _stage(self, work_tree: Path, paths: list[str]) -> None:
+    def _stage(self, work_tree: Path, paths: list[str], index: Path | None = None) -> None:
         if not paths:
             return
         # -A with an explicit list also records deletions of listed paths that no longer exist
         self._run(work_tree, "add", "-A", "-f", "--pathspec-from-file=-", "--pathspec-file-nul",
-                  input_bytes="\0".join(paths).encode("utf-8"))
+                  input_bytes="\0".join(paths).encode("utf-8"), index=index)
 
     # --- lifecycle -----------------------------------------------------------------
     @property
@@ -234,26 +239,74 @@ class Workspace:
         return {"files": files, "insertions": ins, "deletions": dels, "stat": stat_text.strip()}
 
     def apply(self) -> str:
-        """copy mode: apply result.patch to the original folder (checked first, nothing half-applied)."""
+        """copy mode: apply the work to the original folder, all or nothing. Returns the patch that was applied:
+        result.patch when the original is as snapshotted, else merged.patch — a three-way merge of the work
+        onto the original as it is now, so edits made meanwhile (even in the same file) are kept. Only
+        overlapping edits stop it, naming the files."""
         if self.mode != "copy":
             raise WorkspaceError("apply is for copy mode; inplace changes are already in the folder")
-        if self.prepared and self.copy_dir.is_dir():
+        mergeable = self.prepared and self.copy_dir.is_dir()
+        if mergeable:
             self.collect()
         if not self.patch_path.exists() or not self.patch_path.read_bytes().strip():
             raise WorkspaceError("적용할 패치가 없습니다")
+        applied = self.patch_path
+        error = self._apply_to_source(self.patch_path)
+        if error is not None:
+            if not mergeable:  # workspace already cleaned: only the patch is left, nothing to merge from
+                raise WorkspaceError("원본 폴더가 스냅샷 이후 바뀌어 패치가 그대로 적용되지 않습니다: " + error[-300:])
+            applied = self._merge_onto_source()
+        self.cleanup()
+        return str(applied)
+
+    def _apply_to_source(self, patch: Path) -> str | None:
+        """Apply a patch to the original folder if it applies cleanly; otherwise touch nothing and return why."""
         with tempfile.TemporaryDirectory(prefix="katae-apply-") as tmp:
             # a throwaway repo so patch paths are relative to the target folder, whatever git it lives in
             git_dir = Path(tmp) / "g.git"
             subprocess.run(["git", "init", "--bare", "-q", str(git_dir)], check=True, capture_output=True)
             base = ["git", *IDENTITY, f"--git-dir={git_dir}", f"--work-tree={self.source}", "apply", "--whitespace=nowarn"]
-            check = subprocess.run([*base, "--check", str(self.patch_path)], cwd=self.source, capture_output=True,
+            check = subprocess.run([*base, "--check", str(patch)], cwd=self.source, capture_output=True,
                                    text=True, encoding="utf-8", errors="replace")
             if check.returncode != 0:
-                raise WorkspaceError("원본 폴더가 스냅샷 이후 바뀌어 패치가 그대로 적용되지 않습니다: "
-                                     + check.stderr.strip()[-300:])
-            subprocess.run([*base, str(self.patch_path)], cwd=self.source, check=True, capture_output=True)
-        self.cleanup()
-        return str(self.patch_path)
+                return check.stderr.strip()
+            subprocess.run([*base, str(patch)], cwd=self.source, check=True, capture_output=True)
+        return None
+
+    def _merge_onto_source(self) -> Path:
+        """Three-way merge (snapshot = base, original now = ours, workspace = theirs) in the shared store,
+        then apply the difference between the original now and the merge result. Writes merged.patch."""
+        base = self.snapshot
+        current_index = self.run_dir / "current.index"
+        merged_patch = self.run_dir / "merged.patch"
+        try:
+            # the original as it is now, with the same file selection the snapshot used
+            self._git(self.source, "read-tree", base, index=current_index)
+            paths, _skipped, _total = self._candidates(self.source, index=current_index)
+            self._stage(self.source, paths, index=current_index)
+            current_tree = self._git(self.source, "write-tree", index=current_index).strip()
+        finally:
+            _remove(current_index)
+        work_tree = self._git(self.copy_dir, "write-tree").strip()  # collect() left the workspace in the run index
+        ours = self._git(self.source, "commit-tree", current_tree, "-p", base, "-m", "original now").strip()
+        theirs = self._git(self.source, "commit-tree", work_tree, "-p", base, "-m", f"work {self.run_dir.name}").strip()
+        proc = self._proc(self.source, "merge-tree", "--write-tree", "--name-only", "--no-messages", ours, theirs)
+        out = proc.stdout.decode("utf-8", "replace").splitlines()
+        if proc.returncode == 1:
+            conflicts = sorted({line for line in out[1:] if line})
+            raise WorkspaceError(
+                f"원본 폴더가 스냅샷 이후 AI 작업과 같은 곳이 바뀌어 자동으로 합칠 수 없습니다 ({len(conflicts)}개 파일): "
+                + ", ".join(conflicts[:10]) + " — 원본의 그 부분을 정리한 뒤 다시 적용하거나, 변경을 버리고 다시 실행하세요")
+        if proc.returncode != 0 or not out:
+            raise WorkspaceError("원본 폴더가 스냅샷 이후 바뀌었고, 자동 병합에는 git 2.38 이상이 필요합니다: "
+                                 + proc.stderr.decode("utf-8", "replace").strip()[-300:])
+        merged_patch.write_bytes(self._run(self.source, "diff", "--binary", current_tree, out[0].strip()))
+        if not merged_patch.read_bytes().strip():
+            return merged_patch  # the original already has every change
+        error = self._apply_to_source(merged_patch)
+        if error is not None:  # the original changed again while merging
+            raise WorkspaceError("병합 중에 원본 폴더가 또 바뀌었습니다. 다시 적용해 보세요: " + error[-300:])
+        return merged_patch
 
     def discard(self) -> None:
         """copy mode: drop the workspace; the patch file is kept for reference."""
@@ -289,7 +342,7 @@ class Workspace:
                 self._git(self.run_dir, "update-ref", "-d", self.ref)
             except WorkspaceError:
                 pass
-        for p in (self.copy_dir, self.index_file, self.marker, self.run_dir / "shadow.git"):
+        for p in (self.copy_dir, self.index_file, self.run_dir / "current.index", self.marker, self.run_dir / "shadow.git"):
             _remove(p)  # shadow.git: per-run store from older versions
         return freed
 

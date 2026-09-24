@@ -828,9 +828,10 @@ class RelayEngine:
             raise ValueError(f"다른 실행({holder})이 이 폴더를 원본에서 수정 중입니다. 끝난 뒤 다시 시도하세요")
         if run.changes_status in ("applied", "discarded", "rolled_back"):
             raise ValueError(f"changes already {run.changes_status}")
+        merged = False
         try:
             if action == "apply":
-                ws.apply()
+                merged = Path(ws.apply()).name == "merged.patch"  # the original had moved on: merged onto it
                 run.changes_status = "applied"
             elif action == "discard":
                 ws.discard()
@@ -841,7 +842,8 @@ class RelayEngine:
         except WorkspaceError as e:
             raise ValueError(str(e)) from e
         run.workspace_cleaned = True
-        self._event(run, "-", f"changes_{run.changes_status}", files=(run.changes or {}).get("files", 0))
+        self._event(run, "-", f"changes_{run.changes_status}", files=(run.changes or {}).get("files", 0),
+                    **({"merged_with_original": True} if merged else {}))
         self.save(run)
         gc_shadow(self.runs_dir / "shadow")
         return run
@@ -1485,11 +1487,12 @@ class RelayEngine:
         self._write_done_handoff(run)
         if ws is not None and run.workspace_mode == "copy" and run.auto_apply and run.changes_status == "ready":
             try:
-                ws.apply()
+                merged = Path(ws.apply()).name == "merged.patch"
                 run.changes_status, run.workspace_cleaned = "applied", True
-                self._event(run, "-", "changes_auto_applied", files=(run.changes or {}).get("files", 0))
+                self._event(run, "-", "changes_auto_applied", files=(run.changes or {}).get("files", 0),
+                            **({"merged_with_original": True} if merged else {}))
             except (WorkspaceError, OSError) as e:
-                # the original moved on meanwhile: keep the patch for a manual decision instead of forcing it
+                # the original and the work changed the same lines: keep the patch for a manual decision
                 self._event(run, "-", "auto_apply_failed", error=str(e)[:300])
         if ws is not None and run.changes_status == "none" and not run.workspace_cleaned:
             try:
