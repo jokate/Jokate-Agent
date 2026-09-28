@@ -101,6 +101,17 @@ class RouterSpec(BaseModel):
     fallback: str = "quick"  # when no AI can route or the answer names no candidate
 
 
+class CampaignSpec(BaseModel):
+    """A relay with `campaign:` has no stages of its own: it plans tasks, then runs one relay per task until
+    all are done (see campaign.py)."""
+    planner: str = "campaign-plan"  # relay that splits the request into tasks (its next_steps)
+    task_relay: str = "auto"        # relay for each task
+    max_tasks: int = 20
+    max_followups: int = 2          # extra "finish it" tasks when a task ends with open issues
+    max_cost_usd: float = 30.0      # the campaign pauses here (all its runs together)
+    max_attempts: int = 2           # runs of one failing task (the second resumes the first) before pausing
+
+
 class RelaySpec(BaseModel):
     name: str
     description: str = ""
@@ -108,13 +119,15 @@ class RelaySpec(BaseModel):
     auto_apply: bool = False  # copy mode: apply the patch to the original as soon as the run finishes
     max_run_cost_usd: float | None = Field(None, description="pause for approval once a run spends this much")
     router: RouterSpec | None = None
+    campaign: CampaignSpec | None = None
+    hidden: bool = False  # used by other relays (e.g. the campaign planner): not listed, never auto-picked
     stages: list[StageSpec] = Field(default_factory=list)
 
     @classmethod
     def load(cls, path: Path) -> tuple["RelaySpec", Path]:
         spec = cls.model_validate(yaml.safe_load(path.read_text(encoding="utf-8")))
-        if not spec.stages and spec.router is None:
-            raise ValueError(f"{path.name}: stages 또는 router 가 필요합니다")
+        if not spec.stages and spec.router is None and spec.campaign is None:
+            raise ValueError(f"{path.name}: stages, router 또는 campaign 이 필요합니다")
         names = [s.name for s in spec.stages]
         for s in spec.stages:
             if s.on_retry and s.on_retry not in names[: names.index(s.name)]:
@@ -437,6 +450,8 @@ class RelayEngine:
         """Start a run as a new turn. Without session_id a new session is opened.
         With a registered repo, its path, default workspace mode, verify commands and notes apply."""
         spec, _ = RelaySpec.load(relay_path)
+        if spec.campaign is not None:
+            raise ValueError(f"{spec.name} 은 캠페인 릴레이입니다 — 캠페인으로 시작하세요 (서버 /runs 또는 relay campaign)")
         session = None
         if session_id is not None:
             session = self.history.get_session(session_id)

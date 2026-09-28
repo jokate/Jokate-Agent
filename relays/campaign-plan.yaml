@@ -1,0 +1,17 @@
+name: campaign-plan
+description: 캠페인 계획 — 요청을 순서 있는 작업 목록으로 나눔 (캠페인이 쓰는 내부 릴레이)
+hidden: true
+max_run_cost_usd: 1.5
+
+stages:
+  - name: plan
+    provider: claude
+    model: fable
+    fallback_model: opus
+    effort: medium
+    alternates: [{provider: codex}, {provider: opencode}, {provider: gemini}]
+    prompt: ../prompts/campaign-plan.md
+    tools: [Read, Grep, Glob]
+    mcp: [digest]              # 로드맵·문서가 여러 개면 파일별 요약만 받는다
+    system_mode: replace
+    max_budget_usd: 1.5

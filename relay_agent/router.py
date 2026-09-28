@@ -42,7 +42,7 @@ def candidates(relays_dir: Path, names: list[str], exclude: list[str], load: Cal
             spec, _ = load(path)
         except (OSError, ValueError):
             continue
-        if spec.router is not None or not spec.stages:
+        if spec.router is not None or spec.campaign is not None or spec.hidden or not spec.stages:
             continue
         stages = " → ".join(f"{s.name}({s.model or '-'}{', 파일 수정' if s.writes else ''})" for s in spec.stages)
         out.append({"name": path.stem, "description": spec.description, "stages": stages, "path": path})

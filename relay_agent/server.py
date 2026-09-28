@@ -18,12 +18,14 @@ from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel
 
 from . import cc_import
+from .campaign import CampaignRunner, to_dict as campaign_dict
 from .config import Config, build_engine
 from .pipeline import RelaySpec, RunState
 from .runners import RunnerError, probe_claude_limits
 
 cfg = Config.load()
 engine = build_engine(cfg)
+campaigns = CampaignRunner(engine, cfg.relays_dir)
 app = FastAPI(title="Agent 카태")
 DASHBOARD = Path(__file__).with_name("dashboard.html")
 
@@ -45,6 +47,7 @@ RUNNING_CODE = code_version()
 @app.on_event("startup")
 def recover() -> None:
     engine.recover_interrupted()
+    campaigns.recover()  # campaigns running when the server stopped go on (their interrupted run resumes)
     engine.cleanup_workspaces(cfg.workspace_retention_days)
 
     def hourly():  # expired workspaces are removed while the server keeps running, not only at start
@@ -222,6 +225,8 @@ def list_relays() -> list[dict]:
     out = []
     for p in sorted(cfg.relays_dir.glob("*.yaml")):
         spec, _ = RelaySpec.load(p)
+        if spec.hidden:
+            continue
         steps = []
         for s in spec.stages:
             tier = TIER.get((s.model or "").lower(), s.model or "기본")
@@ -233,6 +238,9 @@ def list_relays() -> list[dict]:
             steps.append(f"{STAGE_KO.get(s.name, s.name)}({tier}{'·' + '·'.join(extra) if extra else ''})")
         if spec.router is not None:
             steps = [f"요청에 맞는 릴레이 자동 선택({TIER.get(spec.router.model, spec.router.model)})"]
+        if spec.campaign is not None:
+            steps = ["작업 목록 계획", f"작업마다 {spec.campaign.task_relay} 릴레이 반복(최대 {spec.campaign.max_tasks}개)",
+                     "끝날 때까지"]
         out.append({
             "name": p.stem,
             "description": spec.description,
@@ -240,6 +248,7 @@ def list_relays() -> list[dict]:
             "stages": steps,
             "switchable": any(s.alternates for s in spec.stages),
             "router": spec.router is not None,
+            "campaign": spec.campaign is not None,
             "stage_defaults": [{"name": s.name, "label": STAGE_KO.get(s.name, s.name), "provider": s.primary,
                                 "model": s.model, "tier": TIER.get((s.model or "").lower(), ""), "writes": s.writes,
                                 "effort": s.effort,
@@ -532,11 +541,43 @@ def create_run(body: CreateRun, request: Request) -> RunState:
     if workdir is not None:
         _check_path(request, workdir)
         repo = repo or (m.name if (m := engine.repos.match(workdir)) else None)
+    spec, _ = RelaySpec.load(relay_path)
+    if spec.campaign is not None:
+        # a campaign: the planning run is returned like any run; the tasks follow in the same session
+        c, run = _conflict(campaigns.start, body.goal, workdir, body.session_id, repo, spec.campaign, body.approval,
+                           body.mcp, _attachment_paths(body.attachments))
+        if body.start:
+            campaigns.spawn(c.id)
+        return run
     run = _conflict(engine.create, relay_path, body.goal, workdir, body.session_id, body.workspace or None, repo,
                     body.auto_apply, body.stage_models, _attachment_paths(body.attachments), body.approval, body.mcp)
     if body.start:
         _advance_bg(run.id)
     return run
+
+
+@app.get("/campaigns")
+def list_campaigns(session_id: str | None = None) -> list[dict]:
+    return [campaign_dict(c) for c in campaigns.list(session_id)]
+
+
+@app.get("/campaigns/{campaign_id}")
+def get_campaign(campaign_id: str) -> dict:
+    try:
+        return campaign_dict(campaigns.load(campaign_id))
+    except FileNotFoundError:
+        raise HTTPException(404, f"campaign {campaign_id} not found")
+
+
+@app.post("/campaigns/{campaign_id}/{action}")
+def control_campaign(campaign_id: str, action: str) -> dict:
+    """pause (after the current task) | cancel | resume | skip (the stuck task)."""
+    if action not in ("pause", "cancel", "resume", "skip"):
+        raise HTTPException(404, f"unknown action {action}")
+    try:
+        return campaign_dict(_conflict(campaigns.request, campaign_id, action))
+    except FileNotFoundError:
+        raise HTTPException(404, f"campaign {campaign_id} not found")
 
 
 @app.get("/runs/{run_id}")

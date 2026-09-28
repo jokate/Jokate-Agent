@@ -66,7 +66,8 @@ def katae_start(goal: str, relay: str = "auto", repo: str = "", workdir: str = "
     """릴레이 시작. repo(등록된 저장소 이름, katae_repos 로 확인)를 쓰면 경로·검증 명령·메모가 자동 적용된다.
     repo 도 workdir 도 없으면 현재 폴더(서버가 다른 머신이면 repo 를 쓸 것).
     relay: auto(기본 — 요청과 대상에 맞는 릴레이를 자동 선택) | quick(단일 Sonnet) | default(설계 승인 포함 큰 작업)
-    | quick-fable | docs-qa | game-cycle(게임 기획 → 구현·에디터 MCP 로 장면 구성 → 플레이 검증).
+    | quick-fable | docs-qa | game-cycle(게임 기획 → 구현·에디터 MCP 로 장면 구성 → 플레이 검증)
+    | campaign(로드맵·큰 기능: 작업을 나눠 끝날 때까지 작업마다 릴레이 — 돌려받는 것은 계획 실행, 진행은 대시보드).
     import_this_conversation=True 면 이 폴더의 최근 Claude Code 대화에서 질문과 답 요약만 뽑아 맥락으로 보낸다.
     workspace: copy(패치로 돌려받기) | inplace | none (기본은 저장소→릴레이 설정)."""
     if not repo and not workdir:

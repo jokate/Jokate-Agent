@@ -6,6 +6,7 @@
     relay search "쿨다운"                    # 전체 질문 이력 검색
     relay run default "목표" --session <id>  # 세션에 이어서 질문(세션 없으면 --workdir 로 새 세션)
     relay run auto "목표" --workdir <폴더>    # 요청과 대상 폴더에 맞는 릴레이를 자동으로 골라 실행
+    relay campaign "로드맵 전부" --repo <이름> # 작업을 나눠 끝날 때까지 작업마다 릴레이 (relay campaigns 로 목록)
     relay log <run_id>                      # 실제로 한 작업(단계, 도구 호출) 타임라인
     relay approve <run_id> | resume <run_id> | status <run_id> | usage [run_id]
     relay cancel <run_id> | patch <run_id> | apply <run_id> | discard <run_id> | rollback <run_id>
@@ -150,6 +151,8 @@ def repo_command(args, cfg) -> str:
     return f"{args.action}: {args.name} -> {local}"
 
 
+CAMPAIGN_KO = {"planning": "계획 중", "running": "진행 중", "waiting": "대기 중", "paused": "일시 정지", "done": "완료",
+               "failed": "실패", "cancelled": "취소됨"}
 LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
 REMOTE_HOST = "0.0.0.0"
 TAILNET = ["100.64.0.0/10", "fd7a:115c:a1e0::/48"]  # the address ranges Tailscale assigns to devices
@@ -413,6 +416,14 @@ def main() -> None:
                        help="on: accept other devices only over Tailscale (plus the token)")
     scope.add_argument("--anywhere", dest="tailscale", action="store_const", const=False,
                        help="on: lift the Tailscale-only limit (any network with the token)")
+    p_camp = sub.add_parser("campaign", help="plan tasks, then relay each one until all are done (foreground)")
+    p_camp.add_argument("goal")
+    p_camp.add_argument("--repo")
+    p_camp.add_argument("--workdir")
+    p_camp.add_argument("--session")
+    p_camp.add_argument("--relay", default="campaign", help="campaign relay file (relays/<name>.yaml)")
+    p_camp.add_argument("--attach", action="append", default=[], metavar="FILE")
+    sub.add_parser("campaigns", help="campaigns and their progress")
     p_auto = sub.add_parser("autostart", help="Windows: start the server at logon and restart it when it exits")
     p_auto.add_argument("action", nargs="?", choices=["on", "off", "status"], default="status")
     p_auto.add_argument("--port", type=int, default=8020)
@@ -472,6 +483,27 @@ def main() -> None:
         return
     if args.cmd == "repo":
         print(repo_command(args, cfg))
+        return
+    if args.cmd in ("campaign", "campaigns"):
+        from .campaign import CampaignRunner
+        from .pipeline import RelaySpec
+
+        campaigns = CampaignRunner(engine, cfg.relays_dir)
+        if args.cmd == "campaigns":
+            for c in campaigns.list():
+                print(f"{c.id}  {c.status:<9} {c.progress():>5}  ${c.cost_usd:.2f}  {c.goal.splitlines()[0][:60]}"
+                      + (f"\n    {c.reason}" if c.reason else ""))
+            return
+        spec, _ = RelaySpec.load(cfg.relays_dir / f"{args.relay}.yaml")
+        if spec.campaign is None:
+            sys.exit(f"{args.relay} 는 캠페인 릴레이가 아닙니다")
+        c, run = campaigns.start(args.goal, Path(args.workdir) if args.workdir else None, args.session,
+                                 repo=args.repo, spec=spec.campaign, attachments=[Path(a) for a in args.attach])
+        print(f"캠페인 {c.id} · 세션 {c.session_id} · 계획 실행 {run.id} — 대시보드에서 진행을 볼 수 있습니다 (Ctrl+C: 멈춤, 재개는 대시보드)")
+        c = campaigns.drive(c.id)
+        print(f"\n■ 캠페인 {CAMPAIGN_KO.get(c.status, c.status)} — {c.progress()} · ${c.cost_usd:.2f}" + (f" · {c.reason}" if c.reason else ""))
+        for t in c.tasks:
+            print(f"  {t.status:<8} {t.id:<6} {t.title}" + (f" — {t.result[:80]}" if t.result else ""))
         return
     if args.cmd == "session" and args.action == "complete":
         r = engine.complete_session(args.title)

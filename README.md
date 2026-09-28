@@ -279,6 +279,21 @@ The relays know no engine or domain; two things adapt them to each request:
   - Choosing a relay yourself skips routing. Per-stage model picks made under `auto` apply only to stages the chosen relay has.
   - Tune in `relays/auto.yaml`: `router.model`, `candidates` (limit the choice), `exclude`, `fallback`.
 
+## Campaigns — keep relaying until the whole roadmap is done
+One run does what it judges best for a request; given a whole roadmap it does one part. The **campaign** relay keeps going:
+1. **Plan:** a read-only planner (`campaign-plan`, hidden) reads the request, attachments (roadmap), the project's instructions and code, drops what is already done, and splits the rest into ordered tasks — foundation first, each finishable in one relay run and with its own finish line (`제목 :: 할 일과 완료 기준`).
+2. **Relay each task** in the same session (`task_relay`, default `auto`): each run gets the previous run's hand-over and the plan with its own task marked.
+3. **Until done:**
+   - A task that ends with open issues gets a follow-up "마무리" task right after it (`max_followups`, default 2 per task).
+   - A usage limit waits for the reset (from the provider's window/bench, else 30 min) and continues the same run; a server restart resumes it; a busy folder waits.
+   - Any other failure: the run is resumed once (`max_attempts: 2`), then the campaign pauses.
+   - The campaign's total cost pauses it at `max_cost_usd` (default $30); resume allows the same again.
+   - An approval wait just waits — approve the run and the campaign goes on.
+
+- Start: pick **campaign** in the dashboard (or `katae_start(goal, relay="campaign")`, or `relay campaign "…" --repo <name>` in the foreground). The session screen shows a card with status, progress, cost and the task list (click a task → its run), with ⏸ pause (after the current task) / ▶ resume / ⏭ skip the stuck task / ⛔ cancel. API: `GET /campaigns?session_id=`, `POST /campaigns/{id}/pause|resume|skip|cancel`.
+- Alerts when it finishes or pauses. State: `runs/campaigns/<id>.json`; runs and hand-overs are ordinary runs.
+- Tune in `relays/campaign.yaml`. `auto` never picks a campaign (choose it yourself).
+
 ## Model policy (token cost first)
 | Relay | Stages / models | Use for |
 |---|---|---|

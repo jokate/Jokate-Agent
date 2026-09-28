@@ -19,6 +19,8 @@ NOTIFY_KINDS = {
     "awaiting_approval": ("✋", "승인 필요"),
     "stage_budget_exceeded": ("💸", "단계 비용 한도 — 승인 필요"),
     "budget_exceeded": ("💸", "실행 비용 한도 — 승인 필요"),
+    "campaign_done": ("🏁", "캠페인 완료"),
+    "campaign_paused": ("⏸", "캠페인 일시 정지 — 확인 필요"),
 }
 
 # The toast is shown under PowerShell's registered app id (an unregistered id is silently dropped on Win10/11).
