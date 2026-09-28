@@ -146,3 +146,28 @@ def test_server_starts_a_campaign_from_post_runs_and_controls_it(tmp_path, monke
     assert client.post(f"/campaigns/{listed[0]['id']}/cancel").json()["status"] == "cancelled"
     names = [x["name"] for x in client.get("/relays").json()]
     assert "campaign" in names and "campaign-plan" not in names  # the planner is internal
+
+
+def test_model_and_effort_ceilings_reach_every_campaign_run(tmp_path):
+    from relay_agent.pipeline import cap_effort, cap_model
+
+    assert (cap_model("fable", "opus"), cap_model("claude-fable-5-1", "opus"), cap_model("sonnet", "opus")) == \
+        ("opus", "opus", "sonnet")
+    assert (cap_model("gpt-5", "sonnet"), cap_model("opus", None)) == ("gpt-5", "opus")  # other providers pass
+    assert (cap_effort("max", "high"), cap_effort("low", "high"), cap_effort("xhigh", None)) == ("high", "low", "xhigh")
+
+    campaigns, engine, runner, project, _ = setup(tmp_path, [ok("계획", next_steps=["하나 :: 한다"])], [ok("끝")])
+    for name, stage in (("planner", "plan"), ("task", "build")):  # relay defaults: Fable at max effort, Fable retry
+        (campaigns.relays_dir / f"{name}.yaml").write_text(
+            f"name: {name}\nstages:\n  - {{name: {stage}, provider: mock, prompt: role.md, model: fable, effort: max, "
+            "fallback_model: fable}\n", encoding="utf-8")
+
+    c, _ = campaigns.start("x", project, spec=spec(model_cap="sonnet"), effort_cap="high")
+    c = campaigns.drive(c.id)
+
+    assert c.status == "done" and (c.model_cap, c.effort_cap) == ("sonnet", "high")
+    # the Fable fallback is capped too (and then dropped: it equals the model)
+    assert [(call.stage, call.model, call.effort, call.fallback_model) for call in runner.calls] == [
+        ("plan", "sonnet", "high", None), ("build", "sonnet", "high", None)]
+    run = engine.load(c.tasks[0].run_ids[0])
+    assert (run.model_cap, run.effort_cap) == ("sonnet", "high")

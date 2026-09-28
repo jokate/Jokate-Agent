@@ -56,6 +56,8 @@ class Campaign(BaseModel):
     spec: CampaignSpec = CampaignSpec()
     approval: str | None = None
     mcp: list[str] | None = None
+    model_cap: str | None = None  # ceilings for every run of the campaign
+    effort_cap: str | None = None
     attachments: list[str] = []
     status: Literal["planning", "running", "waiting", "paused", "done", "failed", "cancelled"] = "planning"
     reason: str = ""
@@ -144,16 +146,20 @@ class CampaignRunner:
     # --- start / control ---------------------------------------------------------------
     def start(self, goal: str, workdir: Path | None, session_id: str | None = None, repo: str | None = None,
               spec: CampaignSpec | None = None, approval: str | None = None, mcp: list[str] | None = None,
-              attachments: list[Path] | None = None) -> tuple[Campaign, RunState]:
+              attachments: list[Path] | None = None, model_cap: str | None = None,
+              effort_cap: str | None = None) -> tuple[Campaign, RunState]:
         """Create the campaign and its planning run (not started: call spawn() or drive())."""
         spec = spec or CampaignSpec()
+        model_cap, effort_cap = model_cap or spec.model_cap, effort_cap or spec.effort_cap
         plan_goal = (f"{goal}\n\n[캠페인 계획] 위 요청을 끝까지 완료하기 위한 작업 목록을 만든다. "
                      f"작업은 최대 {spec.max_tasks}개, 순서대로 하나씩 릴레이로 실행된다.")
         run = self.engine.create(self._relay(spec.planner), plan_goal, workdir, session_id, repo=repo,
-                                 approval="never", mcp=mcp, attachments=attachments)
+                                 approval="never", mcp=mcp, attachments=attachments,
+                                 model_cap=model_cap, effort_cap=effort_cap)
         c = Campaign(id="c" + datetime.now().strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:4],
                      session_id=run.session_id, goal=goal, workdir=run.workdir, repo=run.repo, spec=spec,
-                     approval=approval, mcp=mcp, attachments=list(run.baton.attachments), plan_run_id=run.id,
+                     approval=approval, mcp=mcp, model_cap=model_cap, effort_cap=effort_cap,
+                     attachments=list(run.baton.attachments), plan_run_id=run.id,
                      budget_step=spec.max_cost_usd, created_at=_now())
         self.save(c)
         self.engine._event(run, "-", "campaign_started", campaign=c.id, max_tasks=spec.max_tasks,
@@ -341,7 +347,8 @@ class CampaignRunner:
         else:
             run = self.engine.create(self._relay(c.spec.task_relay), self._task_goal(c, task), Path(c.workdir),
                                      c.session_id, repo=c.repo, approval=c.approval, mcp=c.mcp,
-                                     attachments=[Path(a) for a in c.attachments if Path(a).is_file()])
+                                     attachments=[Path(a) for a in c.attachments if Path(a).is_file()],
+                                     model_cap=c.model_cap, effort_cap=c.effort_cap)
             rid = run.id
             task.run_ids.append(rid)
         task.status = "running"

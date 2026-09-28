@@ -294,6 +294,8 @@ One run does what it judges best for a request; given a whole roadmap it does on
 - Alerts when it finishes or pauses. State: `runs/campaigns/<id>.json`; runs and hand-overs are ordinary runs.
 - Tune in `relays/campaign.yaml`. `auto` never picks a campaign (choose it yourself).
 
+**Model and effort ceilings** (any run, and a campaign's planner and every task): the composer's "최고 모델" / "최고 effort" (API `model_cap` / `effort_cap`, CLI `--model-cap opus --effort-cap high`, `katae_start(model_cap=...)`, or `model_cap:` / `effort_cap:` in `campaign.yaml`). A stage whose relay default, retry or fallback is stronger is lowered to the ceiling — e.g. `opus` means Fable is never used, `high` means no xhigh/max. A model or effort you pick per stage is kept as picked.
+
 ## Model policy (token cost first)
 | Relay | Stages / models | Use for |
 |---|---|---|

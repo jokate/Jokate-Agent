@@ -123,6 +123,8 @@ class CreateRun(BaseModel):
     attachments: list[str] = []  # ids returned by POST /attachments
     approval: str | None = None  # auto (default: no pauses, AI told all is pre-approved) | ai | always | never
     mcp: list[str] | None = None  # extra MCP servers for this run (GET /mcp lists them); None = the repo's default
+    model_cap: str | None = None  # strongest model any stage may use: haiku | sonnet | opus | fable (None = relay's)
+    effort_cap: str | None = None  # highest effort: low | medium | high | xhigh | max (None = relay's)
     start: bool = True
 
 
@@ -545,12 +547,13 @@ def create_run(body: CreateRun, request: Request) -> RunState:
     if spec.campaign is not None:
         # a campaign: the planning run is returned like any run; the tasks follow in the same session
         c, run = _conflict(campaigns.start, body.goal, workdir, body.session_id, repo, spec.campaign, body.approval,
-                           body.mcp, _attachment_paths(body.attachments))
+                           body.mcp, _attachment_paths(body.attachments), body.model_cap, body.effort_cap)
         if body.start:
             campaigns.spawn(c.id)
         return run
     run = _conflict(engine.create, relay_path, body.goal, workdir, body.session_id, body.workspace or None, repo,
-                    body.auto_apply, body.stage_models, _attachment_paths(body.attachments), body.approval, body.mcp)
+                    body.auto_apply, body.stage_models, _attachment_paths(body.attachments), body.approval, body.mcp,
+                    body.model_cap, body.effort_cap)
     if body.start:
         _advance_bg(run.id)
     return run

@@ -802,12 +802,27 @@ async function openSession(id) {
           <option value="always">✋ 승인: 항상 설계 후 멈춤</option>
           <option value="never">⏩ 승인 없이 끝까지</option>
         </select></div>
-      <div class="row">
+      <div class="row" style="flex-wrap:wrap">
         <select class="field" name="workspace" title="작업 공간" style="flex:0 0 auto;width:auto">
           <option value="">적용 방식: 기본값 (즉시 반영)</option>
           <option value="inplace">⚡ 즉시 반영 — 원본에서 작업, 되돌리기 가능</option>
           <option value="copy">📦 복사본에서 작업 → 끝나면 자동 적용</option>
           <option value="none">👀 읽기 전용</option>
+        </select>
+        <select class="field" name="model_cap" id="capModel" style="flex:0 0 auto;width:auto"
+          title="모든 단계(재시도·캠페인 작업 포함)가 쓸 수 있는 가장 강한 모델 — 단계별로 직접 고른 모델은 그대로">
+          <option value="">최고 모델: 릴레이 설정대로</option>
+          <option value="opus">최고 모델: Opus 까지 (Fable 안 씀)</option>
+          <option value="sonnet">최고 모델: Sonnet 까지</option>
+          <option value="haiku">최고 모델: Haiku 까지</option>
+        </select>
+        <select class="field" name="effort_cap" id="capEffort" style="flex:0 0 auto;width:auto"
+          title="모든 단계가 쓸 수 있는 가장 높은 effort — 단계별로 직접 고른 effort 는 그대로">
+          <option value="">최고 effort: 릴레이 설정대로</option>
+          <option value="xhigh">최고 effort: 매우 높음 까지</option>
+          <option value="high">최고 effort: 높음 까지</option>
+          <option value="medium">최고 effort: 보통 까지</option>
+          <option value="low">최고 effort: 낮음</option>
         </select>
       </div>
       <div class="row">
@@ -819,6 +834,10 @@ async function openSession(id) {
       <div class="stage-models" id="stageModels"></div>
     </form>`;
   $("ask").onsubmit = submitAsk;
+  for (const [el, key] of [["capModel", "katae-cap-model"], ["capEffort", "katae-cap-effort"]]) {
+    try { $(el).value = localStorage.getItem(key) || ""; } catch {}
+    $(el).onchange = () => { try { localStorage.setItem(key, $(el).value); } catch {} };
+  }
   renderCampaign(id);
   S.attach = [];
   renderChips();
@@ -962,7 +981,8 @@ async function submitAsk(ev) {
     const mcp = boxes.length ? boxes.filter((b) => b.checked).map((b) => b.dataset.mcp) : null;
     const run = await api("/runs", { method: "POST", body: JSON.stringify({ ...f, session_id: S.session, stage_models, attachments, approval, mcp }) });
     const picked = Object.entries(stage_models).map(([k, v]) => `${k}: ${v.model || v.provider || "기본"}${v.effort ? "@" + v.effort : ""}`).join(", ");
-    toast(picked ? `▶ 시작 — 모델 지정 ${picked}` : "▶ 시작 — 릴레이 기본 모델");
+    const caps = [f.model_cap && `최고 ${f.model_cap}`, f.effort_cap && `effort ≤ ${f.effort_cap}`].filter(Boolean).join(", ");
+    toast((picked ? `▶ 시작 — 모델 지정 ${picked}` : "▶ 시작 — 릴레이 기본 모델") + (caps ? ` · ${caps}` : ""));
     S.attach = [];
     toast("🏁 릴레이 출발!");
     await openSession(S.session);
@@ -993,6 +1013,7 @@ async function renderCampaign(sessionId) {
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
       <b>🗺️ 캠페인</b><span class="tag">${esc(CAMPAIGN_KO[c.status] || c.status)}</span>
       <span class="tag">${esc(c.progress)}</span><span class="tag">${fmt$(c.cost_usd)} / ${fmt$(c.spec.max_cost_usd)}</span>
+      ${c.model_cap ? `<span class="tag" title="최고 모델">≤ ${esc(c.model_cap)}</span>` : ""}${c.effort_cap ? `<span class="tag" title="최고 effort">effort ≤ ${esc(c.effort_cap)}</span>` : ""}
       <span style="margin-left:auto;display:flex;gap:6px">${buttons}</span></div>
     ${c.reason ? `<div class="hint" style="margin-top:6px">${esc(c.reason)}${esc(wait)}</div>` : ""}
     ${c.tasks.length ? `<div style="margin-top:8px;display:flex;flex-direction:column;gap:3px;font-size:13px">${c.tasks.map((t) => `

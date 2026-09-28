@@ -423,6 +423,10 @@ def main() -> None:
     p_camp.add_argument("--session")
     p_camp.add_argument("--relay", default="campaign", help="campaign relay file (relays/<name>.yaml)")
     p_camp.add_argument("--attach", action="append", default=[], metavar="FILE")
+    for p in (p_run, p_camp):
+        p.add_argument("--model-cap", choices=["haiku", "sonnet", "opus", "fable"],
+                       help="strongest model any stage may use, e.g. opus = never Fable")
+        p.add_argument("--effort-cap", choices=["low", "medium", "high", "xhigh", "max"], help="highest effort")
     sub.add_parser("campaigns", help="campaigns and their progress")
     p_auto = sub.add_parser("autostart", help="Windows: start the server at logon and restart it when it exits")
     p_auto.add_argument("action", nargs="?", choices=["on", "off", "status"], default="status")
@@ -498,7 +502,8 @@ def main() -> None:
         if spec.campaign is None:
             sys.exit(f"{args.relay} 는 캠페인 릴레이가 아닙니다")
         c, run = campaigns.start(args.goal, Path(args.workdir) if args.workdir else None, args.session,
-                                 repo=args.repo, spec=spec.campaign, attachments=[Path(a) for a in args.attach])
+                                 repo=args.repo, spec=spec.campaign, attachments=[Path(a) for a in args.attach],
+                                 model_cap=args.model_cap, effort_cap=args.effort_cap)
         print(f"캠페인 {c.id} · 세션 {c.session_id} · 계획 실행 {run.id} — 대시보드에서 진행을 볼 수 있습니다 (Ctrl+C: 멈춤, 재개는 대시보드)")
         c = campaigns.drive(c.id)
         print(f"\n■ 캠페인 {CAMPAIGN_KO.get(c.status, c.status)} — {c.progress()} · ${c.cost_usd:.2f}" + (f" · {c.reason}" if c.reason else ""))
@@ -543,7 +548,7 @@ def main() -> None:
         run = engine.create(cfg.relays_dir / f"{args.relay}.yaml", args.goal, workdir, session_id=args.session,
                             workspace=args.workspace, repo=repo, stage_models=stage_models,
                             attachments=[Path(a) for a in args.attach], approval=args.approval,
-                            mcp=args.mcp or None)
+                            mcp=args.mcp or None, model_cap=args.model_cap, effort_cap=args.effort_cap)
         print(f"session {run.session_id} / run {run.id}")
         print_run(engine, engine.advance(run.id))
     elif args.cmd == "providers":

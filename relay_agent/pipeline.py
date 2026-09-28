@@ -41,6 +41,23 @@ from .workspace import DEFAULT_EXCLUDES, Workspace, WorkspaceError, dir_size, gc
 
 WRITE_TOOLS = {"Edit", "Write", "Bash", "NotebookEdit"}
 READ_ONLY_MCP = {"docs_read", "handoff", "digest"}  # every other MCP server may change the real project
+MODEL_ORDER = ["haiku", "sonnet", "opus", "fable"]  # Claude tiers, weakest first
+EFFORT_ORDER = ["low", "medium", "high", "xhigh", "max"]
+
+
+def cap_model(model: str | None, cap: str | None) -> str | None:
+    """A Claude tier above `cap` becomes `cap` (e.g. fable -> opus). Other providers' models pass unchanged."""
+    if not cap or not model or cap not in MODEL_ORDER:
+        return model
+    tier = ProviderRegistry.tier(model)
+    tier = "fable" if tier == "mythos" else tier
+    return cap if tier in MODEL_ORDER and MODEL_ORDER.index(tier) > MODEL_ORDER.index(cap) else model
+
+
+def cap_effort(effort: str | None, cap: str | None) -> str | None:
+    if not cap or not effort or cap not in EFFORT_ORDER or effort not in EFFORT_ORDER:
+        return effort
+    return cap if EFFORT_ORDER.index(effort) > EFFORT_ORDER.index(cap) else effort
 VERIFY_NOISE_PREFIX = re.compile(r'^cd\s+("[^"]*"|\S+)\s*&&\s*')
 LOOKAROUND = {"ls", "dir", "pwd", "cat", "head", "tail", "echo", "find", "tree", "cd"}
 
@@ -110,6 +127,8 @@ class CampaignSpec(BaseModel):
     max_followups: int = 2          # extra "finish it" tasks when a task ends with open issues
     max_cost_usd: float = 30.0      # the campaign pauses here (all its runs together)
     max_attempts: int = 2           # runs of one failing task (the second resumes the first) before pausing
+    model_cap: str | None = None    # default ceilings for the planner and every task (a request's pick wins)
+    effort_cap: str | None = None
 
 
 class RelaySpec(BaseModel):
@@ -171,6 +190,8 @@ class RunState(BaseModel):
     # auto: never pause AND the AI is told everything is pre-approved (it must not defer work "until approved")
     approval: Literal["auto", "ai", "always", "never"] = "ai"
     mcp: list[str] | None = None  # extra MCP servers picked for this run (None = the repo's `mcp` list)
+    model_cap: str | None = None  # strongest Claude tier any stage may use (haiku|sonnet|opus|fable), None = relay's
+    effort_cap: str | None = None  # highest effort (low|medium|high|xhigh|max), None = relay's
     owner_pid: int | None = None
     handoff_closed: bool = False  # the user marked the session's work complete: no HANDOFF.md, nothing carried on
     # stage -> Claude Code conversation id of an unfinished attempt (continued on resume, dropped when it finishes)
@@ -446,9 +467,15 @@ class RelayEngine:
     def create(self, relay_path: Path, goal: str, workdir: Path | None = None, session_id: str | None = None,
                workspace: str | None = None, repo: str | None = None, auto_apply: bool | None = None,
                stage_models: dict[str, dict] | None = None, attachments: list[Path] | None = None,
-               approval: str | None = None, mcp: list[str] | None = None) -> RunState:
+               approval: str | None = None, mcp: list[str] | None = None,
+               model_cap: str | None = None, effort_cap: str | None = None) -> RunState:
         """Start a run as a new turn. Without session_id a new session is opened.
-        With a registered repo, its path, default workspace mode, verify commands and notes apply."""
+        With a registered repo, its path, default workspace mode, verify commands and notes apply.
+        model_cap / effort_cap: ceilings for every stage (e.g. never Fable, never above high)."""
+        if model_cap and model_cap not in MODEL_ORDER:
+            raise ValueError(f"model_cap 은 {', '.join(MODEL_ORDER)} 중 하나 (받음: {model_cap})")
+        if effort_cap and effort_cap not in EFFORT_ORDER:
+            raise ValueError(f"effort_cap 은 {', '.join(EFFORT_ORDER)} 중 하나 (받음: {effort_cap})")
         spec, _ = RelaySpec.load(relay_path)
         if spec.campaign is not None:
             raise ValueError(f"{spec.name} 은 캠페인 릴레이입니다 — 캠페인으로 시작하세요 (서버 /runs 또는 relay campaign)")
@@ -534,6 +561,8 @@ class RelayEngine:
             stage_models=chosen,
             approval=approval if approval in ("auto", "ai", "always", "never") else self.DEFAULT_APPROVAL,
             mcp=mcp,
+            model_cap=model_cap or None,
+            effort_cap=effort_cap or None,
         )
         if attachments:
             # copied into the run folder: the AI may read them (--add-dir), the originals are never touched
@@ -557,7 +586,8 @@ class RelayEngine:
             self._event(run, "-", "relay_routed", relay=routed["relay"], reason=routed["reason"], by=routed["by"],
                         router=routed["from"], cost_usd=usage.cost_usd if usage else None)
         self._event(run, "-", "run_created", relay=spec.name, workdir=run.workdir, workspace=mode, repo=repo,
-                    auto_apply=run.auto_apply, stages=[s.name for s in spec.stages], stage_models=chosen)
+                    auto_apply=run.auto_apply, stages=[s.name for s in spec.stages], stage_models=chosen,
+                    **{k: v for k, v in (("model_cap", run.model_cap), ("effort_cap", run.effort_cap)) if v})
         if forced:
             self._event(run, "-", "workspace_forced", reason=forced)
         self.save(run)
@@ -1388,6 +1418,13 @@ class RelayEngine:
                     stage.model if primary == stage.primary else None)
             else:
                 model = stage.retry_model if escalate and stage.retry_model else stage.model
+            # the run's ceilings (e.g. "up to Opus, up to high"): relay defaults and retries only, never a user's pick
+            if not choice.get("model"):
+                model = cap_model(model, run.model_cap)
+            if not choice.get("effort"):
+                effort = cap_effort(effort, run.effort_cap)
+            if run.model_cap and effort and ProviderRegistry.tier(model) == "haiku":
+                effort = None  # Haiku has no effort control
             self._event(run, stage.name, "stage_started", runner=primary, model=model, chosen=bool(choice),
                         effort=effort, reads=stage.reads_outputs, system_mode=stage.system_mode,
                         escalated=escalate and bool(stage.retry_model or stage.retry_effort))
@@ -1430,7 +1467,7 @@ class RelayEngine:
                 isolate=stage.isolate,
                 max_budget_usd=(stage.max_budget_usd * run.stage_budget_boost.get(stage.name, 1.0)
                                 if stage.max_budget_usd is not None else None),
-                fallback_model=stage.fallback_model,
+                fallback_model=cap_model(stage.fallback_model, run.model_cap),
                 on_event=self._on_stage_event(run.id, stage.name, run.stage_sessions),
                 cancel_event=cancel,
                 live=live,

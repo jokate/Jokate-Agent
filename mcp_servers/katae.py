@@ -62,14 +62,16 @@ def katae_repos() -> list[dict]:
 
 @mcp.tool()
 def katae_start(goal: str, relay: str = "auto", repo: str = "", workdir: str = "", workspace: str = "",
-                import_this_conversation: bool = True, session_id: str = "") -> dict:
+                import_this_conversation: bool = True, session_id: str = "", model_cap: str = "",
+                effort_cap: str = "") -> dict:
     """릴레이 시작. repo(등록된 저장소 이름, katae_repos 로 확인)를 쓰면 경로·검증 명령·메모가 자동 적용된다.
     repo 도 workdir 도 없으면 현재 폴더(서버가 다른 머신이면 repo 를 쓸 것).
     relay: auto(기본 — 요청과 대상에 맞는 릴레이를 자동 선택) | quick(단일 Sonnet) | default(설계 승인 포함 큰 작업)
     | quick-fable | docs-qa | game-cycle(게임 기획 → 구현·에디터 MCP 로 장면 구성 → 플레이 검증)
     | campaign(로드맵·큰 기능: 작업을 나눠 끝날 때까지 작업마다 릴레이 — 돌려받는 것은 계획 실행, 진행은 대시보드).
     import_this_conversation=True 면 이 폴더의 최근 Claude Code 대화에서 질문과 답 요약만 뽑아 맥락으로 보낸다.
-    workspace: copy(패치로 돌려받기) | inplace | none (기본은 저장소→릴레이 설정)."""
+    workspace: copy(패치로 돌려받기) | inplace | none (기본은 저장소→릴레이 설정).
+    model_cap: 모든 단계의 최고 모델 haiku|sonnet|opus|fable (예: opus = Fable 안 씀). effort_cap: low|medium|high|xhigh|max."""
     if not repo and not workdir:
         matched = _call("GET", "/repos/match", params={"path": os.getcwd()}).get("repo")
         repo, workdir = (matched, "") if matched else ("", os.getcwd())
@@ -83,7 +85,8 @@ def katae_start(goal: str, relay: str = "auto", repo: str = "", workdir: str = "
                 "source_id": found[1], "turns": turns, "meta": meta, "workdir": workdir or os.getcwd()})
             session_id = imported["session_id"]
     body = {"goal": goal, "relay": relay, "workdir": workdir or None, "repo": repo or None,
-            "session_id": session_id or None, "workspace": workspace or None}
+            "session_id": session_id or None, "workspace": workspace or None,
+            "model_cap": model_cap or None, "effort_cap": effort_cap or None}
     run = _call("POST", "/runs", json=body)
     return {"run_id": run["id"], "session_id": run["session_id"], "status": run["status"],
             "dashboard": f"{BASE}/", "note": "진행 상황은 katae_status 또는 대시보드에서 확인"}

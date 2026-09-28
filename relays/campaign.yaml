@@ -10,3 +10,5 @@ campaign:
   max_followups: 2         # 작업이 미해결 이슈를 남기면 붙는 마무리 작업 수 (작업당)
   max_cost_usd: 30         # 캠페인 전체 비용 — 넘으면 일시 정지, 재개하면 같은 만큼 더
   max_attempts: 2          # 한 작업이 실패하면 한 번 이어서 다시, 그래도 실패하면 일시 정지
+  # model_cap: opus        # 모든 작업의 최고 모델 (haiku|sonnet|opus|fable) — 요청 화면에서 고른 값이 우선
+  # effort_cap: high       # 모든 작업의 최고 effort (low|medium|high|xhigh|max)
