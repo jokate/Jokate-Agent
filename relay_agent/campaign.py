@@ -341,14 +341,24 @@ class CampaignRunner:
             "(다음 릴레이가 이어받는다). 다른 작업은 하지 않는다.",
         ])
 
+    def _read_only(self, rid: str) -> bool:
+        """The run's relay has no stage that changes files (e.g. a docs Q&A relay)."""
+        try:
+            spec, _ = RelaySpec.load(Path(self.engine.load(rid).relay))
+        except (OSError, ValueError):
+            return False
+        return not any(s.writes for s in spec.stages)
+
     def _run_task(self, c: Campaign, task: Task) -> bool:
-        if task.status == "running" and task.run_ids:
+        if task.status == "running" and task.run_ids and not self._read_only(task.run_ids[-1]):
             rid = task.run_ids[-1]  # continue (server restart, resume after a pause)
         else:
+            # a task is work on the target: never a read-only relay, and a run that landed on one is not
+            # continued (it cannot change anything however often it is retried) — start over and route again
             run = self.engine.create(self._relay(c.spec.task_relay), self._task_goal(c, task), Path(c.workdir),
                                      c.session_id, repo=c.repo, approval=c.approval, mcp=c.mcp,
                                      attachments=[Path(a) for a in c.attachments if Path(a).is_file()],
-                                     model_cap=c.model_cap, effort_cap=c.effort_cap)
+                                     model_cap=c.model_cap, effort_cap=c.effort_cap, needs_writes=True)
             rid = run.id
             task.run_ids.append(rid)
         task.status = "running"

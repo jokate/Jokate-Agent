@@ -468,10 +468,12 @@ class RelayEngine:
                workspace: str | None = None, repo: str | None = None, auto_apply: bool | None = None,
                stage_models: dict[str, dict] | None = None, attachments: list[Path] | None = None,
                approval: str | None = None, mcp: list[str] | None = None,
-               model_cap: str | None = None, effort_cap: str | None = None) -> RunState:
+               model_cap: str | None = None, effort_cap: str | None = None,
+               needs_writes: bool = False) -> RunState:
         """Start a run as a new turn. Without session_id a new session is opened.
         With a registered repo, its path, default workspace mode, verify commands and notes apply.
-        model_cap / effort_cap: ceilings for every stage (e.g. never Fable, never above high)."""
+        model_cap / effort_cap: ceilings for every stage (e.g. never Fable, never above high).
+        needs_writes: the work must change the target, so an `auto` relay never routes to a read-only relay."""
         if model_cap and model_cap not in MODEL_ORDER:
             raise ValueError(f"model_cap 은 {', '.join(MODEL_ORDER)} 중 하나 (받음: {model_cap})")
         if effort_cap and effort_cap not in EFFORT_ORDER:
@@ -507,7 +509,8 @@ class RelayEngine:
         routed = None
         if spec.router is not None:
             # an `auto` relay: pick the relay for this request, then everything below runs as if it was chosen
-            routed = self._route(spec, relay_path, goal, Path(workdir), session_id, repo_spec, attachments)
+            routed = self._route(spec, relay_path, goal, Path(workdir), session_id, repo_spec, attachments,
+                                 needs_writes)
             relay_path = routed.pop("path")
             spec, _ = RelaySpec.load(relay_path)
             names = {s.name for s in spec.stages}
@@ -594,12 +597,12 @@ class RelayEngine:
         return run
 
     def _route(self, spec: RelaySpec, relay_path: Path, goal: str, workdir: Path, session_id: str | None,
-               repo_spec: RepoSpec | None, attachments: list[Path] | None) -> dict:
+               repo_spec: RepoSpec | None, attachments: list[Path] | None, needs_writes: bool = False) -> dict:
         """Ask the router which relay fits: the request, the target's harness and each candidate's description."""
         from . import router
 
         options = router.candidates(relay_path.parent, spec.router.candidates,
-                                    spec.router.exclude + [relay_path.stem], RelaySpec.load)
+                                    spec.router.exclude + [relay_path.stem], RelaySpec.load, writes_only=needs_writes)
         if not options:
             raise ValueError("자동으로 고를 릴레이가 없습니다 (relays/ 에 stages 가 있는 릴레이 필요)")
         try:

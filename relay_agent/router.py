@@ -32,8 +32,10 @@ GOAL_CHARS = 3000
 INSTRUCTION_CHARS = 1500
 
 
-def candidates(relays_dir: Path, names: list[str], exclude: list[str], load: Callable) -> list[dict]:
-    """name, description and stage outline of every relay the router may pick (never another router)."""
+def candidates(relays_dir: Path, names: list[str], exclude: list[str], load: Callable,
+               writes_only: bool = False) -> list[dict]:
+    """name, description and stage outline of every relay the router may pick (never another router).
+    writes_only: only relays with a stage that changes files — for work that must change the target."""
     out = []
     for path in sorted(relays_dir.glob("*.yaml")):
         if (names and path.stem not in names) or path.stem in exclude:
@@ -43,6 +45,8 @@ def candidates(relays_dir: Path, names: list[str], exclude: list[str], load: Cal
         except (OSError, ValueError):
             continue
         if spec.router is not None or spec.campaign is not None or spec.hidden or not spec.stages:
+            continue
+        if writes_only and not any(s.writes for s in spec.stages):
             continue
         stages = " → ".join(f"{s.name}({s.model or '-'}{', 파일 수정' if s.writes else ''})" for s in spec.stages)
         out.append({"name": path.stem, "description": spec.description, "stages": stages, "path": path})

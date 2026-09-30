@@ -4,7 +4,7 @@ from relay_agent import router
 from relay_agent.campaign import CampaignRunner, parse_tasks
 from relay_agent.history import HistoryStore
 from relay_agent.pipeline import CampaignSpec, RelayEngine, RelaySpec
-from relay_agent.runners import MockRunner, RunnerError
+from relay_agent.runners import MockRunner, RunnerError, Usage
 from relay_agent.usage import UsageStore
 
 RELAYS = Path(__file__).resolve().parent.parent / "relays"
@@ -111,6 +111,58 @@ def test_pause_request_stops_after_the_current_task(tmp_path):
     runner.run = run_and_request_pause
     c = campaigns.drive(c.id)
     assert c.status == "paused" and [t.status for t in c.tasks] == ["done", "pending"]
+
+
+def writer_and_reader_relays(relays):
+    (relays / "work.yaml").write_text(
+        "name: work\ndescription: 파일을 고친다\nstages:\n  - {name: build, provider: mock, prompt: role.md, tools: [Edit]}\n",
+        encoding="utf-8")
+    (relays / "qa.yaml").write_text(
+        "name: qa\ndescription: 문서 질문에 답한다 · 파일 수정 없음\nstages:\n  - {name: build, provider: mock, prompt: role.md}\n",
+        encoding="utf-8")
+
+
+def test_campaign_tasks_are_never_routed_to_a_read_only_relay(tmp_path):
+    campaigns, engine, _, project, _ = setup(tmp_path, [ok("계획", next_steps=["문서 마무리 :: 문서를 고친다"])], [ok("끝")])
+    writer_and_reader_relays(campaigns.relays_dir)
+    (campaigns.relays_dir / "big.yaml").write_text(
+        "name: big\ndescription: 설계부터\nstages:\n  - {name: build, provider: mock, prompt: role.md, tools: [Write]}\n",
+        encoding="utf-8")
+    (campaigns.relays_dir / "auto.yaml").write_text(
+        "name: auto\nrouter: {model: haiku, fallback: work}\n", encoding="utf-8")
+    seen = []
+
+    def ask(text, model):  # a router that falls for the word "문서"
+        seen.append(text)
+        return '{"relay": "qa", "reason": "문서 작업"}', Usage("claude", "claude-haiku-4-5")
+
+    engine.router = ask
+    c, _ = campaigns.start("x", project, spec=CampaignSpec(planner="planner", task_relay="auto"))
+    c = campaigns.drive(c.id)
+
+    assert c.status == "done"
+    assert Path(engine.load(c.tasks[0].run_ids[0]).relay).name == "work.yaml"
+    # the read-only relay is not even offered, so naming it only falls back to a writing relay
+    assert "- qa:" not in seen[0] and "- work:" in seen[0] and "- big:" in seen[0]
+
+
+def test_resuming_a_task_stuck_on_a_read_only_run_starts_a_new_run(tmp_path):
+    plan = [ok("계획", next_steps=["하나 :: 고친다"])]
+    campaigns, engine, _, project, _ = setup(tmp_path, plan, [RunnerError("쓸 도구가 없다"), RunnerError("여전히 없다"),
+                                                               ok("고침")])
+    writer_and_reader_relays(campaigns.relays_dir)
+    c, _ = campaigns.start("x", project, spec=CampaignSpec(planner="planner", task_relay="qa", max_attempts=2))
+    c = campaigns.drive(c.id)
+    assert c.status == "paused" and c.tasks[0].status == "failed"
+    stuck = c.tasks[0].run_ids[-1]
+
+    c.spec.task_relay = "work"  # (what routing now picks for a task)
+    campaigns.save(c)
+    campaigns.request(c.id, "resume")
+    c = campaigns.drive(c.id)
+
+    assert c.status == "done" and len(c.tasks[0].run_ids) == 2 and c.tasks[0].run_ids[0] == stuck
+    assert Path(engine.load(c.tasks[0].run_ids[1]).relay).name == "work.yaml"
 
 
 def test_parse_tasks_reads_numbered_title_goal_lines_and_caps_them():
