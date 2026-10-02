@@ -530,7 +530,7 @@ const EV = {
   user_notes_applied: ["📌", "추가 지시 반영"], result_repaired: ["🩹", "결과 형식 복구"], prompt_breakdown: ["📤", "보낸 프롬프트"],
   token_report: ["🔥", "토큰 사용 내역"], gate_skipped: ["⏩", "승인 없이 진행"],
   process_stopped: ["🛑", "AI 프로세스 종료"], stage_resumed: ["⏯️", "중단된 대화 이어서"], resume_fallback: ["↻", "처음부터 다시"],
-  budget_auto_extended: ["💸", "예산 자동 연장 (자동 진행)"], approval_mode: ["🚀", "진행 모드 변경"], mcp_missing: ["🔌", "MCP 서버를 찾지 못함"], mcp_unsaved: ["💾", "MCP 변경이 저장되지 않았을 수 있음"], mcp_check: ["🔌", "MCP 연결 점검"], snapshot_store_rebuilt: ["🧹", "손상된 스냅샷 저장소 재생성"], mcp_check_error: ["🔌", "MCP 점검 오류(건너뜀)"], stall_restart: ["🧟", "무응답으로 다시 시작"], handoff_written: ["📝", "인계서 작성"], handoff_failed: ["📝", "인계서 AI 작성 실패"], project_context: ["📁", "프로젝트 지침·스킬 적용"],
+  budget_auto_extended: ["💸", "예산 자동 연장 (자동 진행)"], approval_mode: ["🚀", "진행 모드 변경"], mcp_missing: ["🔌", "MCP 서버를 찾지 못함"], mcp_unsaved: ["💾", "MCP 변경이 저장되지 않았을 수 있음"], mcp_check: ["🔌", "MCP 연결 점검"], snapshot_store_rebuilt: ["🧹", "손상된 스냅샷 저장소 재생성"], snapshot_store_rebuilt: ["🧹", "손상된 스냅샷 저장소 재생성"], mcp_check_error: ["🔌", "MCP 점검 오류(건너뜀)"], stall_restart: ["🧟", "무응답으로 다시 시작"], handoff_written: ["📝", "인계서 작성"], handoff_failed: ["📝", "인계서 AI 작성 실패"], project_context: ["📁", "프로젝트 지침·스킬 적용"],
 };
 const PROVIDER_LABEL = { claude: "Claude", codex: "Codex", opencode: "OpenCode", gemini: "Gemini", anthropic_api: "Claude API", openai: "OpenAI", openrouter: "OpenRouter", ollama: "Ollama", mock: "Mock" };
 const WINDOW_LABEL = { five_hour: "5h", seven_day: "7d", seven_day_opus: "7d·Opus", seven_day_sonnet: "7d·Son" };
@@ -679,6 +679,7 @@ function describe(e) {
     case "mcp_missing": return `${esc(d.server)} — 프로젝트(.mcp.json)·전역 설정·relay.config 어디에도 없음`;
     case "mcp_check": return [(d.ok || []).length ? `응답 ${esc(d.ok.join(", "))}` : "",
       ...Object.entries(d.failed || {}).map(([n, w]) => `❌ ${esc(n)} — ${esc(w)}`)].filter(Boolean).join("<br>");
+    case "snapshot_store_rebuilt": return `${esc(d.store)} — ${esc(d.problem)}${(d.runs_cleaned || []).length ? ` · 이 저장소를 쓰던 실행 ${d.runs_cleaned.length}개는 result.patch 만 남음` : ""}`;
     case "snapshot_store_rebuilt": return `${esc(d.store)} — ${esc(d.problem)}${(d.runs_cleaned || []).length ? ` · 이 저장소를 쓰던 실행 ${d.runs_cleaned.length}개는 result.patch 만 남음` : ""}`;
     case "mcp_check_error": return `${esc(d.server)} — ${esc(d.error)}`;
     case "mcp_unsaved": return `${esc((d.servers || []).join(", "))} 변경 호출 ${d.calls}회 (${esc((d.tools || []).join(", "))}) — 이 단계 동안 바뀐 프로젝트 파일 없음 · 다음 단계가 저장 여부를 확인`;
