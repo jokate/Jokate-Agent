@@ -353,6 +353,7 @@ class RepoIn(BaseModel):
     verify: list[str] = []
     docs: str | None = None
     notes: str | None = None
+    mcp: list[str] = []  # servers attached to every run in this repo (e.g. ["unreal"])
 
 
 def _reload_repos() -> None:
@@ -369,7 +370,7 @@ def register_repo(body: RepoIn, request: Request) -> list[dict]:
     import re
 
     from .config import ROOT
-    from .repos import save_local_repo
+    from .repos import clear_local_repo_field, save_local_repo
 
     if _is_remote(request):
         raise HTTPException(403, "저장소 등록은 이 PC 에서만 할 수 있습니다")
@@ -383,7 +384,10 @@ def register_repo(body: RepoIn, request: Request) -> list[dict]:
     save_local_repo(ROOT / "relay.config.local.yaml", body.name, {
         "path": folder.resolve().as_posix(), "workspace": body.workspace or None,
         "verify": [v for v in body.verify if v.strip()], "docs": body.docs, "notes": body.notes,
+        "mcp": [m for m in body.mcp if m.strip()],
     })
+    if not any(m.strip() for m in body.mcp):
+        clear_local_repo_field(ROOT / "relay.config.local.yaml", body.name, "mcp")  # save skips empty values
     _reload_repos()
     return engine.repos.status()
 
@@ -586,6 +590,17 @@ def control_campaign(campaign_id: str, action: str) -> dict:
 @app.get("/runs/{run_id}")
 def get_run(run_id: str) -> RunState:
     return _load(run_id)
+
+
+@app.get("/mcp/folder")
+def mcp_folder_choices(path: str, request: Request) -> list[dict]:
+    """MCP servers a run in this folder could attach (repo registration form, before the repo exists)."""
+    if _is_remote(request):
+        raise HTTPException(403, "폴더 조회는 이 PC 에서만 할 수 있습니다")
+    try:
+        return engine.mcp_choices(Path(path), engine.repos.match(path))
+    except OSError:
+        return []
 
 
 @app.get("/mcp")
@@ -834,6 +849,27 @@ def rollback_changes(run_id: str) -> RunState:
 @app.get("/disk")
 def get_disk() -> dict:
     return engine.disk_usage()
+
+
+@app.get("/snapshot-stores")
+def get_snapshot_stores(check: bool = False) -> list[dict]:
+    """Copy-mode snapshot stores (one per target folder): size, runs using them and, with check, git fsck health."""
+    return engine.snapshot_stores(check=check)
+
+
+class StoreResetIn(BaseModel):
+    target: str  # repo name, store file name or folder path
+
+
+@app.post("/snapshot-stores/reset")
+def post_snapshot_store_reset(body: StoreResetIn, request: Request) -> dict:
+    """Delete a broken store; runs that used it keep only their result.patch."""
+    if _is_remote(request):
+        raise HTTPException(403, "스냅샷 저장소 초기화는 이 PC 에서만 할 수 있습니다")
+    try:
+        return engine.reset_snapshot_store(body.target)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
 
 
 @app.post("/disk/cleanup")

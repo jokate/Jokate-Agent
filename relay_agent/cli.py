@@ -146,6 +146,10 @@ def repo_command(args, cfg) -> str:
                 entry[key] = getattr(args, key)
         if args.verify:
             entry["verify"] = args.verify
+        if args.mcp is not None:
+            entry["mcp"] = [m for m in args.mcp if m]  # `--mcp ""` clears the list
+        if args.mcp_from:
+            entry["mcp_from"] = [Path(f).resolve().as_posix() for f in args.mcp_from]
     local.write_text("# This machine only (git-ignored).\n" + yaml.safe_dump(data, allow_unicode=True, sort_keys=False),
                      encoding="utf-8")
     return f"{args.action}: {args.name} -> {local}"
@@ -393,6 +397,10 @@ def main() -> None:
     p_repo.add_argument("--verify", action="append", default=None, help="verification command (repeatable)")
     p_repo.add_argument("--docs")
     p_repo.add_argument("--notes")
+    p_repo.add_argument("--mcp", action="append", default=None,
+                        help='MCP server attached to every run in this repo, e.g. --mcp unreal (repeatable; --mcp "" clears)')
+    p_repo.add_argument("--mcp-from", action="append", default=None, dest="mcp_from",
+                        help="another folder whose .mcp.json servers can be named in --mcp (repeatable)")
     for name in ("approve", "resume", "status", "cancel", "patch", "apply", "discard", "rollback"):
         sub.add_parser(name).add_argument("run_id")
     p_log = sub.add_parser("log")
@@ -434,6 +442,9 @@ def main() -> None:
     p_auto.add_argument("--no-start", action="store_true", help="on: only register, don't start it now")
     sub.add_parser("doctor", help="check this machine: git, claude login, providers, config paths")
     sub.add_parser("disk", help="where the disk space goes (snapshots, working copies, patches)")
+    p_cache = sub.add_parser("cache", help="copy-mode snapshot stores: check health or reset a broken one")
+    p_cache.add_argument("action", choices=["check", "reset"])
+    p_cache.add_argument("target", nargs="?", help="repo name, store file (abc.git) or folder; check: all if omitted")
     p_clean = sub.add_parser("cleanup", help="delete decided/expired workspaces (result.patch is kept)")
     p_clean.add_argument("--days", type=float, default=None)
     args = parser.parse_args()
@@ -469,6 +480,32 @@ def main() -> None:
             print(f"  큰 실행 {r['run']}: {r['mb']} MB")
         print("정리: relay cleanup  (결정된 실행은 즉시, 미결정은 보관 기간 후. result.patch 는 남음)")
         return
+    if args.cmd == "cache":
+        engine = build_engine(cfg)
+        if args.action == "reset":
+            if not args.target:
+                sys.exit("reset 에는 대상이 필요합니다: relay cache reset <저장소 이름|폴더>")
+            try:
+                r = engine.reset_snapshot_store(args.target)
+            except ValueError as e:
+                sys.exit(str(e))
+            print(f"스냅샷 저장소 {r['store']} 초기화 · {r['freed_mb']} MB 확보 · 정리된 실행 {len(r['runs_cleaned'])}개"
+                  + (f" (result.patch 남음: {', '.join(r['patch_kept'])})" if r["patch_kept"] else ""))
+            print("다음 copy 모드 실행이 새 스냅샷 저장소를 만듭니다.")
+            return
+        stores = engine.snapshot_stores(check=True)
+        if args.target:
+            wanted = engine._find_store(args.target).name
+            stores = [s for s in stores if s["store"] == wanted]
+        if not stores:
+            print("스냅샷 저장소가 없습니다 (copy 모드 실행이 없었음)")
+        for s in stores:
+            state = "정상" if not s["problem"] else f"손상 — {s['problem']}"
+            print(f"{'●' if not s['problem'] else '✗'} {s['repo'] or '-':<14} {s['store']}  {s['mb']} MB  실행 {len(s['runs'])}개"
+                  + (f" (진행 중 {len(s['active'])})" if s["active"] else "") + f"  {state}")
+        if any(s["problem"] for s in stores):
+            print("초기화: relay cache reset <저장소 이름>  (그 저장소를 쓰던 실행은 result.patch 만 남음)")
+        return
     if args.cmd == "cleanup":
         r = build_engine(cfg).cleanup_workspaces(cfg.workspace_retention_days if args.days is None else args.days)
         print(f"정리 {len(r['cleaned'])}개 실행 · {r['freed_mb']} MB 확보")
@@ -482,6 +519,8 @@ def main() -> None:
             print(f"{'●' if r['exists'] else '○'} {r['name']:<14} {r['path'] or '-':<45} {state}")
             if r["verify"]:
                 print(f"    검증: {', '.join(r['verify'])}")
+            if r.get("mcp"):
+                print(f"    MCP: {', '.join(r['mcp'])}")
         if not engine.repos.repos:
             print('등록된 저장소가 없습니다: relay repo add <이름> <경로> --verify "<테스트 명령>"')
         return

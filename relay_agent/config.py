@@ -52,6 +52,8 @@ class Config(BaseModel):
     remote_networks: list[str] = []
     notify: bool = True  # Windows toast when a run finishes, fails or needs approval
     handoff_model: str = "haiku"  # writes the hand-over when a run stops ("" = no AI, engine-built only)
+    # Before a run's first stage, check that the MCP servers it attaches answer (editor closed -> stop, no cost).
+    mcp_check: bool = True
 
     @classmethod
     def load(cls, path: Path | None = None) -> "Config":
@@ -100,7 +102,7 @@ def build_engine(cfg: Config):
     from .runners import make_runner
     from .usage import UsageStore
 
-    from . import router
+    from . import mcpcheck, router
 
     usage, history = UsageStore(cfg.usage_db), HistoryStore(cfg.history_db)
     providers = ProviderRegistry(cfg.providers, cfg.fallback_chain, usage=usage, history=history)
@@ -119,4 +121,5 @@ def build_engine(cfg: Config):
         handoff_writer=HandoffWriter(cfg.handoff_model) if cfg.handoff_model and has_claude else None,
         # same one-shot call as the hand-over, with the router's own instructions (model from relays/auto.yaml)
         router=(lambda text, model: HandoffWriter(model, timeout_s=90, system=router.SYSTEM)(text)) if has_claude else None,
+        mcp_probe=mcpcheck.probe if cfg.mcp_check else None,
     )

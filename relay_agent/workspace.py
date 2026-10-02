@@ -347,6 +347,21 @@ class Workspace:
         return freed
 
 
+def check_shadow(store: Path, timeout_s: float = 600) -> str | None:
+    """None when a shared snapshot store is usable; otherwise what is wrong (git fsck's own words).
+    A store broken by a disk error, an antivirus or a killed process makes every copy-mode run on that folder fail."""
+    if not (store / "HEAD").is_file() or not (store / "objects").is_dir():
+        return "git 저장소 구조(HEAD/objects)가 없습니다"
+    try:
+        proc = subprocess.run(["git", f"--git-dir={store}", "fsck", "--no-progress", "--no-dangling"],
+                              capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        return f"git fsck 가 {timeout_s:.0f}초 안에 끝나지 않았습니다"
+    if proc.returncode != 0:
+        return (proc.stderr or proc.stdout).strip()[-400:] or f"git fsck 실패 (코드 {proc.returncode})"
+    return None
+
+
 def gc_shadow(shadow_root: Path) -> int:
     """Reclaim objects no longer referenced by any run; delete stores with no runs left. Returns bytes freed."""
     freed = 0

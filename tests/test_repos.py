@@ -94,3 +94,41 @@ def test_session_follows_its_folder_when_its_repo_was_renamed(tmp_path):
     assert engine.history.get_session(session["id"])["repo"] == "boolpyeon"  # fixed for the next request too
     with pytest.raises(ValueError, match="등록되지 않은 저장소"):  # a name asked for explicitly is still checked
         engine.create(relay, "x", session_id=session["id"], repo="nope")
+
+
+def test_repo_add_sets_and_clears_the_default_mcp(tmp_path, monkeypatch):
+    import argparse
+
+    import yaml
+
+    from relay_agent import cli, config
+
+    monkeypatch.setattr(config, "ROOT", tmp_path)
+    game = tmp_path / "Game"
+    game.mkdir()
+    base = dict(action="add", name="game", path=str(game), url=None, workspace=None, relay=None, verify=None,
+                docs=None, notes=None, mcp_from=None)
+    cfg = argparse.Namespace(repos={}, repos_root="")
+    cli.repo_command(argparse.Namespace(**base, mcp=["unreal"]), cfg)
+    local = tmp_path / "relay.config.local.yaml"
+    assert yaml.safe_load(local.read_text(encoding="utf-8"))["repos"]["game"]["mcp"] == ["unreal"]
+    cli.repo_command(argparse.Namespace(**base, mcp=None), cfg)  # not given: kept
+    assert yaml.safe_load(local.read_text(encoding="utf-8"))["repos"]["game"]["mcp"] == ["unreal"]
+    cli.repo_command(argparse.Namespace(**base, mcp=[""]), cfg)  # --mcp "": cleared
+    assert yaml.safe_load(local.read_text(encoding="utf-8"))["repos"]["game"]["mcp"] == []
+
+
+def test_a_repo_default_mcp_is_attached_to_its_runs(tmp_path, monkeypatch):
+    import json
+
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".claude.json").write_text(json.dumps({"mcpServers": {"unreal": {"command": "ue-mcp"}}}), encoding="utf-8")
+    monkeypatch.setattr(Path, "home", lambda: home)
+    game = tmp_path / "Game"
+    game.mkdir()
+    engine, relay, runner = setup(tmp_path, {"game": {"path": str(game), "workspace": "copy", "mcp": ["unreal"]}})
+    run = engine.create(relay, "레벨에 액터 배치", repo="game")
+    assert run.workspace_mode == "inplace"  # the repo's editor MCP forces in place
+    engine.advance(run.id)
+    assert "unreal" in runner.calls[0].mcp_servers and runner.calls[0].mcp_overrides["unreal"] == {"command": "ue-mcp"}

@@ -114,6 +114,20 @@ def save_local_repo(local_file: Path, name: str, fields: dict | None, remove: bo
                           encoding="utf-8")
 
 
+def clear_local_repo_field(local_file: Path, name: str, key: str) -> None:
+    """Drop one field of a repo entry in relay.config.local.yaml (e.g. an emptied MCP list)."""
+    import yaml
+
+    if not local_file.exists():
+        return
+    data = yaml.safe_load(local_file.read_text(encoding="utf-8")) or {}
+    entry = (data.get("repos") or {}).get(name)
+    if isinstance(entry, dict) and key in entry:
+        entry.pop(key)
+        local_file.write_text("# This machine only (git-ignored).\n" + yaml.safe_dump(data, allow_unicode=True, sort_keys=False),
+                              encoding="utf-8")
+
+
 TIER = {"haiku": "경량", "sonnet": "표준", "opus": "고급", "fable": "최상급"}
 
 
@@ -144,6 +158,6 @@ class RepoRegistry:
             out.append({
                 "name": repo.name, "path": str(repo.resolved or ""), "exists": repo.exists, "url": repo.url,
                 "workspace": repo.workspace, "relay": repo.relay, "verify": repo.verify,
-                "docs": str(repo.docs_root) if repo.docs_root else None, "notes": repo.notes, **info,
+                "docs": str(repo.docs_root) if repo.docs_root else None, "notes": repo.notes, "mcp": repo.mcp, **info,
             })
         return out

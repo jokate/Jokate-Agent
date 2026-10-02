@@ -17,6 +17,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import threading
 import time
 import uuid
@@ -37,7 +38,7 @@ from .runners import LiveChannel, pid_alive, Runner, RunnerError, StageCall, Usa
 from .usage import UsageStore
 from .repos import RepoRegistry, RepoSpec
 from .journal import JournalWorkspace
-from .workspace import DEFAULT_EXCLUDES, Workspace, WorkspaceError, dir_size, gc_shadow
+from .workspace import DEFAULT_EXCLUDES, Workspace, WorkspaceError, _remove, check_shadow, dir_size, gc_shadow, shadow_dir_for
 
 WRITE_TOOLS = {"Edit", "Write", "Bash", "NotebookEdit"}
 READ_ONLY_MCP = {"docs_read", "handoff", "digest"}  # every other MCP server may change the real project
@@ -113,6 +114,9 @@ class StageSpec(BaseModel):
     # auto: keep Bash only if the repo has verify commands or allowed Bash tools (or no repo is registered).
     # The Bash tool definition alone is ~3.5K tokens, re-read on every turn. always: keep it.
     bash: Literal["auto", "always"] = "auto"
+    # the stage changes the project through an editor MCP (Unreal, Unity …) rather than file tools: it counts as
+    # a writing stage (in-place workspace, change list, rollback) and the run needs a live MCP attached
+    edits_via_mcp: bool = False
     max_budget_usd: float | None = None
     fallback_model: str | None = None
 
@@ -122,7 +126,7 @@ class StageSpec(BaseModel):
 
     @property
     def writes(self) -> bool:
-        return bool(WRITE_TOOLS & set(self.tools or []))
+        return self.edits_via_mcp or bool(WRITE_TOOLS & set(self.tools or []))
 
 
 class RouterSpec(BaseModel):
@@ -293,6 +297,7 @@ class RelayEngine:
         max_snapshot_mb: float = 500,
         max_file_mb: float = 20,
         router: Callable[[str, str], tuple[str, Usage]] | None = None,
+        mcp_probe: Callable[[dict], str | None] | None = None,
     ):
         self.max_snapshot_mb = max_snapshot_mb
         self.max_file_mb = max_file_mb
@@ -302,6 +307,7 @@ class RelayEngine:
         self.notifier = notifier
         self.handoff_writer = handoff_writer  # lightweight model that writes the stop hand-over
         self.router = router  # (prompt, model) -> (answer, usage): picks the relay for an `auto` run
+        self.mcp_probe = mcp_probe  # (server config) -> None if it answers, else why (mcpcheck.probe); None = no check
         self.runs_dir = runs_dir
         self.usage = usage
         self.history = history
@@ -912,6 +918,95 @@ class RelayEngine:
             "largest_runs": [{"run": r, "mb": mb(s)} for r, s in sorted(runs, key=lambda x: -x[1])[:5]],
         }
 
+    # --- copy-mode snapshot stores (runs/shadow/<hash>.git, one per target folder) ---------------------
+    def _store_runs(self, store: Path) -> list[RunState]:
+        """Runs whose snapshot lives in this store (and is not cleaned up yet)."""
+        out = []
+        for run in self.list_runs():
+            if run.workspace_mode == "none" or run.workspace_cleaned:
+                continue
+            ws = self.workspace(run)
+            if isinstance(ws, Workspace) and ws.git_dir == store and ws.marker.exists():
+                out.append(run)
+        return out
+
+    def _find_store(self, target: str) -> Path:
+        """A store by registered repo name, store file name (abc123.git) or the target folder's path."""
+        shadow = self.runs_dir / "shadow"
+        if target in self.repos.repos and self.repos.repos[target].resolved:
+            return shadow_dir_for(shadow, self.repos.repos[target].resolved)
+        if (shadow / target).is_dir():
+            return shadow / target
+        if Path(target).expanduser().is_dir():
+            return shadow_dir_for(shadow, Path(target).expanduser().resolve())
+        raise ValueError(f"스냅샷 저장소를 찾을 수 없습니다: {target} (저장소 이름, 저장소 파일 이름 또는 폴더 경로)")
+
+    def snapshot_stores(self, check: bool = False) -> list[dict]:
+        """Every shared snapshot store: which repo, size, the runs that still use it and, with check, its health."""
+        shadow = self.runs_dir / "shadow"
+        names = {shadow_dir_for(shadow, r.resolved).name: r.name for r in self.repos.repos.values() if r.resolved}
+        out = []
+        for store in sorted(shadow.glob("*.git")) if shadow.exists() else []:
+            runs = self._store_runs(store)
+            entry = {"store": store.name, "repo": names.get(store.name), "mb": round(dir_size(store) / 1_048_576, 1),
+                     "runs": [r.id for r in runs],
+                     "active": [r.id for r in runs if r.status in ("pending", "running", "awaiting_approval")],
+                     "undecided": [r.id for r in runs if r.changes_status == "ready"]}
+            if check:
+                entry["problem"] = check_shadow(store)
+            out.append(entry)
+        return out
+
+    def reset_snapshot_store(self, target: str | Path, reason: str = "사용자가 초기화") -> dict:
+        """Delete a (broken) snapshot store; the next copy-mode run on that folder builds a fresh one.
+        Runs that used it lose their snapshot: each keeps its result.patch (refreshed first when possible), which
+        can still be applied; rollback/merge from the snapshot is no longer possible. Refused while a run is active."""
+        store = target if isinstance(target, Path) else self._find_store(target)
+        runs = self._store_runs(store)
+        active = [r.id for r in runs if r.status in ("pending", "running", "awaiting_approval")]
+        if active:
+            raise ValueError(f"이 저장소를 쓰는 실행이 진행 중입니다: {', '.join(active)} — 끝나거나 취소한 뒤 다시 하세요")
+        freed = dir_size(store) if store.exists() else 0
+        cleaned, patch_kept = [], []
+        for run in runs:
+            ws = self.workspace(run)
+            if ws.mode == "copy" and ws.copy_dir.is_dir():
+                try:
+                    ws.collect()  # the work in the copy -> result.patch, if the store still allows it
+                except (WorkspaceError, OSError):
+                    pass
+            try:
+                ws.cleanup()
+            except (WorkspaceError, OSError):
+                _remove(ws.marker)
+            if ws.patch_path.exists() and ws.patch_path.read_bytes().strip():
+                patch_kept.append(run.id)
+            run.workspace_cleaned = True
+            self._event(run, "-", "workspace_cleaned", decided=run.changes_status != "ready", reason=reason)
+            self.save(run)
+            cleaned.append(run.id)
+        _remove(store)
+        return {"store": store.name, "freed_mb": round(freed / 1_048_576, 1), "runs_cleaned": cleaned,
+                "patch_kept": patch_kept}
+
+    def _heal_snapshot_store(self, run: RunState, ws, error: Exception) -> str | None:
+        """prepare() failed: if the shared store is broken and no other run is using it, rebuild it and return
+        None (try again); else return a hint for the error message."""
+        if not isinstance(ws, Workspace) or not ws.git_dir.exists():
+            return ""
+        problem = check_shadow(ws.git_dir)
+        if problem is None:
+            return ""  # the store is fine: the failure is something else
+        others = [r.id for r in self._store_runs(ws.git_dir) if r.id != run.id
+                  and r.status in ("pending", "running", "awaiting_approval")]
+        if others:
+            return (f" — 스냅샷 저장소({ws.git_dir.name})가 손상됐습니다: {problem[:200]}. 진행 중인 실행({', '.join(others)})이 "
+                    f"끝나면 `relay cache reset {run.repo or ws.git_dir.name}` 로 초기화하세요")
+        result = self.reset_snapshot_store(ws.git_dir, reason=f"손상된 스냅샷 저장소 재생성 ({run.id})")
+        self._event(run, "-", "snapshot_store_rebuilt", store=ws.git_dir.name, problem=problem[:300],
+                    runs_cleaned=result["runs_cleaned"], error=str(error)[:200])
+        return None
+
     def recover_interrupted(self) -> list[str]:
         """Runs left 'running' by a server stop are marked failed so they can be resumed."""
         recovered = []
@@ -926,6 +1021,38 @@ class RelayEngine:
                 except (OSError, ValueError):
                     continue
         return recovered
+
+    def _check_mcp_ready(self, run: RunState, stages: list[StageSpec], attached: dict[str, dict], repo,
+                         ctx: ProjectContext | None) -> str | None:
+        """Before any stage runs: the MCP servers the remaining stages will use must answer (mcp_probe), and a
+        stage that edits through an editor MCP needs one attached. Returns why the run can't start, or None."""
+        live: dict[str, dict] = {}
+        for st in stages:
+            if not self._stage_tools(st, repo, ctx):
+                continue  # a stage without tools gets no MCP
+            for name in [*attached, *st.mcp]:
+                config = attached.get(name) or self.mcp_registry.get(name)
+                if name not in READ_ONLY_MCP and name not in live and config:
+                    live[name] = config
+        if any(st.edits_via_mcp for st in stages) and not live:
+            return ("이 릴레이는 에디터 MCP 로 작업합니다 — 연결된 MCP 가 없습니다. 🔌 MCP 에서 고르거나(relay run --mcp unreal) "
+                    "저장소 기본 MCP 로 지정하세요(relay repo add <이름> <경로> --mcp unreal)")
+        if self.mcp_probe is None or not live:
+            return None
+        failed = {}
+        for name, config in live.items():
+            try:
+                why = self.mcp_probe(config)
+            except Exception as e:  # noqa: BLE001 - a broken probe must not block the run
+                why = None
+                self._event(run, "-", "mcp_check_error", server=name, error=str(e)[:200])
+            if why:
+                failed[name] = why
+        self._event(run, "-", "mcp_check", ok=[n for n in live if n not in failed], failed=failed)
+        if failed:
+            return ("MCP 연결 안 됨 — " + "; ".join(f"{n}: {w}" for n, w in failed.items())
+                    + " · 서버(에디터)를 켠 뒤 재개하세요. 단계는 시작하지 않았습니다(비용 없음)")
+        return None
 
     def _check_mcp_saved(self, run: RunState, stage: str, since_ns: int, ws) -> None:
         """An editor MCP (e.g. Unreal) changes assets in the editor's memory; only a save writes them to disk.
@@ -1406,8 +1533,14 @@ class RelayEngine:
         if ws is not None and not ws.prepared:
             try:
                 info = ws.prepare()
-            except (WorkspaceError, OSError) as e:
-                return self._fail(run, "-", f"작업 공간 준비 실패: {e}")
+            except (WorkspaceError, OSError, subprocess.CalledProcessError) as e:
+                hint = self._heal_snapshot_store(run, ws, e)
+                if hint is not None:
+                    return self._fail(run, "-", f"작업 공간 준비 실패: {e}{hint}")
+                try:  # the broken shared store was rebuilt: snapshot again into a fresh one
+                    info = ws.prepare()
+                except (WorkspaceError, OSError, subprocess.CalledProcessError) as e2:
+                    return self._fail(run, "-", f"작업 공간 준비 실패 (스냅샷 저장소를 새로 만든 뒤에도): {e2}")
             self._event(run, "-", "workspace_ready", **info)
         cwd = ws.path if ws is not None else Path(run.workdir)
         hook_settings = ws.settings_path if isinstance(ws, JournalWorkspace) and ws.settings_path.exists() else None
@@ -1421,6 +1554,9 @@ class RelayEngine:
                         instructions=[p.relative_to(ctx.root).as_posix() for p in ctx.instructions],
                         skills=ctx.skills, mcp=list(attached), commands=ctx.commands)
             repo_lines += "\n".join(ctx.prompt_lines(cwd, list(attached))) + "\n"
+        problem = self._check_mcp_ready(run, spec.stages[run.index:], attached, repo, ctx)
+        if problem:
+            return self._fail(run, "-", problem)
         mcp_overrides = {}
         if repo and repo.docs_root and "docs_read" in self.mcp_registry:
             entry = dict(self.mcp_registry["docs_read"])

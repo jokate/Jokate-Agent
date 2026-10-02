@@ -1,0 +1,36 @@
+name: editor-task
+description: 에디터 작업 — 코드 수정 없이 연결된 에디터 MCP(Unreal 등)로 레벨·액터·애셋·블루프린트 설정을 바꾸고 저장 · 작업 → 결과·저장 확인(문제 있으면 되돌림) · 에디터 MCP 연결 필요 · 원본에 즉시 반영, 되돌리기 가능
+workspace: inplace        # MCP 는 실제 프로젝트를 바꾼다 — 디스크에 저장된 애셋은 변경 목록·되돌리기에 남는다
+auto_apply: true
+max_run_cost_usd: 2.5
+
+# 파일 도구로는 고치지 않는다(Edit/Write/Bash 없음): 바꾸는 일은 전부 MCP 로. edits_via_mcp 단계라서
+# 원본 작업·변경 기록이 켜지고, 시작 전에 MCP 가 붙어 있는지·응답하는지 확인한다(없으면 비용 없이 멈춤).
+# 다른 AI(codex 등)는 이 프로젝트의 MCP 를 쓴다는 보장이 없어 대체 주자를 두지 않는다.
+stages:
+  - name: edit
+    provider: claude
+    model: sonnet
+    effort: medium
+    retry_model: fable
+    retry_effort: high
+    fallback_model: opus
+    prompt: ../prompts/editor-task.md
+    tools: [Read, Grep, Glob]
+    edits_via_mcp: true
+    system_mode: replace
+    reads_outputs: [verify]
+    max_budget_usd: 1.5
+    timeout_s: 2400            # MCP 왕복이 많다
+
+  - name: verify
+    provider: claude
+    model: sonnet
+    effort: low
+    prompt: ../prompts/editor-verify.md
+    tools: [Read, Grep, Glob]
+    system_mode: replace
+    reads_outputs: [edit]
+    on_retry: edit
+    max_retries: 2
+    max_budget_usd: 0.5
