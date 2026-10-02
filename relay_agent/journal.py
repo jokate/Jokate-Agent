@@ -29,13 +29,20 @@ import sys
 import tempfile
 from pathlib import Path
 
-# Never journaled: VCS metadata and folders that are pure build output / caches.
-SKIP_DIRS = {
-    ".git", ".svn", ".hg", ".p4", ".vs", ".idea", "__pycache__", ".venv", "venv", "node_modules",
+# Folders that are pure build output / caches at project or plugin level. Inside a Content/Assets tree the
+# same names are ordinary asset folders (Content/UI/Temp, Assets/Library) and are tracked: skipping them there
+# would hide assets an editor MCP saved from the change list and the rollback.
+BUILD_DIRS = {
     "Intermediate", "DerivedDataCache", "Saved", "Binaries",  # Unreal build/cache (Content IS tracked)
     "Library", "Temp", "Logs", "obj",                         # Unity/.NET caches
-    ".pytest_cache", ".mypy_cache", ".ruff_cache", "runs",
+    "runs",
 }
+CONTENT_ROOTS = {"Content", "Assets"}  # Unreal / Unity asset trees
+# Never journaled: VCS metadata, tool caches and the build folders above.
+SKIP_DIRS = {
+    ".git", ".svn", ".hg", ".p4", ".vs", ".idea", "__pycache__", ".venv", "venv", "node_modules",
+    ".pytest_cache", ".mypy_cache", ".ruff_cache",
+} | BUILD_DIRS
 TEXT_LIMIT = 2 * 1_048_576           # larger files are treated as binary (listed, not diffed)
 # Game assets are changed by editors/MCP (e.g. Unreal MCP saving .uasset): never copied or cached here.
 # They are only listed; rollback uses the VCS's own original when there is one (not for git LFS pointers).
@@ -220,17 +227,19 @@ def detect_vcs(source: Path):
 # --------------------------------------------------------------------------- workspace
 def scan(root: Path, skip_dirs: set[str], hook_only: set[str] = frozenset()) -> dict[str, tuple[int, int]]:
     out: dict[str, tuple[int, int]] = {}
-    stack = [root]
+    in_content = skip_dirs - BUILD_DIRS  # under Content/ or Assets/: build-folder names are real asset folders
+    stack = [(root, False)]
     while stack:
-        folder = stack.pop()
+        folder, content = stack.pop()
+        skip = in_content if content else skip_dirs
         try:
             with os.scandir(folder) as it:
                 for entry in it:
                     try:
                         if entry.is_dir(follow_symlinks=False):
                             top_level = folder == root
-                            if entry.name not in skip_dirs and not (top_level and entry.name in hook_only):
-                                stack.append(Path(entry.path))
+                            if entry.name not in skip and not (top_level and entry.name in hook_only):
+                                stack.append((Path(entry.path), content or entry.name in CONTENT_ROOTS))
                         elif entry.is_file(follow_symlinks=False):
                             st = entry.stat(follow_symlinks=False)
                             out[Path(entry.path).relative_to(root).as_posix()] = (st.st_size, st.st_mtime_ns)
@@ -358,6 +367,16 @@ class JournalWorkspace:
         changed |= {rel for rel in journal if rel not in now}
         changed |= set(touched)
         return sorted(changed), journal, meta, touched
+
+    def changed_since(self, since_ns: int, skip_edited: bool = False) -> list[str]:
+        """Tracked files written at or after `since_ns` (e.g. during one stage), plus files deleted since the start.
+        skip_edited: leave out files the AI's own edit tools changed (the pre-edit hook saw them), so what is left
+        was written by something else — an editor MCP save, a build, a Bash command."""
+        journal, _, touched = self._load()
+        now = scan(self.source, self.skip, self.hook_only)
+        written = [rel for rel, (_, mtime) in now.items() if mtime >= since_ns]
+        changed = set(written) | {rel for rel in journal if rel not in now}
+        return sorted(changed - set(touched) if skip_edited else changed)
 
     def collect(self) -> dict:
         if not self.prepared:

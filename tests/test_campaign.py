@@ -223,3 +223,32 @@ def test_model_and_effort_ceilings_reach_every_campaign_run(tmp_path):
         ("plan", "sonnet", "high", None), ("build", "sonnet", "high", None)]
     run = engine.load(c.tasks[0].run_ids[0])
     assert (run.model_cap, run.effort_cap) == ("sonnet", "high")
+
+
+def test_planner_hands_each_task_to_a_relay_and_followups_keep_it(tmp_path):
+    plan = [ok("계획", next_steps=["[doc] 시나리오 :: 2장을 쓴다", "[nope] 코드 :: 고친다", "[task] 마무리 :: 정리한다"])]
+    build = [ok("시나리오 일부", open_issues=["엔딩 대사가 남음"]), ok("엔딩 끝"), ok("코드 끝"), ok("정리 끝")]
+    campaigns, engine, runner, project, _ = setup(tmp_path, plan, build)
+    relays = campaigns.relays_dir
+    (relays / "doc.yaml").write_text(
+        "name: doc\nstages:\n  - {name: build, provider: mock, prompt: role.md, tools: [Write]}\n", encoding="utf-8")
+    (relays / "task.yaml").write_text(
+        "name: task\nstages:\n  - {name: build, provider: mock, prompt: role.md, tools: [Write]}\n", encoding="utf-8")
+    (relays / "auto.yaml").write_text("name: auto\nrouter: {fallback: task}\n", encoding="utf-8")
+    campaigns.engine.router = lambda text, model: ('{"relay": "task", "reason": "r"}', Usage("claude", "haiku"))
+
+    c, plan_run = campaigns.start("로드맵", project, spec=CampaignSpec(planner="planner", task_relay="auto"))
+    assert "[작업별 릴레이]" in plan_run.baton.goal and "- doc:" in plan_run.baton.goal
+    c = campaigns.drive(c.id)
+
+    assert c.status == "done"
+    assert [(t.id, t.relay) for t in c.tasks] == [("T1", "doc"), ("T1.1", "doc"), ("T2", None), ("T3", "task")]
+    assert [Path(engine.load(t.run_ids[-1]).relay).stem for t in c.tasks] == ["doc", "doc", "task", "task"]
+
+
+def test_a_fixed_task_relay_is_not_offered_to_the_planner(tmp_path):
+    campaigns, _, _, project, _ = setup(tmp_path, [ok("계획", next_steps=["[task] 하나 :: 한다"])], [ok("끝")])
+    c, plan_run = campaigns.start("x", project, spec=spec())
+    assert "[작업별 릴레이]" not in plan_run.baton.goal
+    c = campaigns.drive(c.id)
+    assert c.tasks[0].relay is None and c.tasks[0].title == "하나"

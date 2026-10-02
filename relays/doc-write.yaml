@@ -1,0 +1,51 @@
+name: doc-write
+description: 문서 작성 — 시나리오·퀘스트·대사·기획서·가이드 등 마크다운 문서를 새로 쓰거나 고침 · 구성안 → 작성 → 정합성 검토(기존 설정·용어와 모순이면 되돌림) · 코드·스킬 아님 · 원본에 즉시 반영, 되돌리기 가능
+workspace: inplace        # 즉시 반영(원본에서 작업) · 바뀐 파일만 기록해 되돌리기 가능
+auto_apply: true
+max_run_cost_usd: 3.0    # 긴 문서는 작성 출력이 많다 — 넘으면 승인 대기(실패 아님)
+
+# 문서 작업에는 실행할 검증 명령이 없으므로 Bash 를 주지 않는다: 승인 대기에 걸릴 명령 자체가 없고,
+# 턴마다 다시 읽히는 도구 정의도 줄어든다(README "토큰 절약"). 프로젝트 지침이 명령을 정하면 그것만 붙는다.
+stages:
+  - name: outline
+    provider: claude
+    model: fable
+    fallback_model: opus
+    effort: medium
+    alternates: [{provider: codex}, {provider: opencode}, {provider: gemini}]
+    prompt: ../prompts/doc-outline.md
+    tools: [Read, Grep, Glob]
+    mcp: [digest]              # 설정·기존 문서가 여러 개면 파일별 요약만 받는다(캐시)
+    system_mode: replace
+    gate: human                # 방향이 갈릴 때만 멈춘다(approval: ai/auto)
+    max_budget_usd: 0.8
+
+  - name: write
+    provider: claude
+    model: sonnet
+    effort: medium
+    retry_model: fable
+    retry_effort: high
+    fallback_model: opus
+    alternates: [{provider: codex}, {provider: opencode}, {provider: gemini}]
+    prompt: ../prompts/doc-write.md
+    tools: [Read, Edit, Write, Grep, Glob]
+    mcp: [digest]
+    permission_mode: acceptEdits
+    system_mode: replace
+    reads_outputs: [outline, review]
+    max_budget_usd: 1.5
+
+  - name: review
+    provider: claude
+    model: sonnet
+    effort: low
+    alternates: [{provider: codex}, {provider: opencode}, {provider: gemini}]
+    prompt: ../prompts/doc-review.md
+    tools: [Read, Grep, Glob]
+    mcp: [digest]
+    system_mode: replace
+    reads_outputs: [outline, write]
+    on_retry: write
+    max_retries: 1
+    max_budget_usd: 0.4

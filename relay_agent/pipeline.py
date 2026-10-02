@@ -41,6 +41,21 @@ from .workspace import DEFAULT_EXCLUDES, Workspace, WorkspaceError, dir_size, gc
 
 WRITE_TOOLS = {"Edit", "Write", "Bash", "NotebookEdit"}
 READ_ONLY_MCP = {"docs_read", "handoff", "digest"}  # every other MCP server may change the real project
+# Words in an MCP tool name that mean it changes the project/editor (create_blueprint, set_actor_property,
+# SpawnActor …). Read tools (get/list/find/search/describe) have none of them. A heuristic: unknown names pass.
+MCP_CHANGE_WORDS = {
+    "create", "add", "set", "update", "modify", "edit", "write", "delete", "remove", "destroy", "spawn", "move",
+    "rename", "duplicate", "copy", "import", "replace", "attach", "detach", "connect", "disconnect", "place",
+    "apply", "assign", "insert", "make", "new", "build", "compile", "change", "reparent", "batch",
+}
+
+
+def mcp_tool_changes(tool: str) -> bool:
+    """True when an MCP tool's name reads like it changes something (see MCP_CHANGE_WORDS)."""
+    words = re.findall(r"[a-z]+", re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", tool).lower())
+    return any(w in MCP_CHANGE_WORDS for w in words)
+
+
 MODEL_ORDER = ["haiku", "sonnet", "opus", "fable"]  # Claude tiers, weakest first
 EFFORT_ORDER = ["low", "medium", "high", "xhigh", "max"]
 
@@ -441,6 +456,19 @@ class RelayEngine:
                 + [{"name": n, "scope": v["scope"], "always": False, "default": n in default}
                    for n, v in ctx.optional_mcp.items()])
 
+    @staticmethod
+    def _run_mcp_names(workdir: Path, repo: RepoSpec | None, picked: list[str] | None) -> list[str]:
+        """Servers a run in this folder will attach besides the stages' own: the run's pick (or the repo's
+        default) and the project's own servers. Used before the run exists to decide copy vs in place."""
+        names = list(picked if picked is not None else (repo.mcp if repo else []))
+        if repo is not None and not repo.project_context:
+            return names
+        try:
+            ctx = discover(Path(workdir), mcp_from=repo.mcp_from if repo else None)
+        except OSError:
+            ctx = None
+        return names + (list(ctx.mcp) if ctx else [])
+
     def _attached_mcp(self, run: RunState, ctx: ProjectContext | None, repo: RepoSpec | None) -> dict[str, dict]:
         """name -> config of every project/optional MCP server this run uses (stage `mcp:` entries come on top)."""
         if ctx is None:
@@ -544,7 +572,8 @@ class RelayEngine:
             chosen[stage_name] = {"provider": provider, "model": choice.get("model") or None}
             if effort:
                 chosen[stage_name]["effort"] = effort
-        live_mcp = sorted({m for s in spec.stages for m in s.mcp if m not in READ_ONLY_MCP})
+        live_mcp = sorted((set(m for s in spec.stages for m in s.mcp) | set(self._run_mcp_names(workdir, repo_spec, mcp)))
+                          - READ_ONLY_MCP)
         forced = None
         if mode == "copy" and live_mcp:
             # MCP tools (e.g. the Unreal editor) change the real project, not a copy: results would split
@@ -897,6 +926,34 @@ class RelayEngine:
                 except (OSError, ValueError):
                     continue
         return recovered
+
+    def _check_mcp_saved(self, run: RunState, stage: str, since_ns: int, ws) -> None:
+        """An editor MCP (e.g. Unreal) changes assets in the editor's memory; only a save writes them to disk.
+        Unsaved edits are missing from the change list, the rollback and the commit. If this stage called MCP
+        tools whose names say they change something, but no project file changed during the stage, warn and
+        hand it to the next stage (reviewer/playtest) as an open issue. Tool names are a heuristic."""
+        if not isinstance(ws, JournalWorkspace) or not ws.prepared:
+            return
+        events = self.history.events(run.id)
+        start = max((i for i, e in enumerate(events) if e["kind"] == "stage_started" and e["stage"] == stage), default=-1)
+        calls = [e["detail"] for e in events[start + 1:] if e["kind"] == "mcp_call" and e["stage"] == stage
+                 and e["detail"].get("server") not in READ_ONLY_MCP and mcp_tool_changes(e["detail"].get("tool") or "")]
+        if not calls:
+            return
+        try:
+            changed = ws.changed_since(since_ns, skip_edited=True)  # a code edit must not hide an unsaved asset
+        except (OSError, ValueError):
+            return
+        if changed:
+            return
+        servers = sorted({c.get("server") or "?" for c in calls})
+        tools = sorted({c.get("tool") or "?" for c in calls})
+        self._event(run, stage, "mcp_unsaved", servers=servers, tools=tools[:8], calls=len(calls))
+        run.baton.open_issues.append(
+            f"[MCP 저장 확인] `{stage}` 단계에서 {', '.join(servers)} 로 바꾸는 호출 {len(calls)}회"
+            f"({', '.join(tools[:5])}) 가 있었지만 프로젝트 파일은 하나도 바뀌지 않았다. 에디터에서 저장되지 않았으면 "
+            "변경 목록·되돌리기·커밋에 남지 않는다 — MCP 로 대상이 실제로 바뀌었는지와 저장 여부를 확인하고, "
+            "저장되지 않았으면 MCP 의 저장 도구로 저장한다.")
 
     # --- workspace results -------------------------------------------------
     def _settle_workspace(self, run: RunState) -> None:
@@ -1500,6 +1557,7 @@ class RelayEngine:
                         + (f"\n\n# HANDOFF\n{handoff}" if handoff else "")
                         + (f"\n그사이 사용자 추가 지시:\n{notes}" if notes else "")))
             self._event(run, stage.name, "prompt_breakdown", **prompt_breakdown(call.system, call.prompt))
+            stage_t0_ns = time.time_ns()
             try:
                 result, usage = self._run_stage(run, stage, call, primary)
             except RunnerError as e:
@@ -1546,6 +1604,7 @@ class RelayEngine:
             run.baton.previous_handoff = ""
             self.usage.record(run.id, stage.name, usage)
             run.baton = result.apply(run.baton, stage.name)
+            self._check_mcp_saved(run, stage.name, stage_t0_ns, ws)
             run.history.append(StageRecord(
                 stage=stage.name, at=_now(), verdict=result.verdict, runner=usage.runner,
                 model=usage.model, total_input=usage.total_input,

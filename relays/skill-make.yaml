@@ -1,0 +1,36 @@
+name: skill-make
+description: Claude 스킬 제작 — .claude/skills/<이름>/SKILL.md 와 참조 파일을 새로 만들거나 고침 · 작성 → 형식·트리거 검토(문제 있으면 되돌림) · 원본에 즉시 반영, 되돌리기 가능
+workspace: inplace
+auto_apply: true
+max_run_cost_usd: 1.5
+
+# 스킬은 실행이 아니라 형식(frontmatter)과 description 의 트리거 정확도로 판정한다 → Bash 없음.
+stages:
+  - name: write
+    provider: claude
+    model: sonnet
+    effort: medium
+    retry_model: fable
+    retry_effort: high
+    fallback_model: opus
+    alternates: [{provider: codex}, {provider: opencode}, {provider: gemini}]
+    prompt: ../prompts/skill-write.md
+    tools: [Read, Edit, Write, Grep, Glob]
+    mcp: [digest]              # 스킬로 옮길 문서·절차가 여러 개면 파일별 요약만 받는다
+    permission_mode: acceptEdits
+    system_mode: replace
+    reads_outputs: [review]
+    max_budget_usd: 1.0
+
+  - name: review
+    provider: claude
+    model: sonnet
+    effort: low
+    alternates: [{provider: codex}, {provider: opencode}, {provider: gemini}]
+    prompt: ../prompts/skill-review.md
+    tools: [Read, Grep, Glob]
+    system_mode: replace
+    reads_outputs: [write]
+    on_retry: write
+    max_retries: 1
+    max_budget_usd: 0.4
