@@ -79,6 +79,8 @@ uv run relay repo clone mnys --url <git url>          # on a new machine: clone 
   - **Re-runs read it first:** a resumed stage gets the handoff in its prompt, and the next request in the same session carries the previous run's handoff.
   - **Cleanup only on "작업 완료":** handoffs stay until you press **✅ 작업 완료** on the session (or run `relay session complete <session_id>`). That deletes the session's `HANDOFF.md` files and stops carrying them on. A new request reopens the session. The record stays in the dashboard.
 - **MCP servers of a run:** the folder's own servers (`.mcp.json` up the tree, its project entry in `~/.claude.json`) are always connected. Global ones (user scope, e.g. `unreal`) and those of other folders are connected by name: per repo with `mcp: [unreal]` (+ `mcp_from: [<other folder>]` to borrow that folder's `.mcp.json`), per run with the 🔌 MCP checkboxes in the composer or `relay run --mcp unreal`. `GET /mcp?session_id=` lists what is available.
+  - **Any** non-read-only server the run attaches (the run's pick, the repo's `mcp:`, the project's own) forces `inplace`, not only a stage's `mcp:` — a copy would leave the editor's changes out of the patch.
+  - **Unsaved MCP changes:** an editor MCP changes assets in memory; only a save writes them to disk, so unsaved edits are missing from the change list, the rollback and the commit. Stages are told to save through the MCP. After a stage that called MCP tools whose names say they change something (`create_*`, `set_*`, `Spawn*` …), if no project file changed during that stage, the timeline shows 💾 `mcp_unsaved` and the next stage (review/playtest) gets a "[MCP 저장 확인]" open issue to check and send back. The name test is a heuristic.
   - Big servers are loaded on demand: the stage gets `ToolSearch`, so only tool names are sent until a tool is needed. Measured with unreal (1,031 tools), same two calls: **361K → 62K** input tokens. A connected big server still costs roughly +15–25K per turn for the name list, so keep it off for code-only work.
   - The prompt tells the AI to query the server instead of grepping files for what it covers (assets, blueprints, editor state). MCP calls act on the real project/editor, not on a copy workspace.
 - **Liveness detail:** while a stage runs, the bar under the track shows what the AI is doing right now — the tool that is running with its command and how long it has taken, the tail of what it is thinking/writing (streamed, in memory only), or an API retry wait. A terminal `relay run` shows the same through `runs/<id>/pulse.json`. No output at all for `stall_s` (default 8 min) kills the process and starts the stage once more (`stall_restart`).
@@ -92,7 +94,7 @@ uv run relay repo clone mnys --url <git url>          # on a new machine: clone 
 
 | Step | What it does | Cost |
 |---|---|---|
-| 1. Journal | At run start, record only **size and modified time** of every file (code **and assets**). VCS metadata (`.svn` `.git`) and pure build/cache folders (`Intermediate Saved DerivedDataCache Binaries`) are skipped | Measured: **117K files / 13.6GB → 8.1s, record 1.7MB** |
+| 1. Journal | At run start, record only **size and modified time** of every file (code **and assets**). VCS metadata (`.svn` `.git`) and pure build/cache folders (`Intermediate Saved DerivedDataCache Binaries`) are skipped — except inside `Content/` or `Assets/`, where a folder named `Temp`, `Logs`, `Library` … is an ordinary asset folder and is tracked | Measured: **117K files / 13.6GB → 8.1s, record 1.7MB** |
 | 2. Pre-edit backup | A **PreToolUse hook** in Claude Code copies a file **right before** Edit/Write changes it | Only files that were edited |
 | 3. Uncommitted at start | Files already modified or unversioned when the run starts are copied (256MB per file / 2GB total cap) | Only uncommitted work |
 | 4. Originals | Anything else that changed (Bash, **assets saved by the Unreal editor via MCP**, builds) is restored from the VCS's own original: **git HEAD, SVN BASE (read straight from `.svn/pristine`, no svn CLI needed)** | 0 |
@@ -281,8 +283,8 @@ The relays know no engine or domain; two things adapt them to each request:
 
 ## Campaigns — keep relaying until the whole roadmap is done
 One run does what it judges best for a request; given a whole roadmap it does one part. The **campaign** relay keeps going:
-1. **Plan:** a read-only planner (`campaign-plan`, hidden) reads the request, attachments (roadmap), the project's instructions and code, drops what is already done, and splits the rest into ordered tasks — foundation first, each finishable in one relay run and with its own finish line (`제목 :: 할 일과 완료 기준`).
-2. **Relay each task** in the same session (`task_relay`, default `auto`): each run gets the previous run's hand-over and the plan with its own task marked.
+1. **Plan:** a read-only planner (`campaign-plan`, hidden) reads the request, attachments (roadmap), the project's instructions and code, drops what is already done, and splits the rest into ordered tasks — foundation first, each finishable in one relay run and with its own finish line (`[릴레이] 제목 :: 할 일과 완료 기준`). Tasks can be code, game content, documents or skills.
+2. **Relay each task** in the same session: with `task_relay: auto` (default) the planner is given the relays that change files and tags each task with the one that should take it (`[doc-write]`, `[skill-make]`, `[game-cycle]`, …); a follow-up keeps its task's relay, and an untagged or unknown tag is routed by `auto`. A fixed `task_relay` is used for every task. Each run gets the previous run's hand-over and the plan with its own task marked.
 3. **Until done:**
    - A task that ends with open issues gets a follow-up "마무리" task right after it (`max_followups`, default 2 per task).
    - A usage limit waits for the reset (from the provider's window/bench, else 30 min) and continues the same run; a server restart resumes it; a busy folder waits.
@@ -304,6 +306,8 @@ One run does what it judges best for a request; given a whole roadmap it does on
 | quick-fable | Single Fable stage | Small but hard problems |
 | default | scout Haiku → plan **Fable** (approval) → build Sonnet (**Fable on send-back**) → review Sonnet | Large or risky jobs |
 | docs-qa | Single Sonnet(low) stage + docs-read MCP | Document questions |
+| doc-write | outline **Fable** (sources, fixed facts, approval only when the direction is open) → write Sonnet (**Fable on send-back**) → review Sonnet(low) (missing items, contradictions with existing docs, format) · no Bash | Scenarios, quests, dialogue, design docs, any Markdown |
+| skill-make | write Sonnet (`.claude/skills/<name>/SKILL.md` + references; **Fable on send-back**) → review Sonnet(low) (frontmatter, trigger description, overlap with other skills) · no Bash | Making or fixing Claude skills |
 | **game-cycle** | design **Fable** (game spec) → build Sonnet (code + scene, via the project's editor MCP if any; **Fable on send-back**) → playtest Sonnet(low) (build errors, wiring, a short run; up to 2 send-backs) | Making a game or a feature of one (any engine or framework) |
 
 **game-cycle** knows no engine: the target folder's `CLAUDE.md` (layout, patterns, how to verify), skills and `.mcp.json` (e.g. `unity-mcp`, `unreal`) are attached automatically and decide the tools and checks. An editor MCP forces `inplace`; keep the editor open so it can build scenes — without it the build stage stops at what files allow and lists the editor work left. Things only a person can judge (feel, difficulty) come back as user checks.
@@ -328,7 +332,7 @@ Deliberately not applied: `--bare` (needs an API key), `--resume` between stages
 
 ## Structure
 `relay_agent/`: `baton.py` baton · `pipeline.py` engine · `runners.py` claude_cli/api/mock · `history.py` sessions, questions, events · `usage.py` token/cost log · `server.py` API · `dashboard.html` UI · `cli.py`
-`mcp_servers/`: `docs_read.py`, `handoff.py` · `relays/`: default, quick, docs-qa, game-cycle, demo (mock, free) · `prompts/`: stage role prompts
+`mcp_servers/`: `docs_read.py`, `handoff.py` · `relays/`: default, quick, docs-qa, doc-write, skill-make, game-cycle, demo (mock, free) · `prompts/`: stage role prompts
 
 ## Roadmap
 1. Real-call verification of the Codex / Gemini presets (after install), OpenCode login and a real run

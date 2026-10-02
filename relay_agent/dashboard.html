@@ -530,7 +530,7 @@ const EV = {
   user_notes_applied: ["📌", "추가 지시 반영"], result_repaired: ["🩹", "결과 형식 복구"], prompt_breakdown: ["📤", "보낸 프롬프트"],
   token_report: ["🔥", "토큰 사용 내역"], gate_skipped: ["⏩", "승인 없이 진행"],
   process_stopped: ["🛑", "AI 프로세스 종료"], stage_resumed: ["⏯️", "중단된 대화 이어서"], resume_fallback: ["↻", "처음부터 다시"],
-  budget_auto_extended: ["💸", "예산 자동 연장 (자동 진행)"], approval_mode: ["🚀", "진행 모드 변경"], mcp_missing: ["🔌", "MCP 서버를 찾지 못함"], stall_restart: ["🧟", "무응답으로 다시 시작"], handoff_written: ["📝", "인계서 작성"], handoff_failed: ["📝", "인계서 AI 작성 실패"], project_context: ["📁", "프로젝트 지침·스킬 적용"],
+  budget_auto_extended: ["💸", "예산 자동 연장 (자동 진행)"], approval_mode: ["🚀", "진행 모드 변경"], mcp_missing: ["🔌", "MCP 서버를 찾지 못함"], mcp_unsaved: ["💾", "MCP 변경이 저장되지 않았을 수 있음"], stall_restart: ["🧟", "무응답으로 다시 시작"], handoff_written: ["📝", "인계서 작성"], handoff_failed: ["📝", "인계서 AI 작성 실패"], project_context: ["📁", "프로젝트 지침·스킬 적용"],
 };
 const PROVIDER_LABEL = { claude: "Claude", codex: "Codex", opencode: "OpenCode", gemini: "Gemini", anthropic_api: "Claude API", openai: "OpenAI", openrouter: "OpenRouter", ollama: "Ollama", mock: "Mock" };
 const WINDOW_LABEL = { five_hour: "5h", seven_day: "7d", seven_day_opus: "7d·Opus", seven_day_sonnet: "7d·Son" };
@@ -677,6 +677,7 @@ function describe(e) {
       : `실행 비용 $${(d.spent_usd || 0).toFixed(2)} → 한 번 더 허용 (상한 $${d.ceiling_usd})`;
     case "approval_mode": return `${esc(d.was)} → ${esc(d.mode)}`;
     case "mcp_missing": return `${esc(d.server)} — 프로젝트(.mcp.json)·전역 설정·relay.config 어디에도 없음`;
+    case "mcp_unsaved": return `${esc((d.servers || []).join(", "))} 변경 호출 ${d.calls}회 (${esc((d.tools || []).join(", "))}) — 이 단계 동안 바뀐 프로젝트 파일 없음 · 다음 단계가 저장 여부를 확인`;
     case "stall_restart": return `${esc(d.reason)} — 같은 모델로 한 번 더 시작`;
     case "handoff_written": return `${esc(d.model)} 가 요청·작업된 내역·남은 일로 정리 — HANDOFF 탭 · 재개하면 이것부터 읽음 (입력 ${fmtN(d.input_tokens)} · $${(d.cost_usd || 0).toFixed(4)})`;
     case "handoff_failed": return `기본 인계서로 대신함 (${esc(d.reason)})`;
@@ -1018,7 +1019,7 @@ async function renderCampaign(sessionId) {
     ${c.reason ? `<div class="hint" style="margin-top:6px">${esc(c.reason)}${esc(wait)}</div>` : ""}
     ${c.tasks.length ? `<div style="margin-top:8px;display:flex;flex-direction:column;gap:3px;font-size:13px">${c.tasks.map((t) => `
       <div ${t.run_ids.length ? `data-run-link="${esc(t.run_ids[t.run_ids.length - 1])}" style="cursor:pointer"` : ""}
-        title="${esc(t.goal)}${t.result ? "\n\n결과: " + esc(t.result) : ""}">${TASK_IC[t.status] || "·"} <b>${esc(t.id)}</b> ${esc(t.title)}</div>`).join("")}</div>`
+        title="${esc(t.goal)}${t.result ? "\n\n결과: " + esc(t.result) : ""}">${TASK_IC[t.status] || "·"} <b>${esc(t.id)}</b> ${t.relay ? `<span class="tag" title="이 작업을 받는 릴레이">${esc(t.relay)}</span> ` : ""}${esc(t.title)}</div>`).join("")}</div>`
       : `<div class="hint" style="margin-top:6px">작업 목록을 만드는 중… (계획 실행이 끝나면 여기에 나옵니다)</div>`}
   </div>`;
 }

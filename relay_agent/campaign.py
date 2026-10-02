@@ -45,6 +45,7 @@ class Task(BaseModel):
     attempts: int = 0
     result: str = ""
     followup_of: str | None = None
+    relay: str | None = None  # relay the planner gave this task ([name]); None = the campaign's task_relay
 
 
 class Campaign(BaseModel):
@@ -85,17 +86,25 @@ def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
-def parse_tasks(items: list[str], limit: int) -> list[Task]:
-    """Planner next_steps -> tasks. Each item is "제목 :: 할 일과 완료 기준" (a bare line becomes both)."""
+RELAY_TAG = re.compile(r"^\[([A-Za-z0-9_.-]+)\]\s*")
+
+
+def parse_tasks(items: list[str], limit: int, relays: set[str] | frozenset = frozenset()) -> list[Task]:
+    """Planner next_steps -> tasks. Each item is "[릴레이] 제목 :: 할 일과 완료 기준" (a bare line becomes both).
+    The [릴레이] tag is optional; a name not in `relays` is dropped (that task is routed automatically)."""
     tasks = []
     for raw in items:
         text = re.sub(r"^\s*(?:\d+[.)]|[-*•])\s*", "", raw or "").strip()
         if not text or text.startswith(NO_FORMAT):
             continue
+        relay = None
+        if m := RELAY_TAG.match(text):
+            relay = m.group(1) if m.group(1) in relays else None
+            text = text[m.end():].strip()
         title, sep, body = text.partition("::")
         title, body = title.strip(), body.strip()
         tasks.append(Task(id=f"T{len(tasks) + 1}", title=title[:120] if sep else text[:80],
-                          goal=body if sep and body else text))
+                          goal=body if sep and body else text, relay=relay))
         if len(tasks) >= limit:
             break
     return tasks
@@ -143,6 +152,20 @@ class CampaignRunner:
     def _relay(self, name: str) -> Path:
         return self.relays_dir / f"{name}.yaml"
 
+    def task_relays(self, spec: CampaignSpec) -> list[dict]:
+        """Relays the planner may hand a task to: when task_relay is a router (auto), its candidates that change
+        files. A fixed task_relay is kept for every task (empty list: the planner does not choose)."""
+        from . import router
+
+        try:
+            task_spec, _ = RelaySpec.load(self._relay(spec.task_relay))
+        except (OSError, ValueError):
+            return []
+        if task_spec.router is None:
+            return []
+        return router.candidates(self.relays_dir, task_spec.router.candidates,
+                                 task_spec.router.exclude + [spec.task_relay], RelaySpec.load, writes_only=True)
+
     # --- start / control ---------------------------------------------------------------
     def start(self, goal: str, workdir: Path | None, session_id: str | None = None, repo: str | None = None,
               spec: CampaignSpec | None = None, approval: str | None = None, mcp: list[str] | None = None,
@@ -153,6 +176,10 @@ class CampaignRunner:
         model_cap, effort_cap = model_cap or spec.model_cap, effort_cap or spec.effort_cap
         plan_goal = (f"{goal}\n\n[캠페인 계획] 위 요청을 끝까지 완료하기 위한 작업 목록을 만든다. "
                      f"작업은 최대 {spec.max_tasks}개, 순서대로 하나씩 릴레이로 실행된다.")
+        if relays := self.task_relays(spec):
+            plan_goal += ("\n\n[작업별 릴레이] 각 작업 앞에 그 작업을 받을 릴레이를 `[이름]` 으로 붙인다. "
+                          "작업의 종류(코드·게임 제작·문서·스킬)에 맞는 것을 고르고, 맞는 것이 없으면 붙이지 않는다(자동 선택):\n"
+                          + "\n".join(f"- {o['name']}: {o['description']} [{o['stages']}]" for o in relays))
         run = self.engine.create(self._relay(spec.planner), plan_goal, workdir, session_id, repo=repo,
                                  approval="never", mcp=mcp, attachments=attachments,
                                  model_cap=model_cap, effort_cap=effort_cap)
@@ -313,13 +340,14 @@ class CampaignRunner:
         if run.status != "done":
             self._finish(c, "paused", f"계획 단계가 끝나지 않았습니다: {run.error or run.status} — 재개하면 다시 시도")
             return False
-        tasks = parse_tasks(run.baton.next_steps, c.spec.max_tasks)
+        tasks = parse_tasks(run.baton.next_steps, c.spec.max_tasks, {o["name"] for o in self.task_relays(c.spec)})
         if not tasks:
             self._finish(c, "failed", "계획 단계가 작업 목록(next_steps)을 내지 않았습니다")
             return False
         c.tasks, c.status, c.reason = tasks, "running", ""
         self.save(c)
-        self.engine._event(run, "-", "campaign_planned", campaign=c.id, tasks=[f"{t.id} {t.title}" for t in tasks])
+        self.engine._event(run, "-", "campaign_planned", campaign=c.id,
+                           tasks=[f"{t.id} {'[' + t.relay + '] ' if t.relay else ''}{t.title}" for t in tasks])
         return True
 
     # --- one task ----------------------------------------------------------------------------
@@ -355,7 +383,8 @@ class CampaignRunner:
         else:
             # a task is work on the target: never a read-only relay, and a run that landed on one is not
             # continued (it cannot change anything however often it is retried) — start over and route again
-            run = self.engine.create(self._relay(c.spec.task_relay), self._task_goal(c, task), Path(c.workdir),
+            relay = self._relay(task.relay) if task.relay and self._relay(task.relay).is_file() else None
+            run = self.engine.create(relay or self._relay(c.spec.task_relay), self._task_goal(c, task), Path(c.workdir),
                                      c.session_id, repo=c.repo, approval=c.approval, mcp=c.mcp,
                                      attachments=[Path(a) for a in c.attachments if Path(a).is_file()],
                                      model_cap=c.model_cap, effort_cap=c.effort_cap, needs_writes=True)
@@ -392,6 +421,7 @@ class CampaignRunner:
         if not issues or done_followups >= c.spec.max_followups:
             return
         followup = Task(id=f"{root}.{done_followups + 1}", title=f"{c_title(c, root)} 마무리", followup_of=root,
+                        relay=task.relay,  # the same kind of work: the same relay
                         goal="앞 작업이 남긴 미해결 이슈를 해결하고 원래 완료 기준을 채운다:\n"
                              + "\n".join(f"- {i}" for i in issues[:10]))
         c.tasks.insert(c.tasks.index(task) + 1, followup)

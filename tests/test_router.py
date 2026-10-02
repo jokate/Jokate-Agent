@@ -77,5 +77,5 @@ def test_shipped_auto_relay_offers_every_real_relay():
     assert spec.router is not None and not spec.stages
     names = [o["name"] for o in router.candidates(RELAYS, spec.router.candidates, spec.router.exclude + ["auto"],
                                                   RelaySpec.load)]
-    assert {"quick", "default", "docs-qa", "game-cycle", "quick-fable"} <= set(names)
+    assert {"quick", "default", "docs-qa", "game-cycle", "quick-fable", "doc-write", "skill-make"} <= set(names)
     assert "demo" not in names and "auto" not in names

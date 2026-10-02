@@ -68,6 +68,8 @@ class ProjectContext:
                 "파일을 grep/glob 하지 말고 MCP 도구로 조회·수정한다. 도구는 필요할 때 ToolSearch 로 찾는다 "
                 f"(예: ToolSearch \"{attached[0]} list assets\", 또는 \"select:mcp__{attached[0]}__<이름>\").",
                 "- MCP 는 작업 디렉터리와 별개로 실제 프로젝트/에디터에 바로 작용한다.",
+                "- MCP 로 애셋·레벨·블루프린트를 바꿨으면 MCP 의 저장 도구로 저장한다. 에디터 메모리에만 있는 변경은 "
+                "디스크에 없어 변경 목록·되돌리기·커밋에 남지 않는다.",
             ]
         lines = [f"- 프로젝트 루트: `{self.root.as_posix()}`" + (f" ({' · '.join(parts)} 적용됨 — 지침을 따르고 "
                                                             f"맞는 스킬이 있으면 Skill 로 쓴다)" if parts else "")]
