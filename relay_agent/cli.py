@@ -476,9 +476,6 @@ def main() -> None:
     p_cache = sub.add_parser("cache", help="copy-mode snapshot stores: check health or reset a broken one")
     p_cache.add_argument("action", choices=["check", "reset"])
     p_cache.add_argument("target", nargs="?", help="repo name, store file (abc.git) or folder; check: all if omitted")
-    p_cache = sub.add_parser("cache", help="copy-mode snapshot stores: check health or reset a broken one")
-    p_cache.add_argument("action", choices=["check", "reset"])
-    p_cache.add_argument("target", nargs="?", help="repo name, store file (abc.git) or folder; check: all if omitted")
     p_clean = sub.add_parser("cleanup", help="delete decided/expired workspaces (result.patch is kept)")
     p_clean.add_argument("--days", type=float, default=None)
     args = parser.parse_args()
@@ -513,32 +510,6 @@ def main() -> None:
         for r in d["largest_runs"]:
             print(f"  큰 실행 {r['run']}: {r['mb']} MB")
         print("정리: relay cleanup  (결정된 실행은 즉시, 미결정은 보관 기간 후. result.patch 는 남음)")
-        return
-    if args.cmd == "cache":
-        engine = build_engine(cfg)
-        if args.action == "reset":
-            if not args.target:
-                sys.exit("reset 에는 대상이 필요합니다: relay cache reset <저장소 이름|폴더>")
-            try:
-                r = engine.reset_snapshot_store(args.target)
-            except ValueError as e:
-                sys.exit(str(e))
-            print(f"스냅샷 저장소 {r['store']} 초기화 · {r['freed_mb']} MB 확보 · 정리된 실행 {len(r['runs_cleaned'])}개"
-                  + (f" (result.patch 남음: {', '.join(r['patch_kept'])})" if r["patch_kept"] else ""))
-            print("다음 copy 모드 실행이 새 스냅샷 저장소를 만듭니다.")
-            return
-        stores = engine.snapshot_stores(check=True)
-        if args.target:
-            wanted = engine._find_store(args.target).name
-            stores = [s for s in stores if s["store"] == wanted]
-        if not stores:
-            print("스냅샷 저장소가 없습니다 (copy 모드 실행이 없었음)")
-        for s in stores:
-            state = "정상" if not s["problem"] else f"손상 — {s['problem']}"
-            print(f"{'●' if not s['problem'] else '✗'} {s['repo'] or '-':<14} {s['store']}  {s['mb']} MB  실행 {len(s['runs'])}개"
-                  + (f" (진행 중 {len(s['active'])})" if s["active"] else "") + f"  {state}")
-        if any(s["problem"] for s in stores):
-            print("초기화: relay cache reset <저장소 이름>  (그 저장소를 쓰던 실행은 result.patch 만 남음)")
         return
     if args.cmd == "cache":
         print("\n".join(cache_command(build_engine(cfg), args.action, args.target)))
