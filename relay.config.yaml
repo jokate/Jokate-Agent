@@ -21,3 +21,6 @@ providers: {}
 # Extra MCP servers a stage can opt into with `mcp: [name]`. Built-ins: docs_read, handoff.
 # Nothing here is loaded unless a stage names it (claude -p runs with --strict-mcp-config).
 mcp_servers: {}
+
+# Before a run's first stage, check that the MCP servers it attaches answer (editor closed -> the run stops at no cost).
+# mcp_check: false

@@ -930,16 +930,20 @@ class RelayEngine:
                 out.append(run)
         return out
 
-    def _find_store(self, target: str) -> Path:
+    def find_store(self, target: str) -> Path:
         """A store by registered repo name, store file name (abc123.git) or the target folder's path."""
         shadow = self.runs_dir / "shadow"
         if target in self.repos.repos and self.repos.repos[target].resolved:
-            return shadow_dir_for(shadow, self.repos.repos[target].resolved)
-        if (shadow / target).is_dir():
-            return shadow / target
-        if Path(target).expanduser().is_dir():
-            return shadow_dir_for(shadow, Path(target).expanduser().resolve())
-        raise ValueError(f"스냅샷 저장소를 찾을 수 없습니다: {target} (저장소 이름, 저장소 파일 이름 또는 폴더 경로)")
+            store = shadow_dir_for(shadow, self.repos.repos[target].resolved)
+        elif re.fullmatch(r"[0-9a-f]{16}\.git", target):  # a store file name, never a path
+            store = shadow / target
+        elif Path(target).expanduser().is_dir():  # the target folder whose snapshots it holds
+            store = shadow_dir_for(shadow, Path(target).expanduser().resolve())
+        else:
+            raise ValueError(f"스냅샷 저장소를 찾을 수 없습니다: {target} (저장소 이름, 저장소 파일 이름 또는 폴더 경로)")
+        if not store.is_dir():
+            raise ValueError(f"{target} 의 스냅샷 저장소가 없습니다 (copy 모드로 실행한 적이 없음)")
+        return store
 
     def snapshot_stores(self, check: bool = False) -> list[dict]:
         """Every shared snapshot store: which repo, size, the runs that still use it and, with check, its health."""
@@ -961,7 +965,9 @@ class RelayEngine:
         """Delete a (broken) snapshot store; the next copy-mode run on that folder builds a fresh one.
         Runs that used it lose their snapshot: each keeps its result.patch (refreshed first when possible), which
         can still be applied; rollback/merge from the snapshot is no longer possible. Refused while a run is active."""
-        store = target if isinstance(target, Path) else self._find_store(target)
+        store = target if isinstance(target, Path) else self.find_store(target)
+        if store.parent.resolve() != (self.runs_dir / "shadow").resolve() or store.suffix != ".git":
+            raise ValueError(f"스냅샷 저장소가 아닙니다: {store}")  # never delete anything outside runs/shadow
         runs = self._store_runs(store)
         active = [r.id for r in runs if r.status in ("pending", "running", "awaiting_approval")]
         if active:

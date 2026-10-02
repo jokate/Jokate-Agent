@@ -63,10 +63,12 @@ uv run relay repo add comact2-quiz C:/.../comact2-quiz --workspace copy --verify
 uv run relay repos                                   # path · branch · uncommitted count
 uv run relay run quick "goal" --repo comact2-quiz
 uv run relay repo clone mnys --url <git url>          # on a new machine: clone + register
+uv run relay repo add mnys C:/.../MNYS --mcp unreal   # attach the editor MCP to every run in this repo (--mcp "" clears)
 ```
 - **Applied automatically:** path, default workspace (copy/inplace), default relay, **verify commands** (pre-approved and given to the AI → no discovery or retry turns), docs-read root, short notes (≤400 chars), extra excludes.
 - **Where settings live:** shared rules in `relay.config.yaml`, **this machine's `path` in `relay.config.local.yaml`** (the same repo can have a different path per machine).
 - **Sessions:** a session remembers its repo, so follow-up questions don't need the name. Read-only relays (docs-qa) never create a workspace.
+- **Default MCP:** `--mcp unreal` (or the 🔌 checkboxes in the dashboard's repo form, listed once a folder is picked) attaches that server to every run in the repo; a run's own 🔌 pick still overrides it.
 - **Remote requests** (token access) can only use paths **inside registered repos**.
 - katae MCP: `katae_repos()`, `katae_start(goal, repo="mnys")`. With no repo given, it auto-matches from the current folder.
 
@@ -79,6 +81,7 @@ uv run relay repo clone mnys --url <git url>          # on a new machine: clone 
   - **Re-runs read it first:** a resumed stage gets the handoff in its prompt, and the next request in the same session carries the previous run's handoff.
   - **Cleanup only on "작업 완료":** handoffs stay until you press **✅ 작업 완료** on the session (or run `relay session complete <session_id>`). That deletes the session's `HANDOFF.md` files and stops carrying them on. A new request reopens the session. The record stays in the dashboard.
 - **MCP servers of a run:** the folder's own servers (`.mcp.json` up the tree, its project entry in `~/.claude.json`) are always connected. Global ones (user scope, e.g. `unreal`) and those of other folders are connected by name: per repo with `mcp: [unreal]` (+ `mcp_from: [<other folder>]` to borrow that folder's `.mcp.json`), per run with the 🔌 MCP checkboxes in the composer or `relay run --mcp unreal`. `GET /mcp?session_id=` lists what is available.
+  - **Checked before the first stage:** every server the run attaches must answer — http/sse: a TCP connection to its host and port; stdio: the MCP `initialize` handshake (20s). If one doesn't (editor closed, server not running), the run fails before any stage starts (no cost) with the reason; start the editor and resume, and it checks again. Limit: a stdio bridge that answers `initialize` itself and reaches the editor only on a tool call passes with the editor closed. Off with `mcp_check: false`.
   - **Any** non-read-only server the run attaches (the run's pick, the repo's `mcp:`, the project's own) forces `inplace`, not only a stage's `mcp:` — a copy would leave the editor's changes out of the patch.
   - **Unsaved MCP changes:** an editor MCP changes assets in memory; only a save writes them to disk, so unsaved edits are missing from the change list, the rollback and the commit. Stages are told to save through the MCP. After a stage that called MCP tools whose names say they change something (`create_*`, `set_*`, `Spawn*` …), if no project file changed during that stage, the timeline shows 💾 `mcp_unsaved` and the next stage (review/playtest) gets a "[MCP 저장 확인]" open issue to check and send back. The name test is a heuristic.
   - Big servers are loaded on demand: the stage gets `ToolSearch`, so only tool names are sent until a tool is needed. Measured with unreal (1,031 tools), same two calls: **361K → 62K** input tokens. A connected big server still costs roughly +15–25K per turn for the name list, so keep it off for code-only work.
@@ -110,6 +113,7 @@ uv run relay repo clone mnys --url <git url>          # on a new machine: clone 
 
 **Copy mode** (`copy`) is only for small code repos. It uses a snapshot, with these limits:
 - one shared store per repo, `.gitignore` respected;
+- a broken store (disk error, killed process, antivirus — `git fsck` fails) is rebuilt by the next copy run on that folder when no other run is using it (🧹 in the timeline). By hand: `uv run relay cache check` lists every store with its health, `uv run relay cache reset <repo|folder>` deletes one (refused while a run uses it). Runs that used it keep their `result.patch`, which can still be applied; rollback/merge from that snapshot is gone. API: `GET /snapshot-stores?check=true`, `POST /snapshot-stores/reset`;
 - refused if over 500MB, and the error message recommends `inplace`.
 - `uv run relay disk` / `uv run relay cleanup`.
 
@@ -308,6 +312,7 @@ One run does what it judges best for a request; given a whole roadmap it does on
 | docs-qa | Single Sonnet(low) stage + docs-read MCP | Document questions |
 | doc-write | outline **Fable** (sources, fixed facts, approval only when the direction is open) → write Sonnet (**Fable on send-back**) → review Sonnet(low) (missing items, contradictions with existing docs, format) · no Bash | Scenarios, quests, dialogue, design docs, any Markdown |
 | skill-make | write Sonnet (`.claude/skills/<name>/SKILL.md` + references; **Fable on send-back**) → review Sonnet(low) (frontmatter, trigger description, overlap with other skills) · no Bash | Making or fixing Claude skills |
+| editor-task | edit Sonnet (only through the editor MCP: look up → change → **save** → look up again; **Fable on send-back**) → verify Sonnet(low) (values, save, side effects; up to 2 send-backs) · needs an editor MCP attached | Level, actor, asset or blueprint changes with no code |
 | **game-cycle** | design **Fable** (game spec) → build Sonnet (code + scene, via the project's editor MCP if any; **Fable on send-back**) → playtest Sonnet(low) (build errors, wiring, a short run; up to 2 send-backs) | Making a game or a feature of one (any engine or framework) |
 
 **game-cycle** knows no engine: the target folder's `CLAUDE.md` (layout, patterns, how to verify), skills and `.mcp.json` (e.g. `unity-mcp`, `unreal`) are attached automatically and decide the tools and checks. An editor MCP forces `inplace`; keep the editor open so it can build scenes — without it the build stage stops at what files allow and lists the editor work left. Things only a person can judge (feel, difficulty) come back as user checks.
@@ -332,7 +337,7 @@ Deliberately not applied: `--bare` (needs an API key), `--resume` between stages
 
 ## Structure
 `relay_agent/`: `baton.py` baton · `pipeline.py` engine · `runners.py` claude_cli/api/mock · `history.py` sessions, questions, events · `usage.py` token/cost log · `server.py` API · `dashboard.html` UI · `cli.py`
-`mcp_servers/`: `docs_read.py`, `handoff.py` · `relays/`: default, quick, docs-qa, doc-write, skill-make, game-cycle, demo (mock, free) · `prompts/`: stage role prompts
+`mcp_servers/`: `docs_read.py`, `handoff.py` · `relays/`: default, quick, docs-qa, doc-write, skill-make, editor-task, game-cycle, demo (mock, free) · `prompts/`: stage role prompts
 
 ## Roadmap
 1. Real-call verification of the Codex / Gemini presets (after install), OpenCode login and a real run

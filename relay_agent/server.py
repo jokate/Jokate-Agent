@@ -872,6 +872,27 @@ def post_snapshot_store_reset(body: StoreResetIn, request: Request) -> dict:
         raise HTTPException(400, str(e)) from e
 
 
+@app.get("/snapshot-stores")
+def get_snapshot_stores(check: bool = False) -> list[dict]:
+    """Copy-mode snapshot stores (one per target folder): size, runs using them and, with check, git fsck health."""
+    return engine.snapshot_stores(check=check)
+
+
+class StoreResetIn(BaseModel):
+    target: str  # repo name, store file name or folder path
+
+
+@app.post("/snapshot-stores/reset")
+def post_snapshot_store_reset(body: StoreResetIn, request: Request) -> dict:
+    """Delete a broken store; runs that used it keep only their result.patch."""
+    if _is_remote(request):
+        raise HTTPException(403, "스냅샷 저장소 초기화는 이 PC 에서만 할 수 있습니다")
+    try:
+        return engine.reset_snapshot_store(body.target)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+
+
 @app.post("/disk/cleanup")
 def post_cleanup(days: float | None = None) -> dict:
     return engine.cleanup_workspaces(cfg.workspace_retention_days if days is None else days)
