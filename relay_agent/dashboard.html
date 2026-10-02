@@ -530,7 +530,7 @@ const EV = {
   user_notes_applied: ["📌", "추가 지시 반영"], result_repaired: ["🩹", "결과 형식 복구"], prompt_breakdown: ["📤", "보낸 프롬프트"],
   token_report: ["🔥", "토큰 사용 내역"], gate_skipped: ["⏩", "승인 없이 진행"],
   process_stopped: ["🛑", "AI 프로세스 종료"], stage_resumed: ["⏯️", "중단된 대화 이어서"], resume_fallback: ["↻", "처음부터 다시"],
-  budget_auto_extended: ["💸", "예산 자동 연장 (자동 진행)"], approval_mode: ["🚀", "진행 모드 변경"], mcp_missing: ["🔌", "MCP 서버를 찾지 못함"], mcp_unsaved: ["💾", "MCP 변경이 저장되지 않았을 수 있음"], stall_restart: ["🧟", "무응답으로 다시 시작"], handoff_written: ["📝", "인계서 작성"], handoff_failed: ["📝", "인계서 AI 작성 실패"], project_context: ["📁", "프로젝트 지침·스킬 적용"],
+  budget_auto_extended: ["💸", "예산 자동 연장 (자동 진행)"], approval_mode: ["🚀", "진행 모드 변경"], mcp_missing: ["🔌", "MCP 서버를 찾지 못함"], mcp_unsaved: ["💾", "MCP 변경이 저장되지 않았을 수 있음"], mcp_check: ["🔌", "MCP 연결 점검"], snapshot_store_rebuilt: ["🧹", "손상된 스냅샷 저장소 재생성"], mcp_check_error: ["🔌", "MCP 점검 오류(건너뜀)"], stall_restart: ["🧟", "무응답으로 다시 시작"], handoff_written: ["📝", "인계서 작성"], handoff_failed: ["📝", "인계서 AI 작성 실패"], project_context: ["📁", "프로젝트 지침·스킬 적용"],
 };
 const PROVIDER_LABEL = { claude: "Claude", codex: "Codex", opencode: "OpenCode", gemini: "Gemini", anthropic_api: "Claude API", openai: "OpenAI", openrouter: "OpenRouter", ollama: "Ollama", mock: "Mock" };
 const WINDOW_LABEL = { five_hour: "5h", seven_day: "7d", seven_day_opus: "7d·Opus", seven_day_sonnet: "7d·Son" };
@@ -677,6 +677,10 @@ function describe(e) {
       : `실행 비용 $${(d.spent_usd || 0).toFixed(2)} → 한 번 더 허용 (상한 $${d.ceiling_usd})`;
     case "approval_mode": return `${esc(d.was)} → ${esc(d.mode)}`;
     case "mcp_missing": return `${esc(d.server)} — 프로젝트(.mcp.json)·전역 설정·relay.config 어디에도 없음`;
+    case "mcp_check": return [(d.ok || []).length ? `응답 ${esc(d.ok.join(", "))}` : "",
+      ...Object.entries(d.failed || {}).map(([n, w]) => `❌ ${esc(n)} — ${esc(w)}`)].filter(Boolean).join("<br>");
+    case "snapshot_store_rebuilt": return `${esc(d.store)} — ${esc(d.problem)}${(d.runs_cleaned || []).length ? ` · 이 저장소를 쓰던 실행 ${d.runs_cleaned.length}개는 result.patch 만 남음` : ""}`;
+    case "mcp_check_error": return `${esc(d.server)} — ${esc(d.error)}`;
     case "mcp_unsaved": return `${esc((d.servers || []).join(", "))} 변경 호출 ${d.calls}회 (${esc((d.tools || []).join(", "))}) — 이 단계 동안 바뀐 프로젝트 파일 없음 · 다음 단계가 저장 여부를 확인`;
     case "stall_restart": return `${esc(d.reason)} — 같은 모델로 한 번 더 시작`;
     case "handoff_written": return `${esc(d.model)} 가 요청·작업된 내역·남은 일로 정리 — HANDOFF 탭 · 재개하면 이것부터 읽음 (입력 ${fmtN(d.input_tokens)} · $${(d.cost_usd || 0).toFixed(4)})`;
@@ -1467,6 +1471,8 @@ $("addRepo").onclick = () => {
         <option value="none">읽기 전용</option></select></label>
       <label>검증 명령 (한 줄에 하나, 예: uv run pytest -q)<textarea class="field" name="verify" style="min-height:60px"></textarea></label>
       <label>메모 (AI 에게 매번 전달, 짧게)<textarea class="field" name="notes" style="min-height:60px" maxlength="400"></textarea></label>
+      <div><div class="sub" style="color:var(--muted);margin-bottom:4px">🔌 기본 MCP (이 저장소의 모든 실행에 연결 · 실행마다 바꿀 수 있음)</div>
+        <div id="rfMcp" class="hint">폴더를 고르면 쓸 수 있는 MCP 가 나옵니다</div></div>
       <div class="row" style="display:flex;gap:8px;justify-content:flex-end">
         <button type="button" class="btn btn-ghost" id="rfCancel">취소</button><button class="btn btn-primary">등록</button></div>
     </form></div>`;
@@ -1481,6 +1487,10 @@ $("addRepo").onclick = () => {
     folder = path;
     bg.querySelector("#rfPath").textContent = path;
     if (!form.name.value) form.name.value = path.split(/[\\/]/).filter(Boolean).pop().replace(/[^A-Za-z0-9_.-]/g, "-").slice(0, 40);
+    const list = await api(`/mcp/folder?path=${encodeURIComponent(path)}`).catch(() => []);
+    bg.querySelector("#rfMcp").innerHTML = list.length ? list.map((m) => `<label style="display:inline-flex;gap:4px;margin-right:12px">
+      <input type="checkbox" name="mcp" value="${esc(m.name)}" ${m.always ? "checked disabled" : ""}> ${esc(m.name)}
+      <span class="hint">${esc(m.always ? "프로젝트 · 항상" : m.scope)}</span></label>`).join("") : "이 폴더에서 쓸 수 있는 MCP 가 없습니다";
   };
   form.onsubmit = async (ev) => {
     ev.preventDefault();
@@ -1489,6 +1499,7 @@ $("addRepo").onclick = () => {
     try {
       await api("/repos", { method: "POST", body: JSON.stringify({
         name: f.name, path: folder, workspace: f.workspace, notes: f.notes,
+        mcp: [...form.querySelectorAll('input[name="mcp"]:checked:not(:disabled)')].map((c) => c.value),
         verify: f.verify.split("\n").map((v) => v.trim()).filter(Boolean) }) });
       toast(`📁 ${f.name} 등록`); bg.remove(); await loadRepos(); $("repoSelect").value = f.name;
     } catch (e) { toast(e.message, true); }

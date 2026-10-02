@@ -126,7 +126,7 @@ def test_shipped_relays_apply_immediately():
     import yaml
 
     root = Path(__file__).resolve().parent.parent / "relays"
-    for name in ("default", "quick", "quick-fable", "game-cycle", "doc-write", "skill-make"):
+    for name in ("default", "quick", "quick-fable", "game-cycle", "doc-write", "skill-make", "editor-task"):
         data = yaml.safe_load((root / f"{name}.yaml").read_text(encoding="utf-8"))
         assert data["workspace"] == "inplace" and data["auto_apply"] is True
 
@@ -249,3 +249,15 @@ def test_a_code_edit_does_not_hide_an_unsaved_mcp_change(tmp_path):
     run_id.append(engine.create(relay, "move actor", root).id)
     run = engine.advance(run_id[0])
     assert "mcp_unsaved" in [e["kind"] for e in engine.history.events(run.id)]
+
+
+def test_editor_task_relay_edits_only_through_mcp_and_verify_sends_back():
+    from relay_agent.pipeline import RelaySpec
+
+    root = Path(__file__).resolve().parent.parent / "relays"
+    spec, base = RelaySpec.load(root / "editor-task.yaml")
+    stages = {s.name: s for s in spec.stages}
+    assert list(stages) == ["edit", "verify"]
+    assert stages["edit"].edits_via_mcp and stages["edit"].writes and not stages["verify"].writes
+    assert not {"Edit", "Write", "Bash"} & {t for s in spec.stages for t in s.tools}  # changes only via the MCP
+    assert stages["verify"].on_retry == "edit" and all((base / s.prompt).is_file() for s in spec.stages)
