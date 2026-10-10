@@ -22,22 +22,24 @@ from .campaign import CampaignRunner, to_dict as campaign_dict
 from .config import Config, build_engine
 from .pipeline import RelaySpec, RunState
 from .runners import RunnerError, probe_claude_limits
+from .studio import api as studio_api, runs as studio_runs, ws as studio_ws
 
 cfg = Config.load()
 engine = build_engine(cfg)
 campaigns = CampaignRunner(engine, cfg.relays_dir)
 app = FastAPI(title="Agent 카태")
+studio_api.install(app, cfg, liveness=lambda run_id: engine.liveness(run_id))  # /studio/* (ARCHITECTURE.md §6)
 DASHBOARD = Path(__file__).with_name("dashboard.html")
 
 
 def code_version() -> str:
-    """Hash of the server's Python code on disk. The dashboard HTML is read fresh per request but the
-    Python code is loaded once, so after an update the page can be new while the server is old."""
+    """Hash of the server's Python code on disk, subpackages (studio/) included. The dashboard HTML is read
+    fresh per request but the code is loaded once: after an update the page can be new, the server old."""
     import hashlib
 
-    h = hashlib.sha1()
-    for f in sorted(Path(__file__).parent.glob("*.py")):
-        h.update(f.name.encode() + f.read_bytes())
+    h, root = hashlib.sha1(), Path(__file__).parent
+    for f in sorted(root.rglob("*.py")):
+        h.update(f.relative_to(root).as_posix().encode() + f.read_bytes())
     return h.hexdigest()[:12]
 
 
@@ -49,6 +51,7 @@ def recover() -> None:
     engine.recover_interrupted()
     campaigns.recover()  # campaigns running when the server stopped go on (their interrupted run resumes)
     engine.cleanup_workspaces(cfg.workspace_retention_days)
+    studio_api.open_store()  # a studio DB that cannot start answers 503 on /studio/*; the rest keeps running
 
     def hourly():  # expired workspaces are removed while the server keeps running, not only at start
         import time
@@ -93,11 +96,16 @@ async def guard(request: Request, call_next):
     if request.method != "GET" and origin and urlparse(origin).netloc != request.headers.get("host"):
         # A web page on another site can't drive this server through the user's browser (CSRF).
         return JSONResponse({"detail": "다른 출처의 요청은 거부됩니다"}, 403)
-    if host not in LOOPBACK and cfg.remote_networks and not _in_networks(host, cfg.remote_networks):
+    if not _network_allowed(host):
         # e.g. Tailscale only: other devices on the LAN (or a forwarded port) are refused before the token check
         return JSONResponse({"detail": "허용된 네트워크(remote_networks, 예: Tailscale) 밖에서의 접속은 거부됩니다"}, 403)
+    if request.url.path.startswith("/studio/"):
+        # Studio checks tokens itself (device tokens too) and asks this PC for one as well, so it branches
+        # off before the loopback pass below (design/studio/ARCHITECTURE.md §6.2).
+        denied = await studio_api.authenticate(request, cfg)
+        return denied if denied is not None else await call_next(request)
     if request.url.path != "/" and host not in LOOPBACK:
-        supplied = request.headers.get("authorization", "").removeprefix("Bearer ").strip()
+        supplied =request.headers.get("authorization", "").removeprefix("Bearer ").strip()
         if not cfg.auth_token:
             return JSONResponse({"detail": "원격 접근은 auth_token(또는 KATAE_TOKEN) 설정이 필요합니다"}, 403)
         if not hmac.compare_digest(supplied.encode(), cfg.auth_token.encode()):
@@ -805,15 +813,15 @@ def get_patch(run_id: str) -> str:
 
 @app.post("/runs/{run_id}/approve")
 def approve(run_id: str) -> RunState:
-    _load(run_id)
-    run = _conflict(engine.approve, run_id)
+    _outside(run_id)
+    run = _released(_conflict(engine.approve, run_id))
     _advance_bg(run_id)
     return run
 
 
 @app.post("/runs/{run_id}/resume")
 def resume(run_id: str, approval: str | None = None) -> RunState:
-    run = _load(run_id)
+    run = _outside(run_id)
     if run.status not in ("pending", "failed", "cancelled"):
         raise HTTPException(409, f"run is {run.status}")
     if approval:
@@ -825,24 +833,24 @@ def resume(run_id: str, approval: str | None = None) -> RunState:
 @app.post("/runs/{run_id}/cancel")
 def cancel(run_id: str) -> RunState:
     _load(run_id)
-    return _conflict(engine.cancel, run_id)
+    return _released(_conflict(engine.cancel, run_id))
 
 
 @app.post("/runs/{run_id}/changes/apply")
 def apply_changes(run_id: str) -> RunState:
-    _load(run_id)
+    _outside(run_id)
     return _conflict(engine.apply_changes, run_id)
 
 
 @app.post("/runs/{run_id}/changes/discard")
 def discard_changes(run_id: str) -> RunState:
-    _load(run_id)
+    _outside(run_id)
     return _conflict(engine.discard_changes, run_id)
 
 
 @app.post("/runs/{run_id}/changes/rollback")
 def rollback_changes(run_id: str) -> RunState:
-    _load(run_id)
+    _outside(run_id)
     return _conflict(engine.rollback_changes, run_id)
 
 
@@ -880,3 +888,45 @@ def post_cleanup(days: float | None = None) -> dict:
 @app.get("/usage")
 def get_usage(run_id: str | None = None) -> list[dict]:
     return engine.usage.summary(run_id)
+
+
+def _network_allowed(host: str) -> bool:
+    """This PC, or inside `remote_networks` when that is set (e.g. Tailscale only). The guard and the studio
+    WebSocket ask the same question here, so the condition is written once."""
+    return host in LOOPBACK or not cfg.remote_networks or _in_networks(host, cfg.remote_networks)
+
+
+# WS /studio/ws checks origin, network and token itself: the guard is an HTTP middleware and never sees a
+# WebSocket (design/studio/ARCHITECTURE.md §7.1). Down here so the lines that document cites stay where they are.
+studio_ws.install(app, network_allowed=_network_allowed)
+
+
+# The engine's stops and the inbox (design/studio/ARCHITECTURE.md §5.8). Down here for the same reason: the
+# endpoints above changed in place, line for line.
+def _outside(run_id: str) -> RunState:
+    """`_load` for what studio keeps to itself: approve · resume · changes/* of a studio task's run are 409 —
+    the inbox decides those (§5.8 다). cancel · interject stay open to a task's run."""
+    run = _load(run_id)
+    if studio_api.is_task_run(run_id):
+        raise HTTPException(409, "스튜디오 작업의 런이다. 결재함에서 결정하라")
+    return run
+
+
+def _released(run: RunState) -> RunState:
+    """approve · cancel went through here, not through the inbox: the pending inbox items of that run that
+    have no task are closed as cancelled (§5.8 나)."""
+    studio_api.close_run_items(run.id)
+    return run
+
+
+# A run that stops for approval or at a budget files an inbox item (the sink sits beside the toast and hears the
+# same events), and the decision of an item without a task comes back to this engine.
+studio_api.use_hooks(studio_runs.attach(engine, studio_api.run_inbox, advance=_advance_bg))
+
+
+# The stops nobody heard — a run the CLI advanced, or one that stopped while the studio store was not open — are
+# filed once at the start (§5.8 나 "시작할 때"). A startup function of its own, down here: recover() above is cited
+# by line, and startup functions run in the order they were registered, so its open_store() has run by now.
+@app.on_event("startup")
+def file_waiting_runs() -> None:
+    studio_runs.file_waiting(engine, studio_api.run_inbox)

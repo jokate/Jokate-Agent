@@ -388,6 +388,21 @@ def doctor(cfg) -> int:
     return 1 if problems else 0
 
 
+def studio_openapi(out: str | None = None, check: bool = False) -> int:
+    """`relay studio openapi`: write the /studio contract to design/studio/openapi.json, or with --check only
+    say whether the saved file is the one this code serves. Needs neither the config nor the engine."""
+    from .studio import api
+
+    path = Path(out) if out else api.OPENAPI_PATH
+    if check:
+        current = api.openapi_is_current(path)
+        print(f"최신입니다: {path}" if current else
+              f"지금 코드와 다릅니다 (relay studio openapi 로 다시 내보내세요): {path}")
+        return 0 if current else 1
+    print(f"OpenAPI 를 썼습니다: {api.export_openapi(path)}")
+    return 0
+
+
 def main() -> None:
     sys.stdout.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(prog="relay")
@@ -478,8 +493,15 @@ def main() -> None:
     p_cache.add_argument("target", nargs="?", help="repo name, store file (abc.git) or folder; check: all if omitted")
     p_clean = sub.add_parser("cleanup", help="delete decided/expired workspaces (result.patch is kept)")
     p_clean.add_argument("--days", type=float, default=None)
+    p_studio = sub.add_parser("studio", help="studio layer: openapi = write design/studio/openapi.json")
+    p_studio.add_argument("action", choices=["openapi"])
+    p_studio.add_argument("--out", help="openapi: the file to write (default: design/studio/openapi.json)")
+    p_studio.add_argument("--check", action="store_true",
+                          help="openapi: write nothing, exit 1 when the saved file is not what the code serves")
     args = parser.parse_args()
 
+    if args.cmd == "studio":  # before Config.load(): the contract comes from the code alone
+        sys.exit(studio_openapi(args.out, args.check))
     cfg = Config.load()
     if args.cmd == "serve":
         host = args.host or cfg.serve_host

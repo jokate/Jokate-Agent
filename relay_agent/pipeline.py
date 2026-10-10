@@ -903,13 +903,14 @@ class RelayEngine:
             stores.append({"store": store.name, "repo": names.get(store.name), "mb": round(dir_size(store) / 1_048_576, 1)})
         copies, patches, runs = 0, 0, []
         for d in self.runs_dir.iterdir() if self.runs_dir.exists() else []:
-            if not d.is_dir() or d.name in ("shadow", "locks"):
+            if not d.is_dir() or d.name in ("shadow", "locks", "studio"):  # studio: Katae Studio data, not a run
                 continue
             size = dir_size(d)
             copies += dir_size(d / "workspace") if (d / "workspace").exists() else 0
             patches += (d / "result.patch").stat().st_size if (d / "result.patch").exists() else 0
             runs.append((d.name, size))
-        dbs = sum(f.stat().st_size for f in self.runs_dir.glob("*.sqlite*")) if self.runs_dir.exists() else 0
+        db_dirs = [d for d in (self.runs_dir, self.runs_dir / "studio") if d.exists()]  # studio.sqlite and its bak-v<n>
+        dbs = sum(f.stat().st_size for d in db_dirs for f in d.glob("*.sqlite*"))
         total = dir_size(self.runs_dir) if self.runs_dir.exists() else 0
         mb = lambda b: round(b / 1_048_576, 1)  # noqa: E731
         return {
@@ -1505,7 +1506,7 @@ class RelayEngine:
                 self._release_folder(run_id, self.load(run_id).workdir)
             except (OSError, ValueError):
                 pass
-            lock.release()
+            self._let_go(run_id, lock)  # frees the run, then after_advance — both at the end of the class
 
     def _advance(self, run_id: str, cancel: threading.Event, resume: bool) -> RunState:
         run = self.load(run_id)
@@ -1812,3 +1813,19 @@ class RelayEngine:
                 pass
         self.save(run)
         return run
+
+    # --- once a run is let go -------------------------------------------------------------------------------
+    # At the end of the class so the lines design/studio/ARCHITECTURE.md cites stay where they are.
+    after_advance: Callable[[str], None] | None = None  # (run id); set by studio/runs.py attach()
+
+    def _let_go(self, run_id: str, lock: threading.Lock) -> None:
+        """The last step of advance(): free the run, then tell `after_advance`. The stop was written and saved
+        before this and no thread holds the run any more, so whoever listens may read the StopNote and approve
+        or cancel the run without this thread's last save overwriting it. It is called on the thread that
+        advanced, before advance() returns; what it raises is dropped — it must not change the run's result."""
+        lock.release()
+        if self.after_advance is not None:
+            try:
+                self.after_advance(run_id)
+            except Exception:  # noqa: BLE001
+                pass

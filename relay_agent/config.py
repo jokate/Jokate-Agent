@@ -72,6 +72,15 @@ class Config(BaseModel):
                 setattr(cfg, name, (ROOT / p).resolve())
         return cfg
 
+    @property
+    def studio_dir(self) -> Path:
+        """Katae Studio data (design/studio/ARCHITECTURE.md §2.2). Derived, so it follows runs_dir."""
+        return self.runs_dir / "studio"
+
+    @property
+    def studio_db(self) -> Path:
+        return self.studio_dir / "studio.sqlite"
+
     @cached_property
     def mcp_registry(self) -> dict[str, dict]:
         """Built-in MCP servers plus the configured ones (configured entries win)."""

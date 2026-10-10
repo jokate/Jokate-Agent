@@ -65,3 +65,19 @@ class Notifier:
             )
         except OSError:
             pass
+
+
+class Fanout:
+    """Several receivers behind the engine's one `notifier`, each called with the same arguments in the order
+    given. One that raises does not keep the next from hearing: the toast and the studio inbox (studio/runs.py)
+    must not depend on each other. None is skipped, so `Fanout(engine.notifier, more)` works with no notifier."""
+
+    def __init__(self, *receivers):
+        self.receivers = [receiver for receiver in receivers if receiver is not None]
+
+    def __call__(self, run_id: str, kind: str, title: str, detail: dict) -> None:
+        for receiver in self.receivers:
+            try:
+                receiver(run_id, kind, title, detail)
+            except Exception:  # noqa: BLE001 - as the engine does around its notifier: an alert never breaks a run
+                pass

@@ -63,3 +63,18 @@ def test_run_without_changes_leaves_no_copy_behind(tmp_path):
     assert not (engine.runs_dir / run.id / "workspace").exists()
     report = engine.disk_usage()
     assert report["working_copies_mb"] == 0
+
+
+def test_studio_folder_counts_as_databases_not_as_a_run(tmp_path):
+    engine = RelayEngine(tmp_path / "runs", UsageStore(tmp_path / "u.sqlite"), HistoryStore(tmp_path / "h.sqlite"),
+                         runner_factory=lambda _: MockRunner())
+    (engine.runs_dir / "r1").mkdir(parents=True, exist_ok=True)
+    (engine.runs_dir / "r1" / "note.txt").write_bytes(b"x" * 10)
+    before = engine.disk_usage()
+    studio = engine.runs_dir / "studio"  # design/studio/ARCHITECTURE.md §2.2
+    studio.mkdir()
+    (studio / "studio.sqlite").write_bytes(b"x" * 200_000)
+    after = engine.disk_usage()
+    names = [r["run"] for r in after["largest_runs"]]
+    assert after["runs"] == before["runs"] and "r1" in names and "studio" not in names
+    assert after["databases_mb"] == pytest.approx(before["databases_mb"] + 0.2)
