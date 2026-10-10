@@ -1,0 +1,18 @@
+name: studio-plan
+description: 스튜디오 캠페인 계획 — 요청을 순서 있는 작업 목록으로 나눔 · Opus xhigh (studio-campaign 이 쓰는 내부 릴레이)
+hidden: true
+max_run_cost_usd: 10
+
+# campaign-plan.yaml 과 같은 프롬프트. 모델만 Opus + xhigh 로 고정하고 다른 모델·다른 AI 로의 교체를 뺐다.
+stages:
+  - name: plan
+    provider: claude
+    model: opus
+    effort: xhigh
+    prompt: ../prompts/campaign-plan.md
+    tools: [Read, Grep, Glob]
+    mcp: [digest]              # 로드맵·문서가 여러 개면 파일별 요약만 받는다
+    system_mode: replace
+    timeout_s: 2400
+    stall_s: 900
+    max_budget_usd: 10
