@@ -33,7 +33,7 @@
 - 같은 폴더를 제자리(inplace)로 고치는 런은 **한 번에 하나** (`RelayEngine._acquire_folder`).
 - Unreal MCP: `MNYS/Plugins/Unreal-MCP-main`, `Config/DefaultEngine.ini` 의 `[UnrealMCP] Port=55557`. 파이썬 쪽은 `UNREAL_MCP_PORT` 환경 변수 → 없으면 **cwd 기준** `Saved/UnrealMCP/port.txt` 로 포트를 찾는다 (`unrealmcp/_tcp_bridge.py`).
 - YSTagUsage: 에디터 전용, 엔진 기본 플러그인 `GameplayTagsEditor` 만 의존, MNYS 코드 참조 없음. README 상 **UE 5.7 만 확인됨**. 원격 `github.com/jokate/YSTagUsage`.
-- 엔진: 4.27, 5.1, 5.6(`D:\Epic\UE_5.6`), 5.7(`C:\Unreal\UE_5.7`) — 레지스트리 `HKLM\SOFTWARE\EpicGames\Unreal Engine`. MNYS 는 5.7.
+- 엔진: 실제로 설치된 것은 5.6(`D:\Epic\UE_5.6`) · 5.7(`C:\Unreal\UE_5.7`) 둘이다. 레지스트리 `HKLM\SOFTWARE\EpicGames\Unreal Engine` 에는 4.0 · 4.27 · 5.1 키도 남아 있지만 폴더가 없다 (2026-10-11 정정 — 처음에는 레지스트리만 보고 넷이라고 적었다). MNYS 는 5.7.
 - 하네스: 프로젝트 규칙 파일(`CLAUDE.md`/`CLAUDE.local.md`)이 없으면 스킬이 사실상 안 불린다 (game-harness `docs/GUIDE.md` 4절) → 새 프로젝트는 bootstrap 이 필수.
 - 모바일 툴체인: Flutter · adb · Tailscale 없음, JDK 는 11 뿐. `%LOCALAPPDATA%\Android\Sdk` 폴더는 있음.
 
@@ -245,7 +245,7 @@ stateDiagram-v2
 **M-1 컴퓨터 진단 API** · server · quick
 - 사유: 앱에서 "이 PC 가 일할 수 있는 상태인가"를 본다.
 - 명세: `GET /studio/machine` — `relay doctor` 결과, 설치된 엔진 목록(레지스트리), 디스크 여유, AI 사용량(기존 `/providers`), 실행 중 에디터, 서버 코드 버전.
-- 완료: 이 PC 에서 엔진 4개가 정확히 나온다.
+- 완료: 이 PC 에서 레지스트리의 엔진 키가 모두 나오고, 폴더가 있는 5.6 · 5.7 만 설치된 것으로 표시된다.
 
 **M-2 기기 페어링** · server · default
 - 사유: 토큰 하나를 손으로 옮기면 폰을 잃었을 때 전부 바꿔야 한다.
