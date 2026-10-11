@@ -41,8 +41,8 @@ from typing import Any, Callable
 from . import employees
 from .store import StudioStore, Tx, now
 from .tasks import DECISIONS as TASK_DECISIONS
-from .tasks import (BLOCKING_KINDS, EDITABLE, OWNER, TASK_TYPES, TEXT_FIELDS, Actor, TaskMachine, TaskNotFound,
-                    TransitionError)
+from .tasks import (BLOCKING_KINDS, EDITABLE, OWNER, STARTED, TASK_TYPES, TEXT_FIELDS, Actor, TaskMachine,
+                    TaskNotFound, TransitionError)
 
 log = logging.getLogger(__name__)
 
@@ -139,6 +139,12 @@ NOTES = {  # the system message a decision leaves in a 1:1 room (§5.5). Not fed
     ("task_proposal", "reject"): "제안한 작업이 거절됐다: {title}",
     ("hire", "reject"): "올린 안이 반려됐다: {title}",
     ("hire", "revise"): "올린 안을 코멘트대로 고쳐서 다시 제출하라: {title}",
+}
+UPSTREAM_NOTE = {  # §5.9 "선행 반려": the line in the room of a task that had started behind the one sent back
+    "rework": '선행 반려: 이 작업이 기다린 선행 작업 "{title}" ({id}) 이 검수에서 재작업으로 돌아갔다. '
+              "그 결과에 기대어 한 일을 다시 확인하라.",
+    "revert": '선행 반려: 이 작업이 기다린 선행 작업 "{title}" ({id}) 의 변경을 되돌렸다. '
+              "그 결과에 기대어 한 일을 다시 확인하라.",
 }
 GREETING = "안녕하세요, {name}입니다. 잘 부탁드립니다."  # the first message when the draft has none (§5.5)
 HR = "hr"
@@ -316,7 +322,7 @@ class Hooks:
         """Feed a decision text to the run the item names (`RelayEngine.interject`, §4.7). True = it went in
         now. False = not now — the run is still going, or nothing is wired: the item keeps
         `delivery = 'pending'` and the progress thread delivers it when it comes back (S-8). A ValueError
-        (the engine refuses a run that is `done`) is read as False."""
+        (a `done` run the engine does not open again, S-12) is read as False."""
         return False
 
     def commit(self, folder: Path, message: str) -> None:
@@ -324,6 +330,25 @@ class Hooks:
 
     def chat_turn(self, employee_id: str, room_id: str) -> None:
         """Start that employee's chat turn in that room, so it reads the system message just written (S-7)."""
+
+    # --- what a mention asks (S-9; §4.6 · §8.4 · §9.5). With nothing wired no turn goes in -------------------
+    def turn_failed(self, employee_id: str, room_id: str) -> list[str]:
+        """Asked before the message of a mention is made (§9.5 의 5 가): the codes that keep that employee's
+        turn in that room from being made — `provider_unguarded`. [] = none, as far as can be said now."""
+        return []
+
+    def room_turn(self, employee_id: str, room_id: str) -> bool:
+        """Put in that employee's turn in that room: in a task room the read turn of a member who is not the
+        assignee. True = it is on its way. False = no run was made (the room has been told why), or nothing
+        is wired."""
+        return False
+
+    def tell_run(self, run_id: str, text: str) -> bool:
+        """Have a run that may be at work read `text` (`RelayEngine.interject`): a message of the task room,
+        for the assignee, whose turn there is the task's run. True = the run has it — in the conversation
+        that is going on, or with its next stage. False = the engine has no such run, the run is `done`, or
+        nothing is wired."""
+        return False
 
     # --- a run that is no task's (§5.8 나). With nothing wired its item stays pending ------------------------
     def run_status(self, run_id: str) -> str | None:
@@ -350,7 +375,9 @@ class Inbox:
     """Files and decides items. It keeps no state of its own: one per request is fine."""
 
     def __init__(self, store: StudioStore, machine: TaskMachine | None = None, hooks: Hooks | None = None, *,
-                 studio_dir: Path | str | None = None, checks: employees.Checks | None = None):
+                 studio_dir: Path | str | None = None, checks: employees.Checks | None = None,
+                 max_exchanges: int | None = None):
+        self.max_exchanges = max_exchanges  # §4.6: the limit `room_post` looks at; None = no limit is looked at
         self.store = store
         self.machine = machine if machine is not None else TaskMachine(store)
         self.hooks = hooks if hooks is not None else Hooks()
@@ -371,8 +398,9 @@ class Inbox:
         return InboxError("already_decided", f"이미 처리된 결재다 — {how}", inbox=item)
 
     def view(self, inbox_id: str) -> dict:
-        """`GET /studio/inbox/{id}`: the row, its task and the decisions it takes now. `package` (§5.4) is
-        computed by S-12; until then a final review carries the key with null."""
+        """`GET /studio/inbox/{id}`: the row, its task and the decisions it takes now. A final review carries
+        the key `package` (§5.4) with null here: the request fills it (api.py `get_inbox_item`, studio/review.py)
+        — an Inbox knows neither the engine nor the queue."""
         item = self._item(inbox_id)
         out = {**item, "task": self.store.get_task(item["task_id"]) if item["task_id"] else None,
                "allowed_decisions": list(DECISIONS[item["kind"]]) if item["status"] == "pending" else []}
@@ -453,6 +481,26 @@ class Inbox:
             box["kind"] = kind
         return self.machine.transition(task_id, "review" if kind == "final_review" else "blocked", actor,
                                        inbox=box).inbox
+
+    def use_grant(self, task_id: str, key: str, run_id: str) -> dict | None:
+        """§10.5 '찾기 · 쓰기': use the one-time grant of that command (`grant_key`) on that task, for the task run
+        `run_id` — the caller has checked that it is one (§6.4 가드의 분기 1). The oldest approved `risky_command`
+        of the task whose grant has that key and is neither used nor void gets `used_at` · `used_run_id`; read and
+        written in one transaction, so two requests cannot use the same grant. The item after it, or None when no
+        grant is left. Nothing else of the decided item changes."""
+        with self.store.transaction() as tx:
+            rows = tx.rows("SELECT id, decision_json FROM inbox WHERE task_id = ? AND kind = 'risky_command'"
+                           " AND status = 'decided' AND decision = 'approve' ORDER BY closed_at, rowid", (task_id,))
+            for row in rows:
+                data = row["decision_data"] or {}
+                grant = data.get("grant")
+                if isinstance(grant, dict) and grant.get("key") == key and grant.get("used_at") is None \
+                        and not grant.get("void"):
+                    used = {**grant, "used_at": now(), "used_run_id": run_id}
+                    tx.exec("UPDATE inbox SET decision_json = ? WHERE id = ?",
+                            (json.dumps({**data, "grant": used}, ensure_ascii=False), row["id"]))
+                    return self.store.get_inbox_item(row["id"], tx=tx)
+        return None
 
     def _create_hire(self, actor: Actor, title: str, payload: dict, project_id: str | None) -> dict:
         requester = self.store.get_employee(actor.id) if actor.kind == "employee" else None
@@ -926,7 +974,7 @@ class Inbox:
             return False
         try:
             went_in = bool(self.hooks.interject(item["run_id"], decision_text(item)))
-        except ValueError as e:  # the engine refuses a run that is done (§4.7): it waits for S-12's way in
+        except ValueError as e:  # a done run the engine does not open again (§4.7): its changes are decided
             log.info("studio: 결정문 %s 를 런 %s 에 넣지 못했다 — %s", inbox_id, item["run_id"], e)
             return False
         if not went_in:
@@ -970,6 +1018,22 @@ class Inbox:
             self._say(room, _compose(item, note), self._meta(item))
             if (kind, decision) == ("hire", "revise") and room is not None:
                 self.hooks.chat_turn(item["requester_id"], room["id"])  # HR reworks the draft; a reject has no turn
+        if kind == "final_review" and decision in UPSTREAM_NOTE:
+            self._upstream(item)
+
+    def _upstream(self, item: dict) -> None:
+        """§5.9 "선행 반려": T8 · T9 marked the tasks that had started behind this one (`TaskMachine._flag_later`);
+        each of them is told in its own room, with the `meta` of §7.6. A room that cannot be written to does not
+        keep the others from their line."""
+        before = self.store.get_task(item["task_id"]) or {}
+        note = UPSTREAM_NOTE[item["decision"]].format(title=before.get("title", ""), id=item["task_id"])
+        for dep in self.store.list_task_deps(depends_on_id=item["task_id"]):
+            later = self.store.get_task(dep["task_id"])
+            if later is None or later["status"] not in STARTED or not later["upstream_rejected"]:
+                continue
+            rooms = self.store.list_rooms(kind="task", task_id=later["id"], include_archived=True)
+            self._safely("선행 반려 알림", self._say, rooms[0] if rooms else None, note,
+                         {"event": "upstream_rejected", "task_id": later["id"], "upstream_task_id": item["task_id"]})
 
     def _marks(self, item: dict) -> None:
         """`judgment_marks` with a `should_have_asked`: HR's 1:1 room and its chat turn; with nobody in HR, the

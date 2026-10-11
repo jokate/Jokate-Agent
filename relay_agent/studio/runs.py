@@ -152,31 +152,62 @@ class EngineHooks(Hooks):
     `chat(employee_id, room_id)` starts that employee's chat turn in that room — server.py gives
     `chat.ChatTurns.request` (S-7). None = no turn is started.
 
+    `turns` is what a mention asks its turn of — server.py gives the `chat.ChatTurns` itself (S-9): `room_turn`
+    is its `put`, `turn_failed` its `failed`. None = a mention starts no turn. `tell_run` needs neither: it is
+    `engine.interject`, for a run that may be at work.
+
     `interject` feeds a decision text to a run that has stopped (§4.7 '런을 이을 때'); a run that is at work takes
-    it when the thread that advances it is back (`work.deliver`). `commit` stays the default: it comes with H-3."""
+    it when the thread that advances it is back (`work.deliver`). A run that is `done` is opened again first
+    (`RelayEngine.reopen`, S-12): the one connection point of a rework of a finished run, of an answer to
+    `no_review_request`, of the progress thread coming back and of the restart recovery — all of them reach the
+    run through `Inbox.deliver`. `commit` stays the default: it comes with H-3."""
 
     def __init__(self, engine, advance: Callable[[str], Any] | None = None,
-                 chat: Callable[[str, str], Any] | None = None):
+                 chat: Callable[[str, str], Any] | None = None, turns: Any = None):
         self.engine = engine
         self._advance = advance
         self._chat = chat
+        self._turns = turns
 
     def interject(self, run_id: str, text: str) -> bool:
         """True = the text is in the run's notes now. False = not now: the engine has no such run, or the run is
-        at work — a note given then would go into a conversation the server is about to cut (§4.7). The
-        ValueError of a run that is `done` goes up as it is: `Inbox.deliver` reads it as False."""
+        at work — a note given then would go into a conversation the server is about to cut (§4.7).
+
+        A run that is `done` is opened again for the text (§4.7 의 `done` 행): the same run, `pending`, at the
+        stage work is sent back to and in the conversation that stage ended in — the queue then takes it up as
+        any run that stopped (`advance(resume=True)`). The ValueError of a `done` run the engine does not open
+        again (its changes are applied or reverted, or a thread still holds it) goes up as it is:
+        `Inbox.deliver` reads it as False and the text stays owed."""
         try:
             status = self.engine.load(run_id).status
         except (OSError, ValueError):
             return False
         if status == "running":
             return False
+        if status == "done" and text.strip():  # an empty text is the engine's to refuse: nothing is opened for it
+            self.engine.reopen(run_id)
         self.engine.interject(run_id, text)
         return True
 
     def chat_turn(self, employee_id: str, room_id: str) -> None:
         if self._chat is not None:
             self._chat(employee_id, room_id)
+
+    def turn_failed(self, employee_id: str, room_id: str) -> list[str]:
+        return list(self._turns.failed(employee_id, room_id)) if self._turns is not None else []
+
+    def room_turn(self, employee_id: str, room_id: str) -> bool:
+        return bool(self._turns.put(employee_id, room_id)) if self._turns is not None else False
+
+    def tell_run(self, run_id: str, text: str) -> bool:
+        """Unlike `interject` above, a run at work is what this is for: the engine puts the text into the
+        conversation that is going on, or hands it to the next stage. A run the engine does not have (OSError)
+        or that is `done` (ValueError, as an empty text) took nothing."""
+        try:
+            self.engine.interject(run_id, text)
+        except (OSError, ValueError):
+            return False
+        return True
 
     def run_status(self, run_id: str) -> str | None:
         try:
@@ -208,15 +239,16 @@ class EngineHooks(Hooks):
 
 def attach(engine, inbox_factory: Callable[[], Inbox | None], *,
            advance: Callable[[str], Any] | None = None,
-           chat: Callable[[str, str], Any] | None = None) -> EngineHooks:
+           chat: Callable[[str, str], Any] | None = None, turns: Any = None) -> EngineHooks:
     """Connect an engine to the inbox. Its stops are filed: the sink is put beside whatever `engine.notifier`
     already is, so the toast keeps working. The hooks that come back carry the decision of an item without a
     task to that engine — give them to the Inbox (`api.use_hooks`). `chat` is what starts a chat turn
-    (`EngineHooks`); without it no turn is started, whoever asks."""
+    (`EngineHooks`); without it no turn is started, whoever asks. `turns` is what a mention asks its turn of
+    (`chat.ChatTurns`, S-9); without it a mention starts none."""
     sink = RunSink(engine, inbox_factory)
     engine.notifier = Fanout(engine.notifier, sink)
     engine.after_advance = sink.idle
-    return EngineHooks(engine, advance, chat)
+    return EngineHooks(engine, advance, chat, turns)
 
 
 def _told(engine, run) -> tuple[str, dict]:

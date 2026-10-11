@@ -14,6 +14,7 @@ import pytest
 
 from relay_agent import pipeline
 from relay_agent.config import Config
+from relay_agent.projctx import discover
 from relay_agent.studio import api, drafts, files, runs, sat, tools
 from test_mcp_attach import RELAY, setup as engine_setup
 from test_studio_api_tasks import DOC, world  # noqa: F401 - `world` is that file's fixture, `desk` stands on it
@@ -204,6 +205,67 @@ def test_a_stage_without_tools_gets_studio_and_nothing_else(tmp_path, monkeypatc
     engine.advance(inside.id)
     assert runner.seen[1].mcp_servers == ["studio"]  # what the callback gives is attached whatever the tools
     assert runner.seen[1].mcp_overrides["studio"] == {**entry, "env": ledger[inside.id]}
+
+
+def test_a_run_that_picked_studio_keeps_its_servers_without_a_project_context(tmp_path, monkeypatch):
+    """§9.5: the repo's `project_context: false`, or a folder with no marker file. What a run that picked studio
+    picked from the registry is attached all the same; a run that did not pick it gets no MCP, as before."""
+    engine, relay, runner, _ = engine_setup(tmp_path, monkeypatch, {"project_context": False})
+    entry, notes = {"command": "py", "args": ["studio.py"]}, {"command": "py", "args": ["notes.py"]}
+    engine.mcp_registry.update(studio=dict(entry), notes=dict(notes))
+    env = {"STUDIO_URL": "http://127.0.0.1:8020", "STUDIO_ACTOR_TOKEN": "sat1.a.b"}
+    ledger = {}
+    engine.mcp_env["studio"] = lambda run_id, stage: ledger.get(run_id)
+
+    def turn(folder=None, inside=False, **picked):
+        """One run to its end: (the run, the call its stage was made with, the kinds of its events)."""
+        run = engine.create(relay, "g", folder, repo=None if folder else "game", **picked)
+        if inside:
+            ledger[run.id] = env
+        assert engine.project_context(run) is None
+        run = engine.advance(run.id)
+        assert run.status == "done"
+        return run, runner.seen[-1], [e["kind"] for e in engine.history.events(run.id)]
+
+    for picked in ({}, {"mcp": []}, {"mcp": ["notes"]}):  # studio not picked — dashboard · CLI · campaign: as it was
+        _, call, events = turn(**picked)
+        assert call.mcp_servers == [] and "ToolSearch" not in call.tools, picked
+        assert not {"studio", "notes"} & set(call.mcp_overrides) and "mcp_missing" not in events, picked
+    _, call, _ = turn(inside=True)  # a run of the ledger that picked nothing: the callback alone gives it studio
+    assert call.mcp_servers == ["studio"] and "ToolSearch" not in call.tools
+
+    run, call, events = turn(inside=True, mcp=["notes", "studio"])  # an employee's turn or task run
+    assert call.mcp_servers == run.mcp == ["notes", "studio"] and "ToolSearch" in call.tools
+    assert call.mcp_overrides["studio"] == {**entry, "env": env} and call.mcp_overrides["notes"] == notes
+    assert not call.project and "project_context" not in events and "mcp_missing" not in events
+    assert engine.mcp_registry["studio"] == entry
+
+    # the project's and the user's own servers are not looked for without a context: said, and not attached
+    run, call, _ = turn(inside=True, mcp=["nope", "unreal", "studio"])
+    assert call.mcp_servers == ["studio"]
+    missing = {e["detail"]["server"] for e in engine.history.events(run.id) if e["kind"] == "mcp_missing"}
+    assert missing == {"nope", "unreal"}
+    _, call, _ = turn(inside=True, mcp=["notes", "studio"], mcp_only=["studio"])  # narrowed as with a context
+    assert call.mcp_servers == ["studio"] and "notes" not in call.mcp_overrides
+    _, call, _ = turn(mcp=["studio"])  # picked, but not a run of the ledger: no token, so no studio
+    assert call.mcp_servers == []
+    # picked with another, and not a run of the ledger: studio is left out, the other and ToolSearch stay (§9.5)
+    _, call, events = turn(mcp=["notes", "studio"])
+    assert call.mcp_servers == ["notes"] and "ToolSearch" in call.tools
+    assert call.mcp_overrides["notes"] == notes and "env" not in call.mcp_overrides.get("studio", {})  # no token
+    assert "mcp_missing" not in events
+
+    nobody = tmp_path / "nobody"  # a PC whose user has no MCP server, and a folder with no marker file
+    nobody.mkdir()
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    monkeypatch.setattr("relay_agent.projctx.Path.home", staticmethod(lambda: nobody))
+    assert discover(plain) is None
+    run, call, events = turn(plain, inside=True, mcp=["notes", "studio"])  # an employee placed nowhere
+    assert call.mcp_servers == run.mcp == ["notes", "studio"] and "ToolSearch" in call.tools
+    assert call.mcp_overrides["studio"] == {**entry, "env": env} and "project_context" not in events
+    _, call, _ = turn(plain)
+    assert call.mcp_servers == [] and "ToolSearch" not in call.tools
 
 
 def test_a_runs_folder_is_its_workspace_or_its_workdir(tmp_path, monkeypatch):

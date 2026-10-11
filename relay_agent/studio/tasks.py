@@ -1,7 +1,7 @@
 """Task and campaign state machine (S-2): the only code that changes tasks.status.
 
 Contract: design/studio/ARCHITECTURE.md §4.1–4.5 (states, C1 · C2, T1–T11, F0–F10, A1–A4, errors, order of
-execution), §4.9 (employee status), §4.10 (campaign status, provisional until S-14).
+execution), §4.9 (employee status), §4.10 (campaign status; its automatic progress is campaigns.py).
 
 One transaction per creation / transition holds: the guarded UPDATE of the task, its task_events row (who ·
 when · why), the inbox item that is 1:1 with proposed · blocked · review (created, decided or cancelled),
@@ -133,13 +133,34 @@ DEFAULT_REASON = {  # no task_events row is left without a "why"
     "limit": "한도에 닿았다", "flag": "선행 작업이 반려됐다", "guard": "가드 훅이 명령을 거부했다",
 }
 
-# --- campaigns (§4.10, provisional) -------------------------------------------------------------------
+# --- campaigns (§4.10) --------------------------------------------------------------------------------
 CAMPAIGN_STATES = ("draft", "running", "paused", "done", "cancelled")
 CAMPAIGN_ALLOWED = {  # (from, to) -> who
     ("draft", "running"): "owner", ("running", "paused"): "owner", ("paused", "running"): "owner",
     ("running", "done"): "system",
     ("draft", "cancelled"): "owner", ("running", "cancelled"): "owner", ("paused", "cancelled"): "owner",
 }
+CAMPAIGN_MODES = ("nonstop", "milestone", "each")  # campaigns.mode (§3.9); what each fills is `_deps_filled`
+CAMPAIGN_FIELDS = ("title", "goal", "mode")        # edit_campaign(): until the campaign has ended
+CAMPAIGN_ENDED = ("done", "cancelled")
+STARTED = ("working", "blocked", "review")         # "이미 시작된" 뒤 작업: what T8 · T9 mark (§4.3 T8, §5.9)
+
+
+# What `Effects.after` hears in place of 'campaign' when a campaign has just gone to `running` (started or
+# resumed): the look that follows says its notices anew (§5.9). An edit and every other status say 'campaign'.
+CAMPAIGN_STARTED = "campaign_started"
+CAMPAIGN_REASON = "캠페인 자동 진행"  # the `reason` of the `queued` event the system leaves (§4.3 T3 의 계기)
+# the `reason` of the `unqueued` event the system leaves when it takes a task out of the line of a campaign that
+# goes to that status (§4.10 '멈춤'). `campaigns._stood` knows these rows by it
+CAMPAIGN_HELD = {"paused": "캠페인을 일시정지해 줄에서 뺐다", "cancelled": "캠페인을 취소해 줄에서 뺐다"}
+
+
+def campaign_queued(events: list[dict]) -> bool:
+    """Is the task's place in the line one the automatic progress of its campaign took (the newest `queued` row
+    is the system's, with CAMPAIGN_REASON)? A working task the system put in the line again to go on with its
+    run has another reason, and a start the owner asked for is the owner's."""
+    asked = [event for event in events if event["kind"] == "queued"]
+    return bool(asked) and asked[-1]["actor_kind"] == "system" and asked[-1]["reason"] == CAMPAIGN_REASON
 
 
 def classify(from_status: str, to_status: str) -> str:
@@ -251,12 +272,15 @@ class Effects:
         does. `stage_models` None: the override the task keeps. It never raises."""
         return []
 
-    def before(self, rule: str, task: dict) -> None:
-        """T7 · T9 · T11: run cleanup, then apply + commit (T7) or rollback (T9 · T11). Raising = no transition."""
+    def before(self, rule: str, task: dict) -> str | None:
+        """T7 · T9 · T11: run cleanup, then apply + commit (T7) or rollback (T9 · T11). Raising = no transition.
+        A text it returns — what it could not do while the transition goes on all the same (a run the engine
+        has no more is not reverted) — is put after the `reason` of the transition row."""
 
     def after(self, what: str, row: dict, event_ids: tuple[int, ...]) -> None:
         """After the commit: push the stream events, start / resume the run, send the push. `what` is the rule,
-        the task_events kind of a non-transition change, or 'campaign'. The change stands even if this raises:
+        the task_events kind of a non-transition change, 'campaign', or CAMPAIGN_STARTED for a campaign that has
+        just gone to `running`. The change stands even if this raises:
         the exception reaches the caller as it is, and the run T3 made is not closed (cancel_run is for a failed
         commit only) — the implementation (S-8) catches and records what must not be lost.
         What `transition(committed=)` was given has run by then: a decision text is in the run before this
@@ -544,7 +568,9 @@ class TaskMachine:
         if rule == "T3":
             run_id = self._create_run(task, to)
         elif rule in PRE_EFFECT:
-            self.effects.before(rule, task)
+            noted = self.effects.before(rule, task)
+            if noted:  # what the effect could not do, kept where the transition is read (§4.3 `run_gone` 의 예외)
+                why = f"{why} — {noted}"
         try:
             outcome = self._commit(rule, task, to, actor, why, run_id=run_id, pending=pending, inbox=inbox or {},
                                    decision=decision, comment=comment or "", data=data, changed=changed,
@@ -701,6 +727,9 @@ class TaskMachine:
             cols["run_id"] = None
         if rule == "T9" or reset:
             cols["exchange_count"] = 0
+        if task["upstream_rejected"] and to not in STARTED:  # T7 · T9 · T11: what stood on the rejected result
+            cols["upstream_rejected"] = 0                    # is closed or taken back — the mark goes with it
+            detail["upstream_rejected"] = False
         if rule == "T6":
             guard, guard_args = " AND queued_at IS NULL AND assignee_id = ?", (actor.id,)
         cols["updated_at"] = stamp
@@ -743,8 +772,27 @@ class TaskMachine:
                 room = self._open_room(tx, fresh)
             elif rule == "T3":
                 room = self._join_room(tx, fresh)
+            if rule in ("T8", "T9"):
+                self._flag_later(tx, fresh, rule, stamp)
             ids = tuple(tx.emitted)
         return Outcome(task=fresh, rule=rule, event=event, inbox=item, room=room, stream_ids=ids)
+
+    def _flag_later(self, tx: Tx, task: dict, rule: str, stamp: str) -> None:
+        """T8 · T9 (§4.3): the owner sent `task` back, so what had already started on its result is marked —
+        `upstream_rejected`, a `flag` row and `task.updated` for every task that waits for it directly and is
+        in STARTED, in the transaction of the transition. The line in that task's room is the inbox's (§5.9
+        "선행 반려"). A task that only waits in backlog has nothing to look at again. The mark goes when the
+        marked task itself leaves STARTED (T7 · T9 · T11, in `_commit`: the column, and `upstream_rejected:
+        false` in the detail of that transition row) — not when the predecessor is passed again: that is when
+        the task is to be looked at again."""
+        for dep in self.store.list_task_deps(depends_on_id=task["id"], tx=tx):
+            later = self.store.get_task(dep["task_id"], tx=tx)
+            if later is None or later["status"] not in STARTED:
+                continue
+            tx.exec("UPDATE tasks SET upstream_rejected = 1, updated_at = ? WHERE id = ?", (stamp, later["id"]))
+            event = self._event(tx, later["id"], SYSTEM, "flag", reason=DEFAULT_REASON["flag"],
+                                detail={"upstream_task_id": task["id"], "rule": rule})
+            self._emit_updated(tx, self._task(later["id"], tx), event)
 
     def _edit_events(self, tx: Tx, task: dict, actor: Actor, changed: dict) -> list[dict]:
         out = []
@@ -1025,11 +1073,33 @@ class TaskMachine:
             raise ValueError(f"record() writes one of {RECORD_KINDS}: {kind!r}")
         return self._change(self._task(task_id), actor, kind, reason, detail=detail)
 
+    def count_exchange(self, task_id: str, by: int = 1) -> dict:
+        """§4.6: `exchange_count` + `by` — the turns the mentions of one message put in (S-9; `tools.room_post`).
+        The UPDATE adds, so two messages at once both count. `task.updated` goes out with `change: exchange` and
+        no `event_id`: the count is a column and the message is its record, so no task_events row is written.
+        Whatever the status — the limit is looked at before the message is made, not here. Returns the task."""
+        if by < 1:
+            raise ValueError(f"count_exchange() counts the turns that went in: by={by!r}")
+        with self.store.transaction() as tx:
+            cur = tx.exec("UPDATE tasks SET exchange_count = exchange_count + ?, updated_at = ? WHERE id = ?",
+                          (by, now(), task_id))
+            if cur.rowcount != 1:
+                raise TaskNotFound(f"task {task_id} not found")
+            fresh = self._task(task_id, tx)
+            self.store.emit(tx, "task.updated", {"task": fresh, "change": "exchange", "event_id": None},
+                            project_id=fresh["project_id"], task_id=fresh["id"])
+            ids = tuple(tx.emitted)
+        self.effects.after("exchange", fresh, ids)
+        return fresh
+
     # --- campaigns (§4.10) ----------------------------------------------------------------------------------
     def transition_campaign(self, campaign_id: str, to: str, actor: Actor) -> dict:
-        """Change a campaign's status. Only the table, the guarded UPDATE and campaign.updated — starting the
-        tasks of a running campaign is S-14. Who and why are not recorded: §4.10 asks for no record and there
-        is no campaign events table. A `to` that is not a campaign state is a ValueError (the caller's bug)."""
+        """Change a campaign's status: the table, the guarded UPDATE and campaign.updated — and, for `paused` ·
+        `cancelled`, the tasks the automatic progress had put in the line leave it in that transaction
+        (`_hold_line`). Starting the tasks of a running campaign is campaigns.py's: `Effects.after` hears
+        CAMPAIGN_STARTED for `running` and 'campaign' otherwise. Who and why are not recorded: §4.10 asks for no
+        record and there is no campaign events table. A `to` that is not a campaign state is a ValueError (the
+        caller's bug)."""
         campaign = self.store.get_campaign(campaign_id)
         if campaign is None:
             raise CampaignNotFound(f"campaign {campaign_id} not found")
@@ -1062,6 +1132,91 @@ class TaskMachine:
                           (*cols.values(), campaign_id, frm))
             if cur.rowcount != 1:
                 raise self._stale(campaign, to)
+            fresh = self.store.get_campaign(campaign_id, tx=tx)
+            self.store.emit(tx, "campaign.updated", {"campaign": fresh}, project_id=fresh["project_id"])
+            if to in CAMPAIGN_HELD:
+                self._hold_line(tx, fresh, stamp)
+            ids = tuple(tx.emitted)
+        self.effects.after(CAMPAIGN_STARTED if to == "running" else "campaign", fresh, ids)
+        return fresh
+
+    def _hold_line(self, tx: Tx, campaign: dict, stamp: str) -> None:
+        """A campaign that goes to `paused` or `cancelled` starts nothing new (§4.10 '멈춤'): in the transaction
+        of that change the backlog tasks that stand in the line because the automatic progress put them there
+        (`campaign_queued`) leave it — the system's `unqueued` row with CAMPAIGN_HELD as its reason and
+        `task.updated`, as `unqueue` writes them, after `campaign.updated`. One commit: the queue does not know
+        of campaigns, and it finds none of these in the line from then on, whenever the server stops. A task
+        that got a slot but not yet its T3 leaves as well (the queue's thread then makes no run); one whose T3
+        was first is working and is not touched. What the owner asked to start stays, and so does a working
+        task that waits for a slot."""
+        for task in self.store.list_tasks(campaign_id=campaign["id"], status="backlog", tx=tx):
+            if task["queued_at"] is None or not campaign_queued(self.store.list_task_events(task["id"], tx=tx)):
+                continue
+            cols = {"queued_at": None, "updated_at": stamp}
+            if not self._set_columns(tx, task, cols, " AND queued_at IS NOT NULL"):
+                continue
+            event = self._event(tx, task["id"], SYSTEM, "unqueued", reason=CAMPAIGN_HELD[campaign["status"]],
+                                detail={"queued_at": task["queued_at"]})
+            self._emit_updated(tx, self._task(task["id"], tx), event)
+
+    def create_campaign(self, actor: Actor, project_id: str, *, title: str, goal: str,
+                        mode: str = "milestone") -> dict:
+        """The owner opens a campaign: a `draft`, which starts nothing (§4.10). `campaign.updated` says that it
+        is there — §7.4 has no event of its own for that. An empty title or goal is `missing_fields`, a project
+        that is not there `precondition_failed`; a `mode` outside CAMPAIGN_MODES is a ValueError (the caller's
+        bug)."""
+        if mode not in CAMPAIGN_MODES:
+            raise ValueError(f"campaign mode must be one of {CAMPAIGN_MODES}: {mode!r}")
+        if actor.kind != "owner":
+            raise TransitionError("actor_not_allowed", f"캠페인은 owner 만 만든다. {actor.kind} 는 할 수 없다",
+                                  to_status="draft")
+        empty = [name for name, value in (("title", title), ("goal", goal)) if _blank(value)]
+        if empty:
+            raise TransitionError("missing_fields", f"비어 있다: {', '.join(empty)}", to_status="draft", fields=empty)
+        if _blank(project_id) or self.store.get_project(project_id) is None:
+            raise self._unmet(["프로젝트가 없다"], None, "draft", None)
+        with self.store.transaction() as tx:
+            fresh = self.store.create_campaign(project_id, title, goal, mode=mode, status="draft", tx=tx)
+            self.store.emit(tx, "campaign.updated", {"campaign": fresh}, project_id=fresh["project_id"])
+            ids = tuple(tx.emitted)
+        self.effects.after("campaign", fresh, ids)
+        return fresh
+
+    def edit_campaign(self, campaign_id: str, actor: Actor, fields: dict) -> dict | None:
+        """The owner changes `title` · `goal` · `mode` of a campaign that has not ended (PATCH of §6.4). The
+        mode may change on the way: every look reads it (§4.10 의 4), so it holds from the next start — what
+        stands in the line or has started is left as it is. None when no value differs: nothing is written.
+
+        Raises ValueError for a call that is the caller's bug: a key outside CAMPAIGN_FIELDS, a mode outside
+        CAMPAIGN_MODES."""
+        unknown = sorted(set(fields) - set(CAMPAIGN_FIELDS))
+        if unknown:
+            raise ValueError(f"edit_campaign() cannot change {unknown} (allowed: {CAMPAIGN_FIELDS})")
+        if "mode" in fields and fields["mode"] not in CAMPAIGN_MODES:
+            raise ValueError(f"campaign mode must be one of {CAMPAIGN_MODES}: {fields['mode']!r}")
+        campaign = self.store.get_campaign(campaign_id)
+        if campaign is None:
+            raise CampaignNotFound(f"campaign {campaign_id} not found")
+        frm = campaign["status"]
+        if actor.kind != "owner":
+            raise TransitionError("actor_not_allowed", f"캠페인은 owner 만 고친다. {actor.kind} 는 할 수 없다",
+                                  from_status=frm)
+        if frm in CAMPAIGN_ENDED:
+            raise TransitionError("precondition_failed", f"끝난 캠페인({frm})은 고칠 수 없다", from_status=frm,
+                                  failed=[])
+        changed = {key: value for key, value in fields.items() if campaign[key] != value}
+        if not changed:
+            return None
+        empty = [key for key in ("title", "goal") if key in changed and _blank(changed[key])]
+        if empty:
+            raise TransitionError("missing_fields", f"고친 값이 비어 있다: {', '.join(empty)}", from_status=frm,
+                                  fields=empty)
+        sets = ", ".join(f"{column} = ?" for column in changed)
+        with self.store.transaction() as tx:
+            cur = tx.exec(f"UPDATE campaigns SET {sets}, updated_at = ? WHERE id = ? AND status = ?",
+                          (*changed.values(), now(), campaign_id, frm))
+            if cur.rowcount != 1:
+                raise self._stale(campaign, None)
             fresh = self.store.get_campaign(campaign_id, tx=tx)
             self.store.emit(tx, "campaign.updated", {"campaign": fresh}, project_id=fresh["project_id"])
             ids = tuple(tx.emitted)

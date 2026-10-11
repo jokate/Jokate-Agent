@@ -58,6 +58,30 @@ class Config(BaseModel):
     studio_model_cap: str | None = None   # haiku | sonnet | opus | fable
     studio_effort_cap: str | None = None  # low | medium | high | xhigh | max
     studio_max_runs: int = 3  # Katae Studio: task runs at work at once, over all projects (ARCHITECTURE.md §4.6)
+    # Katae Studio: seconds a task run may go on after the answer of a T4 (`ask_owner`, the guard) before the
+    # server cuts it — 기다림 = 런 종료 (ARCHITECTURE.md §8.3 '서버의 뒤처리'). 0 = at once.
+    studio_cut_after: float = 60.0
+    # Katae Studio: the turns employees may put in for each other in one task (`room_post` mentions) before the
+    # system asks the owner — 왕복 한도 (ARCHITECTURE.md §4.6). Read at every mention; T5 of that item counts anew.
+    studio_max_exchanges: int = 20
+    # Katae Studio: hosts an employee may upload to without the owner being asked, besides the git remotes of
+    # the registered projects (ARCHITECTURE.md §10.4 의 5). An approved upload does not add to it.
+    studio_known_hosts: list[str] = []
+    # Katae Studio: what each part looks after, by department id — globs of paths from the project folder, any
+    # case; one that ends with `/` is everything under that folder. A file a task run changed that fits none of
+    # its assignee's part is listed as 담당 밖 변경 in the review package (ARCHITECTURE.md §5.4 `out_of_scope`).
+    # A part without a list is not judged.
+    studio_scopes: dict[str, list[str]] = {}
+    # Katae Studio: the Firebase service account key file the pushes are sent with (FCM HTTP v1, N-1 —
+    # ARCHITECTURE.md §5.9). "" = no push. A path that is not absolute is taken from this repository's folder.
+    # Read at the first push, not at the start: a file that is missing or cannot be used leaves the push off and
+    # the server runs as before. Keep the file outside every repository, in `.katae` of the user folder — the
+    # guard keeps the employees out of there. No place is looked in that is not named here.
+    studio_fcm_key: str = ""
+    # Katae Studio: seconds an inbox item may wait before the owner's devices are told of it again, counted from
+    # when it was made or last told of (N-2 — ARCHITECTURE.md §5.9 재알림). 0 or less = no reminder. Read at every
+    # look at the waiting items (the server's start, then once a minute).
+    studio_remind_after: float = 7200.0
 
     @classmethod
     def load(cls, path: Path | None = None) -> "Config":

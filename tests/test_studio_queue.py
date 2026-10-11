@@ -48,7 +48,7 @@ class Gate(MockRunner):
 
 
 class Line(Shop):
-    """Shop with the queue connected the way server.py connects it (`fx.kick`, `api._queue`), on the runner
+    """Shop with the queue connected the way server.py connects it (`fx.kick` · `fx.holds`, `api._queue`), on the runner
     above. The work of a slot runs on a thread, as on the server, unless a test puts `held.append` in
     `q.spawn`: then it is the test's to run, in place."""
 
@@ -58,7 +58,7 @@ class Line(Shop):
         self.gate = lab.runner = Gate()
         self.repos = {"game": {"path": str(tmp_path / "project")}}
         self.q = queue.TaskQueue(lab.engine, self.fx, api.run_inbox, limit=lambda: self.limit, retry_after=None)
-        self.fx.kick = self.q.kick
+        self.fx.kick, self.fx.holds = self.q.kick, self.q.holds
         monkeypatch.setattr(api, "_queue", self.q)
 
     def project(self):

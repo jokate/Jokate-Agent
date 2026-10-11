@@ -120,13 +120,13 @@ class Workspace:
     def _candidates(self, work_tree: Path, extra: set[str] = frozenset(),
                     index: Path | None = None) -> tuple[list[str], list[tuple[str, int]], int]:
         """Files to snapshot: tracked-in-index + untracked (respecting .gitignore unless include_ignored),
-        minus excludes and oversized files. Returns (paths, skipped_big, total_bytes)."""
+        minus excludes and oversized files; of `extra`, only what is still on disk. Returns (paths, skipped_big, total_bytes)."""
         args = ["ls-files", "-z", "--cached", "--others"]
         if not self.include_ignored:
             args.append("--exclude-standard")
         dir_excludes = [e for e in self.excludes if "*" not in e]
         args += ["--", "."] + [f":(exclude,glob)**/{e}/**" for e in dir_excludes]
-        listed = {p for p in self._git(work_tree, *args, index=index).split("\0") if p} | set(extra)
+        listed = {p for p in self._git(work_tree, *args, index=index).split("\0") if p} | {p for p in extra if os.path.lexists(work_tree / p)}  # a deletion staged by an earlier collect matches no file: `git add` would refuse the whole list
         paths, skipped, total = [], [], 0
         limit = self.max_file_mb * 1_048_576
         for rel in sorted(listed):

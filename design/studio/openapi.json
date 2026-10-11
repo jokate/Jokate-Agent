@@ -40,6 +40,52 @@
         "title": "AttachmentUpload",
         "type": "object"
       },
+      "CampaignPatch": {
+        "additionalProperties": false,
+        "description": "Only the keys that are sent change; none of them takes null. A new mode holds from the next start (§4.10).",
+        "properties": {
+          "goal": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Goal"
+          },
+          "mode": {
+            "anyOf": [
+              {
+                "enum": [
+                  "nonstop",
+                  "milestone",
+                  "each"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mode"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          }
+        },
+        "title": "CampaignPatch",
+        "type": "object"
+      },
       "Cancel": {
         "additionalProperties": false,
         "properties": {
@@ -122,6 +168,89 @@
           "depends_on"
         ],
         "title": "Deps",
+        "type": "object"
+      },
+      "DevicePatch": {
+        "additionalProperties": false,
+        "properties": {
+          "fcm_token": {
+            "anyOf": [
+              {
+                "maxLength": 4096,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fcm Token"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "maxLength": 80,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "settings": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DeviceSettings"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "title": "DevicePatch",
+        "type": "object"
+      },
+      "DeviceSettings": {
+        "additionalProperties": false,
+        "properties": {
+          "quiet_hours": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/QuietHours"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "title": "DeviceSettings",
+        "type": "object"
+      },
+      "GuardCheck": {
+        "additionalProperties": false,
+        "properties": {
+          "command": {
+            "title": "Command",
+            "type": "string"
+          },
+          "rule_id": {
+            "title": "Rule Id",
+            "type": "string"
+          },
+          "tool": {
+            "title": "Tool",
+            "type": "string"
+          }
+        },
+        "required": [
+          "tool",
+          "command",
+          "rule_id"
+        ],
+        "title": "GuardCheck",
         "type": "object"
       },
       "HTTPValidationError": {
@@ -583,6 +712,57 @@
         "title": "McpTaskRequestReview",
         "type": "object"
       },
+      "NewCampaign": {
+        "additionalProperties": false,
+        "description": "A draft. The first three are required: an empty or missing one is 422 missing_fields naming all of them.",
+        "properties": {
+          "goal": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Goal"
+          },
+          "mode": {
+            "default": "milestone",
+            "enum": [
+              "nonstop",
+              "milestone",
+              "each"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "project_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project Id"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          }
+        },
+        "title": "NewCampaign",
+        "type": "object"
+      },
       "NewMessage": {
         "properties": {
           "attachments": {
@@ -878,6 +1058,40 @@
         "title": "ProjectPatch",
         "type": "object"
       },
+      "QuietHours": {
+        "additionalProperties": false,
+        "properties": {
+          "end": {
+            "pattern": "^([01]\\d|2[0-3]):[0-5]\\d$",
+            "title": "End",
+            "type": "string"
+          },
+          "start": {
+            "pattern": "^([01]\\d|2[0-3]):[0-5]\\d$",
+            "title": "Start",
+            "type": "string"
+          },
+          "utc_offset_min": {
+            "anyOf": [
+              {
+                "maximum": 840.0,
+                "minimum": -720.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Utc Offset Min"
+          }
+        },
+        "required": [
+          "start",
+          "end"
+        ],
+        "title": "QuietHours",
+        "type": "object"
+      },
       "ReadMark": {
         "properties": {
           "message_id": {
@@ -890,6 +1104,20 @@
           "message_id"
         ],
         "title": "ReadMark",
+        "type": "object"
+      },
+      "RoomPatch": {
+        "additionalProperties": false,
+        "properties": {
+          "muted": {
+            "title": "Muted",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "muted"
+        ],
+        "title": "RoomPatch",
         "type": "object"
       },
       "Start": {
@@ -1237,6 +1465,163 @@
         "tags": [
           "studio"
         ]
+      },
+      "post": {
+        "description": "A campaign opens as a draft and starts nothing until its start (§4.10). 201 with the row.",
+        "operationId": "create_campaign_studio_campaigns_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewCampaign"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Create Campaign Studio Campaigns Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Campaign",
+        "tags": [
+          "studio"
+        ]
+      }
+    },
+    "/studio/campaigns/{id}": {
+      "patch": {
+        "description": "Only the keys that are sent change, until the campaign has ended. A new mode holds from the next start.",
+        "operationId": "patch_campaign_studio_campaigns__id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "title": "Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CampaignPatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Patch Campaign Studio Campaigns  Id  Patch",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Patch Campaign",
+        "tags": [
+          "studio"
+        ]
+      }
+    },
+    "/studio/campaigns/{id}/{action}": {
+      "post": {
+        "description": "The owner's start (a draft), pause (a running one), resume (a paused one) or cancel (before its end): §4.10.",
+        "operationId": "campaign_action_studio_campaigns__id___action__post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "title": "Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "action",
+            "required": true,
+            "schema": {
+              "enum": [
+                "start",
+                "pause",
+                "resume",
+                "cancel"
+              ],
+              "title": "Action",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Campaign Action Studio Campaigns  Id   Action  Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Campaign Action",
+        "tags": [
+          "studio"
+        ]
       }
     },
     "/studio/departments": {
@@ -1346,6 +1731,60 @@
           }
         },
         "summary": "New Pairing",
+        "tags": [
+          "studio"
+        ]
+      }
+    },
+    "/studio/devices/{id}": {
+      "patch": {
+        "operationId": "patch_device_studio_devices__id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "title": "Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DevicePatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Patch Device Studio Devices  Id  Patch",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Patch Device",
         "tags": [
           "studio"
         ]
@@ -1519,6 +1958,50 @@
         ]
       }
     },
+    "/studio/guard/check": {
+      "post": {
+        "description": "The guard hook asks about a command of the ask list (§10.4). `{decision, message, inbox_id, end_turn}`.",
+        "operationId": "guard_check_studio_guard_check_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GuardCheck"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Guard Check Studio Guard Check Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Guard Check",
+        "tags": [
+          "studio"
+        ]
+      }
+    },
     "/studio/inbox": {
       "get": {
         "description": "`pending`: the longest waiting first (`created_at`); `before` is not used. Any other status: the newest\nclosed first, and `before` is the `closed_at` cursor. `pending_count` counts every pending item, whatever\nthe filters (provisional).",
@@ -1659,7 +2142,7 @@
     },
     "/studio/inbox/{id}": {
       "get": {
-        "description": "The row + `task` (null for `hire`) + `allowed_decisions` ([] once it is closed). A final review also\nhas `package` (§5.4): null until S-12 computes it.",
+        "description": "The row + `task` (null for `hire`) + `allowed_decisions` ([] once it is closed). A final review also\nhas `package` (§5.4), computed now from the run as it is (studio/review.py).",
         "operationId": "get_inbox_item_studio_inbox__id__get",
         "parameters": [
           {
@@ -2675,6 +3158,164 @@
         "tags": [
           "studio"
         ]
+      },
+      "patch": {
+        "operationId": "patch_room_studio_rooms__id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "title": "Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RoomPatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Patch Room Studio Rooms  Id  Patch",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Patch Room",
+        "tags": [
+          "studio"
+        ]
+      }
+    },
+    "/studio/rooms/{id}/members/{employee_id}": {
+      "delete": {
+        "description": "Takes a member out of the task room: `left_at` is set and the row stays (`_may_post` and the turns look at\n`left_at`; POST brings it back). One who is not in the room changes nothing. Where the employee is placed\nis not looked at: one who was moved away can still be taken out. The assignee stays — its run writes there;\n`/tasks/{id}/assign` is how the assignee changes.",
+        "operationId": "remove_room_member_studio_rooms__id__members__employee_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "title": "Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "employee_id",
+            "required": true,
+            "schema": {
+              "title": "Employee Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Remove Room Member Studio Rooms  Id  Members  Employee Id  Delete",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Remove Room Member",
+        "tags": [
+          "studio"
+        ]
+      },
+      "post": {
+        "description": "Seats an employee of the task's project in the task room (S-9; §6.4), so that the room's mentions reach\nit. One who is seated already changes nothing; one who left comes back to the row it had — the conversation\nit kept there —, as `TaskMachine._join_room` does for the assignee.",
+        "operationId": "add_room_member_studio_rooms__id__members__employee_id__post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "title": "Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "employee_id",
+            "required": true,
+            "schema": {
+              "title": "Employee Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Add Room Member Studio Rooms  Id  Members  Employee Id  Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Add Room Member",
+        "tags": [
+          "studio"
+        ]
       }
     },
     "/studio/rooms/{id}/messages": {
@@ -2917,6 +3558,94 @@
         ]
       }
     },
+    "/studio/runs/{run_id}/patch": {
+      "get": {
+        "description": "The run's `result.patch` as text: what `package.changes.patch_url` of a final review points at (§5.4).\nEmpty when the run changed no file. 404 for a run that is not a studio run.",
+        "operationId": "get_run_patch_studio_runs__run_id__patch_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Run Patch",
+        "tags": [
+          "studio"
+        ]
+      }
+    },
+    "/studio/runs/{run_id}/tokens": {
+      "get": {
+        "description": "The token watch of that run, as the server's `GET /runs/{run_id}/tokens` gives it (§6.4). 404 for a run\nthat is not a studio run.",
+        "operationId": "get_run_tokens_studio_runs__run_id__tokens_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Run Tokens Studio Runs  Run Id  Tokens Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Run Tokens",
+        "tags": [
+          "studio"
+        ]
+      }
+    },
     "/studio/tasks": {
       "get": {
         "description": "By `sort_order`, then in the order the tasks were made. `status` is one value.",
@@ -3087,7 +3816,7 @@
     },
     "/studio/tasks/{id}": {
       "get": {
-        "description": "The row and what a task screen shows next to it. `queue_position` counts from 1 in the server's whole\nline (provisional); `run` stays null until S-8 sets `_run_view`.",
+        "description": "The row and what a task screen shows next to it. `queue_position` counts from 1 in the server's whole\nline (provisional); `run` is `{id, status, changes_status}` of the task's run, null when it has none.",
         "operationId": "get_task_studio_tasks__id__get",
         "parameters": [
           {

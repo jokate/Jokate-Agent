@@ -18,13 +18,22 @@ The five that are no task's: `room_post` writes a message as the employee and co
 (§6.6 '직원의 첨부', studio/files.py); `employee_list` reads; HR's three keep drafts in `runs/studio/drafts/`
 (studio/drafts.py) and file the `hire` item through Inbox.
 
-Not here yet: the turns a mention starts, `exchange_count` and the handoff format of `room_post` (S-9 · H-5 —
-`queued` is [] until then), the two file arguments of an inbox item (`_file_args`, S-11), and what the server
-does after a T4 (cutting the run, §8.3 · §5.7 — S-8).
+A mention in a task room asks for a turn (S-9; §4.6 · §8.4 · §9.5): the assignee's is the task's run, which is told
+the message; any other member's is a read turn. Both go through `inbox.hooks` — a tool knows the turn, not the
+engine. Each turn that went in is one more in `exchange_count`, and at `inbox.max_exchanges` nothing is written:
+the system asks the owner (T4, `exchange_limit`) and the turn ends. A mention in any other room starts no turn.
+
+Not here yet: the handoff format of `room_post` (H-5), and the two file arguments of an inbox item (`_file_args`,
+S-11).
+
+Not here at all: what the server does once the answer of a T4 · T6 has gone out (cutting the run that is still
+at work, §8.3 '서버의 뒤처리' · §5.7). That is studio/cutoff.py's, and api.py calls it (`answered`) with the run
+the call came from — a tool knows the turn, not the engine.
 """
 
 from __future__ import annotations
 
+import logging
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,14 +41,18 @@ from typing import Any, Callable
 
 from . import drafts, employees, files
 from .inbox import AMEND_FILES, DRAFT_KEYS, DRAFT_REQUIRED, Inbox, InboxError, validate_payload
-from .tasks import (FORBIDDEN_WHY, STATES, TASK_TYPES, TEXT_FIELDS, Actor, Outcome, TaskMachine, TaskNotFound,
-                    TransitionError, classify)
+from .tasks import (FORBIDDEN_WHY, STATES, SYSTEM, TASK_TYPES, TEXT_FIELDS, Actor, Outcome, TaskMachine,
+                    TaskNotFound, TransitionError, classify)
+
+log = logging.getLogger(__name__)
 
 END_TURN = "이제 턴을 끝내라. 도구를 더 부르지 말고, 지금까지 한 일과 기다리는 것을 한 문단으로 적고 멈춰라."  # §8.3
 ASK_KINDS = {"question": "question", "choice": "structure_choice", "approval": "pre_approval"}  # §1.5
 HR = "hr"
-CODES = ("no_task_context", "not_found", "actor_not_allowed", "missing_fields", "precondition_failed")  # Refusal
-ADDED = {"illegal_transition": ("from", "to"), "precondition_failed": ("failed",), "missing_fields": ("fields",)}
+CODES = ("no_task_context", "not_found", "actor_not_allowed", "missing_fields", "precondition_failed",
+         "exchange_limit")  # Refusal
+ADDED = {"illegal_transition": ("from", "to"), "precondition_failed": ("failed",), "missing_fields": ("fields",),
+         "exchange_limit": ("inbox_id",)}
 ENDING = ("ask_owner", "task_request_review")   # the tools whose success ends the turn (T4 · T6)
 WAITING = ("blocked", "review")                 # the task already waits for the owner: end the turn (§8.3)
 PROGRESS_STATES = ("working", "blocked", "review")  # §8.4: the run still goes after T4 · T6
@@ -418,10 +431,90 @@ def _attachment_roots(caller: Caller, store: Any) -> list[Path]:
     return roots
 
 
+def _before_mentions(caller: Caller, task: dict, room: dict, mentions: list[str], machine: TaskMachine,
+                     inbox: Inbox) -> None:
+    """What the mentions of a task room are refused with before the message is made (S-9). First the read turns
+    that cannot be made (§9.5 의 5 가): `precondition_failed` with the codes in `failed`. Then the limit (§4.6) —
+    last of all the checks, and once for the message: one that would have been refused anyway asks the owner
+    nothing."""
+    stuck = {m: codes for m in mentions if m != task["assignee_id"]
+             and (codes := inbox.hooks.turn_failed(m, room["id"]))}
+    if stuck:
+        raise Refusal("precondition_failed", "멘션한 직원의 턴을 넣을 수 없어 글을 쓰지 않았다: "
+                      + ", ".join(f"{m} ({', '.join(codes)})" for m, codes in stuck.items())
+                      + ". 그 직원의 채팅 모델이 Claude Code 가 아니다 — 멘션을 빼고 쓰거나 owner 에게 알린다",
+                      failed=list(dict.fromkeys(code for codes in stuck.values() for code in codes)))
+    if inbox.max_exchanges is not None and task["exchange_count"] >= inbox.max_exchanges:
+        raise _at_limit(caller, task, mentions, machine, inbox)
+
+
+def _at_limit(caller: Caller, task: dict, mentions: list[str], machine: TaskMachine, inbox: Inbox) -> Refusal:
+    """§4.6 · §4.5: the count is at the limit — no message, no turn, nothing counted. A `limit` row of the task,
+    always. While the task is working the system asks the owner (T4: a `question` of reason `exchange_limit`);
+    a task that waits already, or is no longer at work, gets the row alone. The refusal ends the turn; its
+    `inbox_id` is the item this call filed, None when it filed none — api.py starts what follows a T4 (§8.3)
+    after the first only, so a run that does not end its turn cannot put its own cut off."""
+    limit = inbox.max_exchanges
+    machine.record(task["id"], SYSTEM, "limit", f"직원 간 왕복 한도({limit}회)에 닿았다",
+                   detail={"run_id": caller.run_id, "mentions": list(mentions)})
+    item = None
+    if task["status"] == "working":
+        body = (f"이 작업에서 직원들이 서로 멘션해 넣은 턴이 한도 {limit}회에 닿았다. {caller.employee['name']} 이(가) "
+                f"{', '.join(mentions)} 을(를) 멘션해 쓰려던 글은 남기지 않았다. 다시 세고 계속하게 할지, 지금까지 한 "
+                "것으로 검수를 요청하게 할지 정해 달라.")
+        try:
+            item = inbox.create("question", SYSTEM, task_id=task["id"], title="직원 간 왕복 한도에 닿았다",
+                                payload={"reason": "exchange_limit", "body": body})
+        except (TransitionError, InboxError):  # it left `working` meanwhile: another T4 came first
+            item = None
+    return Refusal("exchange_limit", f"직원 간 왕복 한도({limit}회)에 닿아 글을 쓰지 않았고 턴도 넣지 않았다. owner 가 "
+                   "결재함에서 정할 때까지 기다린다.", inbox_id=item["id"] if item else None)
+
+
+def _told(caller: Caller, message: dict) -> str:
+    """A message of the task room as the task's run is told it. It says whose it is: the engine hands a note
+    over as an instruction of the user, and a colleague's message is not one."""
+    names = ", ".join(str(a.get("name")) for a in message.get("attachments") or [] if isinstance(a, dict))
+    body = (message["body"] or "").strip() or "(본문 없음)"
+    return (f"동료 {caller.employee['name']} (id {caller.id}) 이(가) 작업방에서 나를 멘션해 쓴 글이다 — owner 의 지시가 "
+            f"아니라 동료의 글이다: {body}" + (f" (첨부: {names})" if names else ""))
+
+
+def _mention_turns(caller: Caller, task: dict, room: dict, message: dict, mentions: list[str],
+                   machine: TaskMachine, inbox: Inbox) -> list[str]:
+    """§8.4 · §8.5, after the message is stored: the turn each mention of a task room asks for, and who got one.
+    The assignee writes there and its turn is the task's run: the run is told the message (`Hooks.tell_run`)
+    while the task is working — a run that is not made yet reads the room when it starts, and a task that waits
+    for the owner takes nothing: its run is about to be cut (§8.3). Any other member gets a read turn
+    (`Hooks.room_turn`; one that cannot be made says so in the room, §9.5). Each turn that went in is one more
+    in `exchange_count`; the limit was looked at before the message, once (§4.6)."""
+    hooks, queued = inbox.hooks, []
+    for employee_id in mentions:
+        try:
+            if employee_id == task["assignee_id"]:
+                now = machine.store.get_task(task["id"])
+                went = now is not None and now["status"] == "working" and (
+                    not now["run_id"] or hooks.tell_run(now["run_id"], _told(caller, message)))
+            else:
+                went = hooks.room_turn(employee_id, room["id"])
+        except Exception:  # noqa: BLE001 - the message is stored: a turn that did not go in is not in `queued`
+            log.exception("studio: 방 %s 에서 멘션한 직원 %s 의 턴을 넣지 못했다", room["id"], employee_id)
+            went = False
+        if went:
+            queued.append(employee_id)
+    if queued:
+        machine.count_exchange(task["id"], len(queued))
+    return queued
+
+
 def room_post(caller: Caller, args: dict, machine: TaskMachine, inbox: Inbox) -> dict:
     """A message of the employee in a room it may write in, with `message.created`, in one transaction.
     Every check — the attachments' too — ends before the message is made (§6.6). A dict in `handoff` is stored
-    in `meta.handoff` as it is. No turn is started for a mention yet: `queued` is [] (S-9)."""
+    in `meta.handoff` as it is.
+
+    A mention in a task room asks for that employee's turn (S-9): `queued` is who got one, and each is one more
+    in `exchange_count` (§4.6). `_before_mentions` refuses before the message — a read turn that cannot be made,
+    the limit —, `_mention_turns` puts the turns in after it. In any other room `queued` is []."""
     store = machine.store
     room_id = _text(args.get("room")) or caller.room_id
     room = store.get_room(room_id) if room_id else None
@@ -455,6 +548,9 @@ def room_post(caller: Caller, args: dict, machine: TaskMachine, inbox: Inbox) ->
                       + ", ".join(f"{path} ({code})" for code, path in refused)
                       + f". 이 런의 작업 폴더나 프로젝트 폴더 안에 있는 {files.MAX_ATTACHMENT_MB}MB 이하 파일만 붙인다",
                       failed=list(dict.fromkeys(code for code, _ in refused)))
+    task = store.get_task(room["task_id"]) if room["kind"] == "task" and room["task_id"] and mentions else None
+    if task is not None:
+        _before_mentions(caller, task, room, mentions, machine, inbox)
     meta = {"handoff": args["handoff"]} if isinstance(args.get("handoff"), dict) else {}
     folder: Path | None = None
     try:
@@ -473,7 +569,17 @@ def room_post(caller: Caller, args: dict, machine: TaskMachine, inbox: Inbox) ->
             raise Refusal("precondition_failed", f"첨부를 복사하지 못해 글을 쓰지 않았다: {e}",
                           failed=[files.NOT_FOUND]) from e
         raise
-    return ok("방에 글을 남겼다. 하던 일을 계속한다", message_id=message["id"], queued=[])
+    if task is None:
+        return ok("방에 글을 남겼다. 하던 일을 계속한다", message_id=message["id"], queued=[])
+    queued = _mention_turns(caller, task, room, message, mentions, machine, inbox)
+    missed = [m for m in mentions if m not in queued]
+    note = "방에 글을 남겼다."
+    if queued:
+        note += f" 멘션한 직원의 턴이 들어갔다: {', '.join(queued)}."
+    if missed:
+        note += (f" 턴이 들어가지 않은 직원: {', '.join(missed)} — 턴을 만들지 못했거나(이유는 방의 시스템 글에 있다) "
+                 "담당인데 작업이 진행 중이 아니다. 글은 방에 남아 있다.")
+    return ok(f"{note} 하던 일을 계속한다", message_id=message["id"], queued=queued)
 
 
 # --- employee_list (read) ---------------------------------------------------------------------------------
@@ -651,10 +757,12 @@ TOOLS: dict[str, Callable[[Caller, dict, TaskMachine, Inbox], dict]] = {
 def call(name: str, caller: Caller, args: dict | None, *, machine: TaskMachine, inbox: Inbox) -> dict:
     """Run one tool and return the dict of §8.3. A refusal — the tool's own, the machine's (TransitionError),
     the inbox's (InboxError), a task that is gone — is `{ok: false, code, message, end_turn}` plus `from` ·
-    `to`, `failed` or `fields` for the three codes that carry them (§6.3 names); nothing else rides along.
+    `to`, `failed` or `fields` for the three codes that carry them (§6.3 names), and `inbox_id` for
+    `exchange_limit`; nothing else rides along.
 
-    `end_turn` of a failure is true in one case here: `ask_owner` · `task_request_review` on a task that
-    already waits for the owner (blocked · review). Anything that is not a refusal — a ValueError of the
+    `end_turn` of a failure is true in two cases here: `ask_owner` · `task_request_review` on a task that
+    already waits for the owner (blocked · review), and a `room_post` at the limit of exchanges
+    (`exchange_limit`, §4.6). Anything that is not a refusal — a ValueError of the
     machine, a DB error, an exception of Effects.after — is not caught: that is a server error."""
     tool = TOOLS.get(name)
     if tool is None:
@@ -669,7 +777,7 @@ def call(name: str, caller: Caller, args: dict | None, *, machine: TaskMachine, 
         body = e.as_dict()
     code, message = body["code"], body["detail"]
     added = {key: body.get(key, [] if key in ("failed", "fields") else None) for key in ADDED.get(code, ())}
-    end = name in ENDING and code == "illegal_transition" and body.get("from") in WAITING
-    if end:
+    waits = name in ENDING and code == "illegal_transition" and body.get("from") in WAITING
+    if waits:
         message = f"이 작업은 이미 내 결정을 기다리고 있다 ({body['from']}). {message}."
-    return fail(code, message, end_turn=end, **added)
+    return fail(code, message, end_turn=waits or code == "exchange_limit", **added)

@@ -300,7 +300,8 @@ def test_recovery_recomputes_the_employees_and_tells_of_a_task_without_its_item(
 def test_recovery_without_a_store_only_looks_at_the_line():
     kicked = []
     out = work.recover(None, lambda: None, kick=lambda: kicked.append(1))
-    assert kicked == [1] and out == {"requeued": [], "filed": [], "delivered": [], "employees": [], "broken": []}
+    assert kicked == [1] and out == {"requeued": [], "filed": [], "cut": [], "delivered": [], "employees": [],
+                                     "broken": []}
 
     def broken():
         raise RuntimeError("boom")

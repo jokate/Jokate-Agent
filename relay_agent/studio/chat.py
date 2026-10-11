@@ -1,4 +1,5 @@
-"""Chat turns (S-7, part 2): the owner writes in an employee's 1:1 room and the employee answers in it.
+"""Chat turns (S-7, part 2): the owner writes in an employee's 1:1 room and the employee answers in it. And the
+read turns of a task room (S-9): a member who is not the task's assignee answers what it was mentioned for.
 
 Contract: design/studio/ARCHITECTURE.md §3.7 (`room_members`: the one conversation of an employee in a room),
 §6.6 (the owner's message asks for the turn), §7.4 (`run.live` — `api.track_run`), §9.5 (the values of a chat
@@ -7,7 +8,8 @@ turn, its relay and its folder, and what happens when it cannot be made), §11.2
 A turn is one run of `relays/employee-chat.yaml` — a single stage, `chat` — on the server's engine:
 - what it is made with is read at the start of every turn: the `chat` slot under the cap, `chat_mcp` + `studio`
   and nothing else (`mcp_only` drops the project's other servers, so unreal is off unless the employee's file
-  turns it on), the employee's project as `repo`, or the employee's own folder for one who is placed nowhere;
+  turns it on), the employee's project as `repo`, or the employee's own folder for one who is placed nowhere
+  (`studio` is attached there too, whether or not that folder has a project context — §9.5);
 - the three columns of `room_members`: `session_id` is the session of history.sqlite the turns of this room are
   filed under (one per employee and room, kept when the conversation changes), `conversation_id` the Claude Code
   conversation the next turn resumes (NULL = a new one), `fed_message_id` the last message a finished turn read;
@@ -18,6 +20,14 @@ A turn is one run of `relays/employee-chat.yaml` — a single stage, `chat` — 
   closed: the next turn starts a new one from the hand-over — what the last finished turn said the conversation
   had come to (`state` · `open_issues` · `next_steps`). No model is called for it;
 - the answer is the stage's `output`, stored as the employee's message with `message.created`.
+
+A read turn (S-9; §8.5 · §9.5) is the same run in a task room: `mode` `read`, the task's project as `repo`, the
+task in its actor token. It changes no file — the relay is `workspace: none` with Read · Grep · Glob — and its
+answer stays in the room: what must reach the assignee's run the member writes with `room_post(mentions=[…])`,
+and the turn is told so. The assignee gets no turn here: its turn in that room is the task's run (studio/work.py
+keeps its row of `room_members`), and a mention of it goes into that run (`Hooks.tell_run`). `put` is what a
+mention calls: the run is made before it returns, so `room_post` knows whether a turn went in; the mention is
+counted there, not here.
 
 It takes no slot of the queue and changes no employee's status (§4.6 · §4.9), files nothing in the inbox and
 counts no exchange (§9.5). What it cannot do it says in the room, as a `system` message (`meta.event` `run_error`).
@@ -32,6 +42,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
@@ -51,7 +62,36 @@ RUN_ERROR = "run_error"   # `meta.event` of what a turn says about itself (§7.6
 
 
 class Refused(Exception):
-    """The turn is not made (§9.5 '넣지 못할 때'). Its text is what the room is told."""
+    """The turn is not made (§9.5 '넣지 못할 때'). Its text is what the room is told. `failed` holds the codes of
+    §9.5 의 5 (가) — what a mention is refused with before its message is made (`ChatTurns.failed`)."""
+
+    def __init__(self, text: str, failed: tuple[str, ...] = ()):
+        super().__init__(text)
+        self.failed = tuple(failed)
+
+
+@dataclass(frozen=True)
+class Where:
+    """What a turn in a room is (§9.5): its `mode` of §7.4 — `chat`, or `read` in a task room —, the project it
+    runs in, and the task of a task room."""
+    mode: str
+    project_id: str | None
+    task: dict | None = None
+
+    @property
+    def task_id(self) -> str | None:
+        return self.task["id"] if self.task else None
+
+
+@dataclass(frozen=True)
+class Begun:
+    """A turn whose run is made and not advanced yet: what `ChatTurns._finish` goes on with."""
+    store: StudioStore
+    room: dict
+    employee: dict
+    listed: list
+    run: Any
+    where: Where
 
 
 def _thread(work: Callable[[], None]) -> None:
@@ -104,14 +144,58 @@ class ChatTurns:
                 self._busy.pop(key, None)
             raise
 
-    def _work(self, employee_id: str, room_id: str) -> None:
+    def put(self, employee_id: str, room_id: str) -> bool:
+        """`Hooks.room_turn` (S-9): the turn a mention asks for. The run is made here, on the caller's thread, so
+        the caller knows whether a turn went in (§9.5: one that did not is not counted); the rest runs as in
+        `request`. True = a run was made, or a turn is running and will run once more. False = no run: the room
+        was told why, or there is nothing for that employee to read there — the assignee of a task room has no
+        turn of this kind at all."""
+        key = (room_id, employee_id)
+        with self._lock:
+            if key in self._busy:
+                self._busy[key] = True
+                return True
+            self._busy[key] = False
+        try:
+            begun = self._begin(employee_id, room_id)
+            if begun is None:
+                with self._lock:
+                    if not self._busy.get(key):
+                        self._busy.pop(key, None)
+                        return False
+                    self._busy[key] = False  # asked for meanwhile: that request is owed a look at the room
+            (self.spawn or _thread)(lambda: self._work(employee_id, room_id, begun))
+        except BaseException:
+            with self._lock:
+                self._busy.pop(key, None)
+            raise
+        return begun is not None
+
+    def failed(self, employee_id: str, room_id: str) -> list[str]:
+        """`Hooks.turn_failed`: §9.5 의 5 (가) for that employee's turn, asked before a mention's message is made —
+        `["provider_unguarded"]`, or [] when that does not stand in the way. What else keeps a turn from being
+        made (a file that cannot be read, an engine that refuses) is found when it is made, and said in the
+        room. The room decides nothing yet: a chat turn and a read turn are made with the same values."""
+        store = api.get_store()
+        employee = store.get_employee(employee_id)
+        if employee is None or employee["retired_at"] is not None:
+            return []
+        try:
+            self._values(store, employee)
+        except Refused as e:
+            return list(e.failed)
+        return []
+
+    def _work(self, employee_id: str, room_id: str, begun: Begun | None = None) -> None:
+        """The turns of one request, one after the other. `begun` is a first turn whose run `put` has made."""
         key = (room_id, employee_id)
         while True:
             more = False
             try:
-                more = self.turn(employee_id, room_id)
+                more = self._finish(begun) if begun is not None else self.turn(employee_id, room_id)
             except Exception:  # noqa: BLE001 - nobody waits for this thread; the room keeps the unanswered message
                 log.exception("studio: 직원 %s 의 채팅 턴(방 %s)이 실패했다", employee_id, room_id)
+            begun = None
             with self._lock:
                 if not (more or self._busy.get(key)):
                     self._busy.pop(key, None)
@@ -124,25 +208,41 @@ class ChatTurns:
         A turn that ends `done` with no answer — an empty output, and nothing the run wrote in the room itself —
         says so in the room and counts as read all the same: its messages are in the conversation (§3.7 · §9.5).
         True when it read a full page: more may be waiting, and `_work` goes on."""
+        begun = self._begin(employee_id, room_id)
+        return self._finish(begun) if begun is not None else False
+
+    def _begin(self, employee_id: str, room_id: str) -> Begun | None:
+        """The first half of a turn: read what is new and make the run of it, not advanced yet. None = no run —
+        the room or the member is gone, the employee is the assignee of that task room (`_where`), nothing is
+        new, or the run could not be made: then the room has been told why."""
         store = api.get_store()
         room, employee = store.get_room(room_id), store.get_employee(employee_id)
         member = store.get_room_member(room_id, employee_id)
         if room is None or room["archived_at"] is not None or employee is None or employee["retired_at"] is not None:
-            return False
+            return None
         if member is None or member["left_at"] is not None:
-            return False
+            return None
+        where = self._where(store, employee, room)
+        if where is None:
+            return None
         listed = store.list_messages(room_id, after_id=member["fed_message_id"] or 0, limit=FEED_MESSAGES)
         fresh = [message for message in listed if not _own(message, employee_id)]
         if not fresh:
-            return False
+            return None
         names = {row["id"]: row["name"] for row in store.list_employees(include_retired=True)}
         try:
-            run = self._make(store, employee, room, member, fresh, said(fresh, names))
+            run = self._make(store, employee, room, member, fresh, said(fresh, names), where)
         except Refused as e:
             self._say(store, room, f"{employee['name']} 의 턴을 시작하지 못했다 — {e}")
-            return False
-        api.track_run(run.id, mode="chat", employee_id=employee_id, room_id=room_id,
-                      project_id=employee["project_id"])  # §7.4 `run.live`, and the actor token of §8.2
+            return None
+        return Begun(store, room, employee, listed, run, where)
+
+    def _finish(self, begun: Begun) -> bool:
+        """The second half: advance the run and store its answer. True when it read a full page."""
+        store, room, employee, listed, run = begun.store, begun.room, begun.employee, begun.listed, begun.run
+        employee_id, room_id, where = employee["id"], room["id"], begun.where
+        api.track_run(run.id, mode=where.mode, employee_id=employee_id, room_id=room_id, task_id=where.task_id,
+                      project_id=where.project_id)  # §7.4 `run.live`, and the actor token of §8.2
         try:
             run = self.engine.advance(run.id)
         finally:
@@ -170,12 +270,38 @@ class ChatTurns:
             self._say(store, room, f"{employee['name']} 이(가) 답하지 못했다 — 턴은 끝났지만 답이 비어 있다", run.id)
         return len(listed) >= FEED_MESSAGES
 
-    def _make(self, store: StudioStore, employee: dict, room: dict, member: dict, fresh: list[dict], text: str):
+    def _where(self, store: StudioStore, employee: dict, room: dict) -> Where | None:
+        """§9.5: a task room -> a read turn in the task's project, with the task; any other room -> a chat turn
+        in the project the employee is placed in. None = no turn of this kind: the room's task is gone, or the
+        employee is its assignee — the one who writes there, whose turn in that room is the task's run (§8.5)."""
+        if room["kind"] != "task":
+            return Where("chat", employee["project_id"])
+        task = store.get_task(room["task_id"]) if room["task_id"] else None
+        if task is None or task["assignee_id"] == employee["id"]:
+            return None
+        return Where("read", task["project_id"], task)
+
+    @staticmethod
+    def _read_note(store: StudioStore, task: dict) -> str:
+        """What a read turn is told after the new messages, as a line of the server (prompts/employee-chat.md
+        reads `시스템:` so): it changes no file, and what must reach the assignee's run goes through `room_post`
+        — the answer in `output` stays in the room, where that run does not look until its next stage."""
+        assignee = store.get_employee(task["assignee_id"]) if task["assignee_id"] else None
+        who = f"{assignee['name']} (id `{assignee['id']}`)" if assignee else "없다"
+        return (f"시스템: 이 방은 작업 `{task['title']}` 의 작업방이고, 이 턴은 읽기 전용 턴이다 — 파일을 고치거나 명령을 "
+                f"돌리지 않는다. 이 작업의 담당은 {who} 이고 파일은 담당의 작업 런만 고친다. 답을 output 에 쓰면 방에 "
+                "올라간다. 담당의 작업 런에 바로 전해야 하는 말은 output 을 비우고 room_post(text, mentions=[담당의 id]) "
+                "로 쓴다 — 그 글이 담당의 런에 끼어든다.")
+
+    def _make(self, store: StudioStore, employee: dict, room: dict, member: dict, fresh: list[dict], text: str,
+              where: Where):
         """The run of this turn, not advanced yet. `Refused` when it cannot be made."""
         values = self._values(store, employee)
-        repo, folder = self._folder(store, employee)
-        session_id, conversation = self._session(store, member, employee, repo, folder)
-        goal = self._goal(store, employee, room, text, session_id)
+        repo, folder = self._folder(store, employee, where.project_id)
+        session_id, conversation = self._session(store, member, employee, repo, folder, where)
+        if where.task is not None:
+            text = f"{text}\n{self._read_note(store, where.task)}"
+        goal = self._goal(store, employee, room, text, session_id, where.project_id)
         try:
             run = self.engine.create(
                 self.relay, goal, None if repo else folder, session_id=session_id, repo=repo,
@@ -212,13 +338,14 @@ class ChatTurns:
         if not failed and not values["slot"].get("provider") and not checks.guarded(stage.primary):
             failed.append("provider_unguarded")
         if failed:
-            raise Refused(f"채팅 턴의 provider 가 Claude Code 가 아니다 ({', '.join(failed)})")
+            raise Refused(f"채팅 턴의 provider 가 Claude Code 가 아니다 ({', '.join(failed)})", tuple(failed))
         return values
 
-    def _folder(self, store: StudioStore, employee: dict) -> tuple[str | None, Path]:
-        """§9.5: (repo, its folder) of the project the employee is placed in — the project's instructions come
-        with it —, or (None, the employee's own folder) for one who is placed nowhere."""
-        project = store.get_project(employee["project_id"]) if employee["project_id"] else None
+    def _folder(self, store: StudioStore, employee: dict, project_id: str | None) -> tuple[str | None, Path]:
+        """§9.5: (repo, its folder) of the project the turn is of — the task's for a read turn, else the one the
+        employee is placed in; the project's instructions come with it —, or (None, the employee's own folder)
+        when there is none: an employee placed nowhere, a project without a repo."""
+        project = store.get_project(project_id) if project_id else None
         if project and project["repo"]:
             try:
                 spec = self.engine.repos.get(project["repo"])
@@ -232,7 +359,7 @@ class ChatTurns:
         return None, folder.resolve()
 
     def _session(self, store: StudioStore, member: dict, employee: dict, repo: str | None,
-                 folder: Path) -> tuple[str, str | None]:
+                 folder: Path, where: Where) -> tuple[str, str | None]:
         """(the session the turn is filed under, the conversation it resumes). A new session — the first turn,
         or the employee now works elsewhere — starts a new conversation: Claude Code keeps one per folder."""
         history = self.engine.history
@@ -240,17 +367,19 @@ class ChatTurns:
         if session is not None and (session.get("repo") or None) == repo and (
                 repo is not None or Path(session["workdir"]) == folder):
             return session["id"], member["conversation_id"]
-        session = history.create_session(f"{employee['name']} · 1:1", str(folder), repo)
+        title = where.task["title"] if where.task is not None else "1:1"
+        session = history.create_session(f"{employee['name']} · {title}", str(folder), repo)
         store.update_room_member(member["room_id"], member["employee_id"], session_id=session["id"],
                                  conversation_id=None)
         return session["id"], None
 
-    def _goal(self, store: StudioStore, employee: dict, room: dict, text: str, session_id: str) -> str:
+    def _goal(self, store: StudioStore, employee: dict, room: dict, text: str, session_id: str,
+              project_id: str | None) -> str:
         """The new messages first — the session's list of earlier requests shows the head of a goal —, then the
         hand-over of the conversation before, then the employee's part of the prompt (§9.1)."""
         handoff = self._handoff(session_id)
         parts = [text, f"===== {HANDOFF_TITLE} =====\n{handoff}" if handoff else "",
-                 employees.prompt_for(store, self.cfg.studio_dir, employee, room["id"], employee["project_id"])]
+                 employees.prompt_for(store, self.cfg.studio_dir, employee, room["id"], project_id)]
         return "\n\n".join(part for part in parts if part.strip())
 
     def _handoff(self, session_id: str) -> str:

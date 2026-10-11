@@ -217,8 +217,8 @@ def test_status_codes_are_the_documents_table():
 
 
 def test_routes_are_the_s3_rows_of_the_document():
-    doc = set()
-    for line in doc_section("**프로젝트 · 에디터 · 생성 작업**", "**캠페인 · 작업**").splitlines():
+    doc, section = set(), doc_section("**프로젝트 · 에디터 · 생성 작업**", "**캠페인 · 작업**")
+    for line in section.splitlines():
         cells = [c.strip() for c in line.strip().strip("|").split("|")]
         row = re.fullmatch(r"`(GET|POST|PATCH|PUT|DELETE) (/studio/[^`]+)`", cells[0]) if len(cells) == 5 else None
         if row and re.search(r"S-3|M-6", cells[4]):
@@ -226,8 +226,13 @@ def test_routes_are_the_s3_rows_of_the_document():
     scope = ("/studio/projects", "/studio/jobs", "/studio/departments", "/studio/employees", "/studio/rooms",
              "/studio/attachments")
     built = {(method, r.path) for r in api.router.routes for method in r.methods if r.path.startswith(scope)}
+    members = {(method, "/studio/rooms/{id}/members/{employee_id}") for method in ("POST", "DELETE")}  # S-9
+    assert "| `POST` · `DELETE /studio/rooms/{id}/members/{employee_id}` |" in section  # one row for the two
     assert ("POST", "/studio/projects") in doc  # M-6: bringing in a project (tests/test_studio_importer.py)
-    assert len(doc) == 15 and built == doc  # S-3's 14 and M-6's one; nothing else of M-* · H-* · S-7 and later
+    # S-3's 14 and M-6's one, and the members of a task room (S-9); nothing else of M-* · H-* · S-7 and later
+    muted = {("PATCH", "/studio/rooms/{id}")}  # N-2: a room is muted (tests/test_studio_push.py)
+    assert "| `PATCH /studio/rooms/{id}` | `{muted}` |" in section
+    assert len(doc) == 15 and not doc & (members | muted) and built == doc | members | muted
 
 
 def test_studio_error_carries_the_fields_of_its_code():
@@ -435,6 +440,81 @@ def test_read_mark_only_moves_forward(world):
     assert len(world.events("room.updated")) == 2 and unread() == 0
     assert world.owner.post(url, json={"message_id": -1}).status_code == 422
     refused(world.owner.post("/studio/rooms/room_none/read", json={"message_id": 1}), 404, "not_found")
+
+
+# --- members of a task room (S-9; §6.4) -------------------------------------------------------------------
+def task_room(world):
+    """The room of the world's task with its assignee seated, as T3 leaves it."""
+    room = world.store.create_room("task", title=world.task["title"], task_id=world.task["id"])
+    world.store.create_room_member(room["id"], world.emp["id"])
+    return room["id"]
+
+
+def test_a_task_rooms_member_is_seated_taken_out_and_seated_again(world):
+    room, me = task_room(world), world.emp["id"]
+    mate = world.store.create_employee("지수", "program", project_id=world.pid)["id"]
+    never = world.store.create_employee("현우", "program", project_id=world.pid)["id"]
+    url = f"/studio/rooms/{room}/members/{mate}"
+
+    def ids(r):
+        assert r.status_code == 200 and set(r.json()) == {"members"}, r.text
+        return {m["employee_id"] for m in r.json()["members"]}
+
+    def detail():
+        return {m["employee_id"] for m in world.owner.get(f"/studio/rooms/{room}").json()["members"]}
+
+    def told():
+        return [{m["employee_id"] for m in e["data"]["members"]} for e in world.events("room.updated")]
+
+    assert ids(world.owner.post(url)) == {me, mate} == detail()
+    [event] = world.events("room.updated")
+    assert (event["room_id"], event["task_id"], event["data"]["room"]["id"]) == (room, world.task["id"], room)
+    assert told() == [{me, mate}]
+    assert ids(world.owner.post(url)) == {me, mate} and len(told()) == 1  # seated already: nothing is said
+
+    assert ids(world.owner.delete(url)) == {me} == detail()
+    assert world.store.get_room_member(room, mate)["left_at"] is not None  # the row stays, and what it kept
+    assert told() == [{me, mate}, {me}]
+    assert ids(world.owner.delete(url)) == {me} and len(told()) == 2  # gone already
+    assert ids(world.owner.delete(f"/studio/rooms/{room}/members/{never}")) == {me}  # one who was never there
+    assert world.store.get_room_member(room, never) is None and len(told()) == 2
+
+    assert ids(world.owner.post(url)) == {me, mate} == detail()  # back, in the row it had
+    assert world.store.get_room_member(room, mate)["left_at"] is None
+    assert len(world.store.list_room_members(room_id=room, include_left=True)) == 2
+    assert told() == [{me, mate}, {me}, {me, mate}]
+
+
+def test_room_members_are_refused_outside_a_task_room_or_its_project_and_the_assignee_stays(world):
+    room, me = task_room(world), world.emp["id"]
+    mate = world.store.create_employee("지수", "program", project_id=world.pid)["id"]
+    unplaced = world.store.create_employee("대기", "program")["id"]
+    other = world.store.create_project("다른 게임", "D:/other", "other", engine_version="5.7", mcp_port=8102)
+    away = world.store.create_employee("파견", "program", project_id=other["id"])["id"]
+
+    def rows():
+        return {m["employee_id"]: m["left_at"] for m in world.store.list_room_members(room_id=room, include_left=True)}
+
+    for call in (world.owner.post, world.owner.delete):
+        refused(call(f"/studio/rooms/{world.dm['id']}/members/{mate}"), 409, "precondition_failed")  # a 1:1 room
+        refused(call("/studio/rooms/room_system/members/" + mate), 409, "precondition_failed")
+        refused(call(f"/studio/rooms/room_none/members/{mate}"), 404, "not_found")
+        refused(call(f"/studio/rooms/{room}/members/emp_none"), 404, "not_found")
+    for stranger in (unplaced, away):  # placed nowhere, placed in another project
+        assert refused(world.owner.post(f"/studio/rooms/{room}/members/{stranger}"), 409,
+                       "precondition_failed")["failed"] == []
+    refused(world.owner.delete(f"/studio/rooms/{room}/members/{me}"), 409, "precondition_failed")  # the assignee
+    assert rows() == {me: None} and world.events("room.updated") == []  # a refusal changes and says nothing
+    assert [m["employee_id"] for m in world.store.list_room_members(room_id=world.dm["id"])] == [me]
+
+    # where the employee is placed is asked of POST alone: one who was moved away can still be taken out
+    assert world.owner.post(f"/studio/rooms/{room}/members/{mate}").status_code == 200
+    world.store.update_employee(mate, project_id=other["id"])
+    r = world.owner.delete(f"/studio/rooms/{room}/members/{mate}")
+    assert r.status_code == 200 and [m["employee_id"] for m in r.json()["members"]] == [me]
+    assert rows()[mate] is not None
+    refused(world.owner.post(f"/studio/rooms/{room}/members/{mate}"), 409, "precondition_failed")  # not back in
+    assert rows()[mate] is not None and len(world.events("room.updated")) == 2
 
 
 # --- messages ---------------------------------------------------------------------------------------------

@@ -537,6 +537,31 @@ class CampaignRunner:
         self.save(c)
         return True
 
+    # --- studio campaigns (S-14) -------------------------------------------------------
+    # design/studio/ARCHITECTURE.md §4.10. A studio campaign has no planner, no folder and no file here: its
+    # tasks are the studio's, started by its queue. `studio` is the studio's look at its running campaigns
+    # (server.py puts `studio.campaigns.Autopilot.look` here; None = none goes on by itself). Down here, as a
+    # class attribute and with the import inside: the lines above are cited by number.
+    studio: Callable[..., dict] | None = None  # (campaign id or None), and `again=True` when that is asked for
+
+    def advance_studio(self, campaign_id: str | None = None, *, again: bool = False) -> dict:
+        """Let the studio's running campaigns go on — that one, or all of them: what `studio` returns
+        (`{started, unassigned, finished}`), {} when there is none. Never raises: it is called after a commit
+        and at the server's start, so what goes wrong is logged and the next occasion looks again.
+        `again`: that campaign has just been started or resumed — passed on to `studio` as a keyword, and only
+        then (its notices are said anew, §5.9)."""
+        if self.studio is None:
+            return {}
+        try:
+            if again:
+                return self.studio(campaign_id, again=True) or {}
+            return self.studio(campaign_id) or {}
+        except Exception:  # noqa: BLE001
+            import logging
+
+            logging.getLogger(__name__).exception("studio 캠페인 %s 을 진행시키지 못했다", campaign_id or "(전체)")
+            return {}
+
 
 def c_title(c: Campaign, task_id: str) -> str:
     return next((t.title for t in c.tasks if t.id == task_id), task_id)

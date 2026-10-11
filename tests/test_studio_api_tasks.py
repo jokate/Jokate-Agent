@@ -162,7 +162,7 @@ def cancel(world, task_id, **body):
 
 # --- the contract (§6.4) ----------------------------------------------------------------------------------
 def test_routes_are_the_s3_rows_of_the_campaign_and_task_table():
-    doc, later = set(), set()
+    doc, later, driven = set(), set(), set()
     for line in doc_section("**캠페인 · 작업**", "**결재 · 집계**").splitlines():
         cells = [c.strip() for c in line.strip().strip("|").split("|")]
         row = re.fullmatch(r"`(GET|POST|PATCH|PUT|DELETE) (/studio/[^`]+)`", cells[0]) if len(cells) == 5 else None
@@ -170,27 +170,37 @@ def test_routes_are_the_s3_rows_of_the_campaign_and_task_table():
             doc.add((row.group(1), row.group(2)))
         elif row and "S-8" in cells[4]:
             later.add((row.group(1), row.group(2)))
+        elif row and "S-14" in cells[4]:
+            driven.add((row.group(1), row.group(2)))
     started = {("POST", "/studio/tasks/{id}/start"), ("POST", "/studio/tasks/{id}/stop")}  # S-8 (studio/queue.py)
     built = {(method, r.path) for r in api.router.routes for method in r.methods
              if r.path.startswith(("/studio/campaigns", "/studio/tasks"))}
-    assert len(doc) == 9 and started <= later and built == doc | started  # no campaign creation or action (S-14)
+    assert driven == {("POST", "/studio/campaigns"), ("PATCH", "/studio/campaigns/{id}"),
+                      ("POST", "/studio/campaigns/{id}/{action}")}  # S-14: a campaign is made, changed and driven
+    assert len(doc) == 9 and started <= later and built == doc | started | driven
 
 
 def test_enumerations_are_the_machines():
     assert get_args(api.TaskStatus) == tasks.STATES
     assert get_args(api.TaskType) == tasks.TASK_TYPES
     assert get_args(api.CampaignStatus) == tasks.CAMPAIGN_STATES
+    assert get_args(api.CampaignMode) == tasks.CAMPAIGN_MODES
+    assert get_args(api.CampaignAction) == tuple(api.CAMPAIGN_ACTIONS)
+    for frm, to in api.CAMPAIGN_ACTIONS.values():  # every action is a cell of the table of §4.10, as the owner
+        cells = [pair for pair in tasks.CAMPAIGN_ALLOWED if pair[1] == to and frm in (None, pair[0])]
+        assert cells and all(tasks.CAMPAIGN_ALLOWED[pair] == "owner" for pair in cells)
 
 
 def test_campaign_and_task_paths_need_the_owner_token(world):
-    t = world.task()["id"]
+    t, c = world.task()["id"], world.campaign()["id"]
     calls = [("GET", "/studio/campaigns"), ("GET", "/studio/tasks"), ("POST", "/studio/tasks"),
              ("GET", f"/studio/tasks/{t}"), ("PATCH", f"/studio/tasks/{t}"), ("POST", f"/studio/tasks/{t}/assign"),
              ("PUT", f"/studio/tasks/{t}/deps"), ("POST", f"/studio/tasks/{t}/cancel"),
-             ("GET", f"/studio/tasks/{t}/events")]
+             ("GET", f"/studio/tasks/{t}/events"), ("POST", "/studio/campaigns"),
+             ("PATCH", f"/studio/campaigns/{c}"), ("POST", f"/studio/campaigns/{c}/start")]
     for method, path in calls:
         refused(world.remote.request(method, path), 401, "unauthorized")
-    assert world.store.get_task(t)["status"] == "backlog"
+    assert world.store.get_task(t)["status"] == "backlog" and world.store.get_campaign(c)["status"] == "draft"
 
 
 # --- GET /campaigns ---------------------------------------------------------------------------------------
@@ -214,6 +224,114 @@ def test_campaigns_list_filters_and_adds_progress(world):
     assert only(f"project_id={world.pid}") == [a["id"]] and only("status=running") == [b["id"]]
     assert only(f"project_id={world.pid}&status=running") == []
     invalid(world.owner.get("/studio/campaigns?status=nope"))
+
+
+# --- POST · PATCH /campaigns and the actions (S-14, §4.10) --------------------------------------------------
+def new_campaign(world, **over):
+    body = {"project_id": world.pid, "title": "1막", "goal": "1막을 끝낸다", **over}
+    return world.owner.post("/studio/campaigns", json=body)
+
+
+def patch_campaign(world, campaign_id, **body):
+    return world.owner.patch(f"/studio/campaigns/{campaign_id}", json=body)
+
+
+def act(world, campaign_id, action):
+    return world.owner.post(f"/studio/campaigns/{campaign_id}/{action}")
+
+
+def seen(world):
+    """What a refused or empty campaign request must leave as it is."""
+    return len(world.store.list_campaigns()), len(world.store.list_stream_events()), len(world.fx.calls)
+
+
+def test_post_campaign_opens_a_draft_and_names_every_empty_field(world):
+    before = len(world.store.list_stream_events())
+    r = new_campaign(world)
+    assert r.status_code == 201, r.text
+    row = r.json()
+    assert row == world.store.get_campaign(row["id"])
+    assert (row["project_id"], row["title"], row["goal"]) == (world.pid, "1막", "1막을 끝낸다")
+    assert (row["mode"], row["status"], row["started_at"], row["finished_at"]) == ("milestone", "draft", None, None)
+    [event] = world.store.list_stream_events()[before:]
+    assert (event["type"], event["data"]) == ("campaign.updated", {"campaign": row})  # no `campaign.created` (§7.4)
+    assert world.fx.calls[-1] == ("after", "campaign")
+    assert new_campaign(world, mode="nonstop").json()["mode"] == "nonstop"
+
+    marks = seen(world)
+    empty = world.owner.post("/studio/campaigns", json={"title": " ", "mode": "each"})
+    assert refused(empty, 422, "missing_fields")["fields"] == ["project_id", "title", "goal"]
+    assert refused(new_campaign(world, goal=""), 422, "missing_fields")["fields"] == ["goal"]
+    assert refused(new_campaign(world, project_id="prj_none"), 409, "precondition_failed")["failed"] == []
+    for over in ({"mode": "fast"}, {"mode": None}, {"status": "running"}):
+        invalid(new_campaign(world, **over))
+    assert seen(world) == marks
+
+
+def test_patch_campaign_changes_what_is_sent_until_the_campaign_has_ended(world):
+    c = world.campaign()["id"]  # a draft in `each`
+    before = len(world.store.list_stream_events())
+    r = patch_campaign(world, c, title="2막", mode="nonstop")
+    assert r.status_code == 200, r.text
+    row = r.json()
+    assert (row["title"], row["goal"], row["mode"], row["status"]) == ("2막", "1막을 끝낸다", "nonstop", "draft")
+    assert row == world.store.get_campaign(c)
+    [event] = world.store.list_stream_events()[before:]
+    assert (event["type"], event["data"]) == ("campaign.updated", {"campaign": row})
+    assert world.fx.calls[-1] == ("after", "campaign")  # the look: the mode holds from the next start
+
+    marks = seen(world)
+    assert patch_campaign(world, c, title="2막", mode="nonstop").json() == row  # nothing differs: nothing written
+    assert patch_campaign(world, c).json() == row
+    empty = patch_campaign(world, c, title=None, goal=" ", mode=None)
+    assert refused(empty, 422, "missing_fields")["fields"] == ["title", "goal", "mode"]
+    for body in ({"mode": "fast"}, {"status": "running"}, {"project_id": world.elsewhere}):
+        invalid(patch_campaign(world, c, **body))
+    refused(patch_campaign(world, "cmp_none", title="3막"), 404, "not_found")
+    assert seen(world) == marks and world.store.get_campaign(c) == row
+
+    for status in ("running", "paused"):  # on the way
+        going = world.campaign(status=status)["id"]
+        assert patch_campaign(world, going, mode="milestone").json()["mode"] == "milestone"
+    for status in ("done", "cancelled"):
+        ended = world.campaign(status=status)
+        body = refused(patch_campaign(world, ended["id"], title="3막"), 409, "precondition_failed")
+        assert body["failed"] == [] and world.store.get_campaign(ended["id"]) == ended
+
+
+def test_campaign_actions_take_a_campaign_through_the_table_of_4_10(world):
+    c = world.campaign()["id"]
+    steps = (("start", "running"), ("pause", "paused"), ("resume", "running"), ("pause", "paused"),
+             ("cancel", "cancelled"))
+    for action, status in steps:
+        before = len(world.store.list_stream_events())
+        r = act(world, c, action)
+        assert r.status_code == 200 and r.json()["status"] == status, r.text
+        heard = tasks.CAMPAIGN_STARTED if status == "running" else "campaign"  # a start · resume: the look `again`
+        assert r.json() == world.store.get_campaign(c) and world.fx.calls[-1] == ("after", heard)
+        [event] = world.store.list_stream_events()[before:]
+        assert (event["type"], event["data"]) == ("campaign.updated", {"campaign": r.json()})
+    assert r.json()["started_at"] and r.json()["finished_at"]
+    for status in ("draft", "running"):  # cancel is taken wherever the table has it
+        assert act(world, world.campaign(status=status)["id"], "cancel").json()["status"] == "cancelled"
+    marks = seen(world)
+    refused(act(world, "cmp_none", "start"), 404, "not_found")
+    invalid(act(world, c, "finish"))  # `done` is the system's, and no action
+    assert seen(world) == marks
+
+
+@pytest.mark.parametrize("status, action, to", [
+    ("running", "start", "running"), ("paused", "start", "running"), ("done", "start", "running"),
+    ("cancelled", "start", "running"), ("draft", "pause", "paused"), ("paused", "pause", "paused"),
+    ("done", "pause", "paused"), ("draft", "resume", "running"), ("running", "resume", "running"),
+    ("cancelled", "resume", "running"), ("done", "cancel", "cancelled"), ("cancelled", "cancel", "cancelled"),
+])
+def test_a_campaign_action_out_of_its_status_is_409_illegal_transition(world, status, action, to):
+    row = world.campaign(status=status)
+    marks = seen(world)
+    body = refused(act(world, row["id"], action), 409, "illegal_transition")
+    assert (body["from"], body["to"]) == (status, to)
+    assert seen(world) == marks and world.store.get_campaign(row["id"]) == row
 
 
 # --- GET /tasks -------------------------------------------------------------------------------------------

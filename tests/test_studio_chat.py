@@ -8,6 +8,8 @@ from pathlib import Path
 import pytest
 
 from relay_agent.pipeline import RelayEngine
+from relay_agent.projctx import discover
+from relay_agent.repos import RepoRegistry
 from relay_agent.runners import MockRunner
 from relay_agent.studio import api, chat, employees, runs, sat, ws
 from test_mcp_attach import setup as engine_setup
@@ -265,6 +267,52 @@ def test_an_employee_placed_nowhere_works_in_its_own_folder_under_its_cap(desk):
     assert len(desk.calls) == 1 and len(desk.runs(dm, hr)) == 1
 
 
+def studio_on(desk):
+    """The studio server in the engine's registry and its env callback, as server.py registers them (§8.2)."""
+    desk.engine.mcp_registry["studio"] = {"command": "py", "args": ["studio.py"]}
+    desk.engine.mcp_env["studio"] = api.mcp_env
+
+
+def test_a_turn_in_a_folder_that_is_no_project_still_has_studio(desk, monkeypatch):
+    home = desk.lab.tmp / "home"  # a PC whose user has no MCP server: nothing makes that folder a project
+    home.mkdir()
+    monkeypatch.setattr("relay_agent.projctx.Path.home", staticmethod(lambda: home))
+    studio_on(desk)
+    hr, dm = desk.lab.world.hr()
+    folder = desk.hire(hr, **{"employee.yaml": YAML.replace("program", "hr")})
+    assert discover(folder) is None  # no CLAUDE.md, `.claude/` or `.mcp.json` in it or above it (§9.5)
+    desk.store.create_message(dm, "system", body="채용 초안을 고쳐 달라")
+    desk.answers("고쳐서 다시 올리겠습니다")
+    api._hooks.chat_turn(hr, dm)
+
+    [run] = desk.runs(dm, hr)
+    [call] = desk.calls
+    assert run.repo is None and Path(run.workdir) == folder.resolve() and run.status == "done"
+    assert desk.engine.project_context(run) is None and "project_context" not in desk.lab.events(run)
+    assert call.mcp_servers == run.mcp == ["studio"] and "ToolSearch" in call.tools  # what the run keeps is attached
+    claims = sat.verify(call.mcp_overrides["studio"]["env"]["STUDIO_ACTOR_TOKEN"])
+    assert (claims["run"], claims["emp"], claims["room"], claims["mode"]) == (run.id, hr, dm, "chat")
+
+
+def test_a_repo_without_project_context_gives_studio_to_its_employees_turn_alone(desk):
+    desk.engine.repos = RepoRegistry({"game": {"path": str(desk.lab.tmp / "project"), "project_context": False}})
+    studio_on(desk)
+    desk.answers("안녕하세요")
+    desk.say("안녕?")
+    [run] = desk.runs()
+    [call] = desk.calls
+    assert run.repo == "game" and run.status == "done"
+    assert desk.engine.project_context(run) is None and "project_context" not in desk.lab.events(run)
+    assert call.mcp_servers == run.mcp == ["studio"] and "ToolSearch" in call.tools
+    claims = sat.verify(call.mcp_overrides["studio"]["env"]["STUDIO_ACTOR_TOKEN"])
+    assert (claims["run"], claims["emp"], claims["room"], claims["mode"]) == (run.id, desk.emp, desk.dm, "chat")
+
+    desk.lab.runner = MockRunner()  # a run of that repo that is no employee's (dashboard · CLI): no MCP, as before
+    other = desk.lab.run(repo="game")
+    assert desk.calls and desk.engine.project_context(other) is None
+    assert all(c.mcp_servers == [] and "studio" not in c.mcp_overrides for c in desk.calls)
+
+
 def test_what_the_owner_attached_goes_with_the_turn(desk):
     with desk.store.transaction() as tx:
         message = desk.store.create_message(desk.dm, "owner", tx=tx, body="")
@@ -324,12 +372,24 @@ def test_a_turn_that_cannot_be_made_says_why_in_the_room(desk, monkeypatch):
     assert call.prompt.index("owner: 안녕?\nowner: 다시\nowner: 또\nowner: 이제 되나?") < call.prompt.index("PERSONA.md")
 
 
-def test_a_run_that_does_not_end_done_leaves_the_message_for_the_next_turn(desk):
+def test_a_run_that_does_not_end_done_leaves_the_message_for_the_next_turn(desk, monkeypatch):
     desk.lab.runner = MockRunner({"chat": [{"summary": "못 했다", "state": "", "open_issues": [], "next_steps": [],
                                             "output": "", "verdict": "fail"}, *script("이제 답합니다")["chat"]]})
+    heard, before = [], desk.engine.notifier  # (kind, was that run a tracked turn when the engine told of it)
+
+    def hear(run_id, kind, title, detail):
+        heard.append((kind, api.tracked_run(run_id) is not None))
+        if before is not None:
+            before(run_id, kind, title, detail)
+
+    monkeypatch.setattr(desk.engine, "notifier", hear)
     first = desk.say("첫 글")
     [failed] = desk.runs()
     assert failed.status == "failed" and desk.last()[:2] == ("system", "run_error")
+    # the engine tells of the failure while the turn is still tracked: what push.py goes by to leave that alert
+    # out and have the notice of the room pushed alone (§5.9)
+    assert ("run_failed", True) in heard and ("run_failed", False) not in heard
+    assert api.tracked_run(failed.id) is None
     assert desk.store.list_messages(desk.dm)[-1]["meta"] == {"event": "run_error", "run_id": failed.id}
     assert (desk.member()["fed_message_id"], desk.member()["conversation_id"]) == (0, None)
     assert first["id"] > 0 and api.run_head(desk.store, failed.id) is None

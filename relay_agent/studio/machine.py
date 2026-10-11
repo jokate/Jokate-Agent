@@ -38,7 +38,6 @@ EDITOR_QUERY = ("[Console]::OutputEncoding = [Text.Encoding]::UTF8; "
                 "Select-Object ProcessId, Name, CommandLine | ConvertTo-Json -Compress")
 QUERY_TIMEOUT = 8.0  # seconds PowerShell has to answer
 PORT_TIMEOUT = 0.3   # seconds a connection to an editor's MCP port may take
-MAX_EXCHANGES = 20   # §3.16: reported until S-9 gives the config its field (`studio_max_exchanges`, provisional)
 
 
 def is_windows() -> bool:
@@ -256,6 +255,5 @@ def report(cfg: Any, projects: list[dict], src: Sources) -> dict:
         "disk": disk(cfg.runs_dir, src.usage),
         "providers": _listed("AI 사용량", src.providers),
         "editors": _listed("실행 중인 에디터", lambda: editors(src.processes(), projects, src.healthy)),
-        "limits": {"max_concurrent_runs": cfg.studio_max_runs,
-                   "max_exchanges": getattr(cfg, "studio_max_exchanges", MAX_EXCHANGES)},
+        "limits": {"max_concurrent_runs": cfg.studio_max_runs, "max_exchanges": cfg.studio_max_exchanges},
     }

@@ -170,6 +170,9 @@ def ask_owner(kind: str, title: str, body: str = "", options: list[dict] | None 
 def room_post(text: str, mentions: list[str] | None = None, room: str = "", attachments: list[dict] | None = None,
               handoff: dict | None = None) -> dict:
     """방에 글을 쓴다. room 을 비우면 지금 방이다. mentions 는 그 방의 구성원인 직원 id (자기 자신은 안 된다).
+    작업방에서 멘션하면 그 직원의 턴이 들어간다 — 담당이면 그 작업 런에 글이 끼어들고, 다른 구성원이면 읽기 전용
+    턴이다. queued[] 가 턴이 들어간 직원이다. 직원끼리의 멘션은 작업마다 한도가 있어, 닿으면 글을 쓰지 않고
+    exchange_limit 이 온다 (owner 의 결정을 기다린다).
     attachments 는 각 {path, name=""} — 런의 작업 폴더나 프로젝트 폴더 안의 25MB 이하 파일이고, 경로만 넘기면
     서버가 검사해 복사한다. 돌려주는 것: {message_id, queued[]}. end_turn 이 true 로 오면 턴을 끝낸다."""
     return _call("room_post", text=text, mentions=mentions or [], room=room, attachments=attachments or [],

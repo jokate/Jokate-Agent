@@ -485,7 +485,7 @@ def test_a_raising_after_hook_leaves_the_change_committed(world):
     assert refused("illegal_transition", world.m.transition, task["id"], "working", SYSTEM).rule == "F0"
 
     campaign = world.store.create_campaign(world.project["id"], "1막", "첫 판")
-    world.fx.fail[("after", "campaign")] = boom
+    world.fx.fail[("after", tasks.CAMPAIGN_STARTED)] = boom  # what `running` says in place of 'campaign'
     with pytest.raises(RuntimeError) as err:
         world.m.transition_campaign(campaign["id"], "running", OWNER)
     assert err.value is boom
@@ -833,7 +833,7 @@ def test_campaign_cells(world, frm, to):
     assert (out["started_at"] is not None) == (to == "running" or frm != "draft")
     [row] = world.stream(mark)
     assert row["type"] == "campaign.updated" and row["data"] == {"campaign": out}
-    assert world.fx.calls[-1] == ("after", "campaign")
+    assert world.fx.calls[-1] == ("after", tasks.CAMPAIGN_STARTED if to == "running" else "campaign")
 
 
 def test_campaign_is_done_only_when_every_task_is_closed(world):

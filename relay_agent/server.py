@@ -32,6 +32,7 @@ studio_api.install(app, cfg, liveness=lambda run_id: engine.liveness(run_id),  #
                    workdir=lambda run_id: studio_runs.workdir(engine, run_id),
                    repos=lambda: engine.repos)  # a function: _reload_repos replaces the object
 engine.mcp_env["studio"] = studio_api.mcp_env  # §8.2: the actor token of a studio run's stage; None = not attached
+engine.guard_stage = studio_api.guard_stage  # §11.4: studio-full and the guard hook on a studio run; None = as it was
 DASHBOARD = Path(__file__).with_name("dashboard.html")
 
 
@@ -53,8 +54,8 @@ RUNNING_CODE = code_version()
 def recover() -> None:
     engine.recover_interrupted()
     campaigns.recover()  # campaigns running when the server stopped go on (their interrupted run resumes)
-    engine.cleanup_workspaces(cfg.workspace_retention_days)
     studio_api.open_store()  # a studio DB that cannot start answers 503 on /studio/*; the rest keeps running
+    engine.cleanup_workspaces(cfg.workspace_retention_days)  # after the store: it names the runs under review
 
     def hourly():  # expired workspaces are removed while the server keeps running, not only at start
         import time
@@ -927,7 +928,7 @@ def _released(run: RunState) -> RunState:
 # §9.5) go the same way: the owner's message in a 1:1 room and a decision that asks for one start a turn here.
 chat_turns = studio_chat.ChatTurns(engine, cfg)
 studio_api.use_hooks(studio_runs.attach(engine, studio_api.run_inbox, advance=_advance_bg,
-                                        chat=chat_turns.request))
+                                        chat=chat_turns.request, turns=chat_turns))
 
 
 # The stops nobody heard — a run the CLI advanced, or one that stopped while the studio store was not open — are
@@ -958,19 +959,43 @@ studio_api.use_effects(task_runs, models=task_runs.catalog)
 from .studio import queue as studio_queue  # noqa: E402
 
 task_queue = studio_queue.TaskQueue(engine, task_runs, studio_api.run_inbox, limit=lambda: cfg.studio_max_runs)
-task_runs.kick = task_queue.kick
+task_runs.kick, task_runs.holds = task_queue.kick, task_queue.holds  # holds: T7 · T9 · T11 wait for the slot (S-12)
 studio_api.use_queue(task_queue)
+
+
+# What follows the answer of a T4 (기다림 = 런 종료; design/studio/ARCHITECTURE.md §4.3 T4 · §8.3 · §5.7): a task run
+# that is still at work `cfg.studio_cut_after` seconds after `ask_owner` — and, with S-10, after the guard's T4 — is
+# cut; a T4 from another turn cuts it at once. The seconds are read each time a wait begins. A server that stops
+# inside the wait loses the timer: the recovery below cuts that run instead (§4.8 의 1). The import is down here for
+# the same reason.
+from .studio import cutoff as studio_cutoff  # noqa: E402
+
+task_cutoff = studio_cutoff.Cutoff(engine, studio_api.run_inbox, wait=lambda: cfg.studio_cut_after)
+studio_api.use_cutoff(task_cutoff)
+
+
+# The studio's campaigns go on by themselves (S-14, part 1; design/studio/ARCHITECTURE.md §4.10 · §4.6): the runner
+# of the campaigns above gets the studio's look as its extension (`campaigns.studio`), and `task_runs` calls it
+# after a change that may have made a task of a running campaign ready or ended the campaign. The tasks it puts
+# in the line are started by the queue: `task_runs.kick` stays the queue's own. The import is down here for the
+# same reason.
+from .studio import campaigns as studio_campaigns  # noqa: E402
+
+campaigns.studio = studio_campaigns.Autopilot(studio_api.run_inbox).look
+task_runs.campaign = campaigns.advance_studio
 
 
 # The studio recovery at the server's start (S-8, part 3; design/studio/ARCHITECTURE.md §4.8), after the engine's
 # own (recover() above) and after the stops nobody heard were filed: the runs a stop cut off stand in the line
 # again, the decision texts still owed go into their runs, the line is looked at once — §4.6 '서버가 시작했을 때':
 # the tasks that stood in it when the server stopped; the book of slots starts empty —, the employees' statuses
-# are worked out anew and a task without its inbox item is told of in the system room. It never raises. A startup
-# function of its own, registered last.
+# are worked out anew and a task without its inbox item is told of in the system room. Then the studio's running
+# campaigns are looked at once (S-14, §4.10): what became ready while the server was down. It never raises. A startup
+# function of its own, registered after those above (the reminders of the push follow it, at the bottom).
 @app.on_event("startup")
 def start_task_queue() -> None:
     studio_work.recover(engine, studio_api.run_inbox, kick=task_queue.kick)
+    campaigns.advance_studio()
 
 
 # This computer (M-1; design/studio/ARCHITECTURE.md §6.4 · §7.1): `GET /studio/machine` and the stream's `hello`
@@ -984,3 +1009,36 @@ def _doctor_checks() -> list[dict]:
 
 
 studio_api.use_machine(doctor=_doctor_checks, providers=list_providers, version=lambda: RUNNING_CODE)
+
+
+# The final review (S-12, part 1; design/studio/ARCHITECTURE.md §5.4 · §6.4 · §4.3 T9): the engine that a task's
+# `run`, the package of a final review and the aliases of a run's patch and tokens are read from — a function,
+# because the object is a module variable —, and the runs `cleanup_workspaces` keeps past the retention period:
+# those of the tasks under review (studio/review.py). Down here for the reasons given above.
+studio_api.use_engine(lambda: engine, tokens=lambda run_id: get_tokens(run_id))
+engine.held_runs = studio_api.held_runs
+
+
+# Push (N-1; design/studio/ARCHITECTURE.md §5.9 · §11.3): the FCM sender is put beside whatever `engine.notifier` is
+# by now — the toast and the studio's sink keep hearing — and hears every commit that made an inbox item. The key
+# file is `cfg.studio_fcm_key`, read at the first push: with none (the default), or one that cannot be used, nothing
+# is sent and the server runs as before. Down here for the reasons given above.
+#
+# The policy (N-2; §5.9): the grade of each push, the quiet hours of a device and the muted rooms are the sender's
+# own (studio/push.py `classify` · `quiet_now`). An item that still waits `cfg.studio_remind_after` seconds after it
+# was made or last told of is pushed again — the sender looks at the server's start and every minute from then on.
+# The time is in the DB (`inbox.reminded_at`), so a server that starts again goes on from it.
+from .studio import push as studio_push  # noqa: E402
+
+pusher = studio_push.attach(engine, studio_api.run_inbox, key_path=lambda: cfg.studio_fcm_key,
+                            remind_after=lambda: cfg.studio_remind_after)
+
+
+@app.on_event("startup")
+def start_push_reminders() -> None:
+    pusher.watch()
+
+
+@app.on_event("shutdown")
+def stop_push_reminders() -> None:
+    pusher.unwatch()

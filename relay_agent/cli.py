@@ -548,7 +548,13 @@ def main() -> None:
         print("\n".join(cache_command(build_engine(cfg), args.action, args.target)))
         return
     if args.cmd == "cleanup":
-        r = build_engine(cfg).cleanup_workspaces(cfg.workspace_retention_days if args.days is None else args.days)
+        from .studio import review as studio_review
+
+        cleaner = build_engine(cfg)
+        # the runs of studio tasks under review keep their workspace (design/studio/ARCHITECTURE.md §4.3 T9): read
+        # from the studio DB without opening the store — this process does not own it
+        cleaner.held_runs = lambda: studio_review.held_runs_ro(cfg.studio_db)
+        r = cleaner.cleanup_workspaces(cfg.workspace_retention_days if args.days is None else args.days)
         print(f"정리 {len(r['cleaned'])}개 실행 · {r['freed_mb']} MB 확보")
         return
     engine = build_engine(cfg)

@@ -447,17 +447,55 @@ def test_a_connection_whose_device_cannot_be_read_again_is_told_to_try_later(wor
         assert hello(sock) == "hello"  # nothing was held against the device
 
 
-# --- the document · the contract · the dashboard ------------------------------------------------------------
+# --- what a device says of itself (N-2 · A-11; §6.4 `PATCH /studio/devices/{id}`) ----------------------------
+def test_a_device_changes_its_name_its_push_token_and_its_quiet_hours(world):
+    phone, bearer = world.phone(fcm_token="fcm-1")
+    other, _ = world.phone(name="태블릿", fcm_token="fcm-2")
+    night = {"quiet_hours": {"start": "22:00", "end": "07:00", "utc_offset_min": 540}}
+    path = f"/studio/devices/{phone['id']}"
+
+    r = world.remote.patch("/studio/devices/me", headers=bearer, json={"settings": night, "fcm_token": "fcm-2"})
+    assert r.status_code == 200, r.text
+    row = r.json()
+    assert (row["id"], row["settings"], row["fcm_token"]) == (phone["id"], night, "fcm-2")
+    assert row["name"] == "내 폰" and "token_hash" not in row            # what was not sent stays
+    assert world.store.get_device(other["id"])["fcm_token"] is None     # a push token belongs to one device
+    assert world.store.get_device(other["id"])["revoked_at"] is None    # moved, not revoked
+
+    row = world.owner.patch(path, json={"name": " 새 이름 ", "fcm_token": ""}).json()  # the shared token, by id
+    assert (row["name"], row["fcm_token"], row["settings"]) == ("새 이름", None, night)
+    late = {"quiet_hours": {"start": "23:00", "end": "06:30"}}          # no offset: this PC's clock is read
+    assert world.owner.patch(path, json={"settings": late}).json()["settings"] == late  # replaced as a whole
+    assert world.owner.patch(path, json={"settings": {}}).json()["settings"] == {}
+    assert world.owner.patch(path, json={}).json()["name"] == "새 이름"
+    assert world.store.get_device(phone["id"])["settings"] == {}
+
+    refused(world.owner.patch("/studio/devices/me", json={"name": "누구"}), 409, "precondition_failed")
+    refused(world.owner.patch("/studio/devices/dev_nope", json={"name": "누구"}), 404, "not_found")
+    for bad in ({"settings": {"quiet_hours": {"start": "24:00", "end": "07:00"}}},
+                {"settings": {"quiet_hours": {"start": "22:00"}}},
+                {"settings": {"quiet_hours": {"start": "22:00", "end": "07:00", "utc_offset_min": 900}}},
+                {"settings": {"quiet_hours": {"start": "22:00", "end": "7:00"}}},
+                {"settings": {"theme": "dark"}}, {"platform": "ios"}, {"name": ""}):
+        assert world.owner.patch(path, json=bad).status_code == 422, bad
+    assert world.store.get_device(phone["id"])["name"] == "새 이름"
+
+    assert world.owner.post(f"{path}/revoke").status_code == 200
+    refused(world.owner.patch(path, json={"name": "누구"}), 404, "not_found")  # revoked: not there any more
+
+
+# --- the document · the contract · the dashboard------------------------------------------------------------
 def test_routes_are_the_m2_rows_of_the_document():
     doc = set()
     for line in doc_section("**컴퓨터 · 기기**", "- `machine` 의 필드").splitlines():
         cells = [c.strip() for c in line.strip().strip("|").split("|")]
         row = re.match(r"`(GET|POST|PATCH|PUT|DELETE) (/studio/[^`]+)`", cells[0]) if len(cells) == 5 else None
-        if row and "M-2" in cells[4]:
+        if row and re.search(r"M-2|N-2", cells[4]):
             doc.add((row.group(1), row.group(2)))
     built = {(method, r.path) for r in api.router.routes for method in r.methods
              if r.path.startswith("/studio/devices")}
-    assert len(doc) == 4 and built == doc  # PATCH /studio/devices/{id} is A-11 · N-2's
+    assert ("PATCH", "/studio/devices/{id}") in doc  # A-11 · N-2's: the name, the push token, the quiet hours
+    assert len(doc) == 5 and built == doc
     assert api.TOKENLESS == {("POST", "/studio/devices/pair")}
 
 
@@ -470,12 +508,18 @@ def test_the_document_settles_where_the_url_comes_from():
     assert "잠정, M-2" not in doc_section("### 3.14 devices", "### 3.15")  # settings_json stays N-2's
 
 
-def test_openapi_holds_the_four_device_paths():
+def test_openapi_holds_the_five_device_paths():
     schema = api.openapi_schema()
     paths = {(method.upper(), path) for path, item in schema["paths"].items() for method in item
              if path.startswith("/studio/devices")}
     assert paths == {("POST", "/studio/devices/pairing"), ("POST", "/studio/devices/pair"),
-                     ("GET", "/studio/devices"), ("POST", "/studio/devices/{id}/revoke")}
+                     ("GET", "/studio/devices"), ("PATCH", "/studio/devices/{id}"),
+                     ("POST", "/studio/devices/{id}/revoke")}
+    patch = schema["components"]["schemas"]["DevicePatch"]
+    assert set(patch["properties"]) == {"name", "fcm_token", "settings"} and not patch.get("required")
+    hours = schema["components"]["schemas"]["QuietHours"]
+    assert set(hours["properties"]) == {"start", "end", "utc_offset_min"} and set(hours["required"]) == {"start", "end"}
+    assert "description" not in schema["paths"]["/studio/devices/{id}"]["patch"]
     pair = schema["components"]["schemas"]["Pair"]
     assert set(pair["properties"]) == {"code", "name", "platform", "fcm_token"}
     assert set(pair["required"]) == {"code", "name"} and pair["properties"]["name"]["maxLength"] == 80

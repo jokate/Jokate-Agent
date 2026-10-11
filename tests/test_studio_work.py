@@ -11,7 +11,7 @@ import yaml
 from relay_agent.config import ROOT
 from relay_agent.pipeline import RelaySpec
 from relay_agent.repos import RepoRegistry
-from relay_agent.studio import TaskMachine, TransitionError, api, chat, employees, work
+from relay_agent.studio import TaskMachine, TransitionError, api, chat, employees, sat, work
 from relay_agent.studio.tasks import OWNER, SYSTEM
 from test_studio_inbox import DOC, TEXT, ok
 from test_studio_runs import DEMO, GOAL, lab  # noqa: F401 - the fixture `shop` stands on
@@ -151,6 +151,23 @@ def test_the_employees_file_and_the_override_reach_the_run(shop):
     shop.engine.advance(run.id)  # the mock runner is handed what the run keeps
     assert [(call.stage, call.model, call.effort) for call in shop.lab.runner.calls[:2]] == [
         ("scout", "sonnet", "medium"), ("plan", "opus", "high")]
+
+
+def test_a_task_run_in_a_repo_without_project_context_still_has_studio(shop):
+    shop.engine.repos = RepoRegistry({"game": {"path": str(shop.lab.tmp / "project"), "project_context": False}})
+    shop.engine.mcp_registry["studio"] = {"command": "py", "args": ["studio.py"]}
+    shop.engine.mcp_env["studio"] = api.mcp_env  # as server.py registers it (§8.2)
+    relay(shop.relays, "look", scout={"tools": ["Read", "Grep"]})  # demo's stages have no tools: no ToolSearch there
+    row, run = shop.start(shop.task(relay="look"))
+    assert (run.repo, run.mcp, run.mcp_only) == ("game", ["studio"], None)
+    assert shop.engine.project_context(run) is None
+    shop.engine.advance(run.id)
+    call = shop.lab.runner.calls[0]
+    assert call.mcp_servers == run.mcp and "ToolSearch" in call.tools  # §9.5: what it keeps is attached
+    assert "project_context" not in shop.lab.events(run)
+    claims = sat.verify(call.mcp_overrides["studio"]["env"]["STUDIO_ACTOR_TOKEN"])  # the task's run is in the ledger
+    assert (claims["run"], claims["emp"], claims["task"]) == (run.id, row["assignee_id"], row["id"])
+    assert claims["mode"] == "work"
 
 
 def test_the_relay_is_the_tasks_then_the_employees_and_one_that_is_not_there_makes_no_run(shop):

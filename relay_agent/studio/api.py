@@ -22,8 +22,12 @@ Bringing in a project that is already there (M-6): `POST /studio/projects` has s
 folder — nothing is written in it — and registers it; the `repos` handed to `install` says which registered
 repository the folder lies in (§3.3).
 
+Campaigns (S-14): made, changed and driven by path — `start` · `pause` · `resume` · `cancel` (§4.10). The task
+machine does the change; what follows it (the look at the campaign) is studio/campaigns.py's, through
+`Effects.after`.
+
 Not here yet, on purpose: an owner's message is stored and announced; the turns it starts belong to
-S-7 · S-9. Tasks are not started or stopped here (S-8), campaigns not created or driven (S-14).
+S-7 · S-9. Tasks are not started or stopped here (S-8).
 """
 
 from __future__ import annotations
@@ -35,6 +39,7 @@ import hashlib
 import hmac
 import json
 import logging
+import os
 import re
 import shutil
 import sqlite3
@@ -46,15 +51,16 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Callable, Literal
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 from starlette.concurrency import run_in_threadpool
 from starlette.requests import HTTPConnection
 
-from . import devices, employees, files, importer, machine as machine_info, sat, tools, work
+from . import devices, employees, files, guard, importer, machine as machine_info, review, sat, tools, work
 from .inbox import Hooks, Inbox, InboxError
 from .store import StudioStore, StudioStoreError, Tx, now
-from .tasks import OWNER, STATES, TERMINAL, TEXT_FIELDS, Effects, TaskMachine, TaskNotFound, TransitionError
+from .tasks import (OWNER, STATES, TERMINAL, TEXT_FIELDS, CampaignNotFound, Effects, TaskMachine, TaskNotFound,
+                    TransitionError)
 
 if TYPE_CHECKING:
     from ..config import Config
@@ -107,6 +113,10 @@ async def _on_task_not_found(request: Request, exc: TaskNotFound) -> JSONRespons
     return error_response("not_found", f"작업을 찾을 수 없습니다: {exc}")
 
 
+async def _on_campaign_not_found(request: Request, exc: CampaignNotFound) -> JSONResponse:
+    return error_response("not_found", f"캠페인을 찾을 수 없습니다: {exc}")
+
+
 async def _on_inbox_error(request: Request, exc: InboxError) -> JSONResponse:
     return JSONResponse(exc.as_dict(), STATUS[exc.code])  # §5.1: `inbox` · `allowed` · `fields` ride along
 
@@ -116,6 +126,7 @@ def add_error_handlers(app: FastAPI) -> None:
     app.add_exception_handler(StudioError, _on_studio_error)
     app.add_exception_handler(TransitionError, _on_transition_error)
     app.add_exception_handler(TaskNotFound, _on_task_not_found)
+    app.add_exception_handler(CampaignNotFound, _on_campaign_not_found)
     app.add_exception_handler(InboxError, _on_inbox_error)
 
 
@@ -126,9 +137,12 @@ _store: StudioStore | None = None
 _failure: str | None = None  # why the store could not start; kept so the start is not retried per request
 _effects: Effects | None = None  # what a task change does outside the DB (runs, gates, apply); None = nothing
 _queue: Any = None  # queue.TaskQueue: the line and its slots (§4.6); None = nothing starts or stops a run
+_cutoff: Any = None  # cutoff.Cutoff: what follows the answer of a T4 (§8.3 '서버의 뒤처리'); None = no run is cut
 _hooks: Hooks | None = None  # what a decision asks of the engine and the turns (interject, commit, chat turn)
 _models: Callable[[], list[dict]] | None = None  # the engine's ProviderRegistry.catalog; None = the config's own
-_run_view: Callable[[str], dict | None] | None = None  # run id -> {id, status, changes_status}; S-8 sets it
+_run_view: Callable[[str], dict | None] | None = None  # run id -> {id, status, changes_status}; use_engine sets it
+_engine: Callable[[], Any] | None = None  # -> the server's RelayEngine as it is now (use_engine); None = no engine
+_tokens: Callable[[str], dict] | None = None  # run id -> the server's `GET /runs/{id}/tokens` (use_engine)
 _liveness: Callable[[str], dict] | None = None  # run id -> RelayEngine.liveness(run id); None = no engine connected
 _workdir: Callable[[str], Path | None] | None = None  # run id -> the folder that run's stages work in (§6.6)
 _repos: Callable[[], Any] | None = None  # -> the server's RepoRegistry as it is now (§3.3); None = no registry
@@ -340,18 +354,19 @@ def owner_device(token: str) -> dict | None:
 
 
 def run_is_running(run_id: str) -> bool:
-    """§8.2 의 검사 2: is that run `running` now? Read from `_run_view` once S-8 has set it, until then from
-    the engine's liveness. A run the engine does not know is not running. StudioError `unavailable` when
-    neither is connected — "cannot say" is not "ended"."""
-    if _run_view is not None:
-        view = _run_view(run_id)
-        return view is not None and view.get("status") == "running"
-    if _liveness is None:
+    """§8.2 의 검사 2: is that run `running` now? Asked of the engine's liveness when that is connected, else
+    of `_run_view` — on the server both are there and both give `RunState.status` of the same engine
+    (`RelayEngine.liveness`, studio/review.py `run_view`). A run the engine does not know is not running.
+    StudioError `unavailable` when neither is connected — "cannot say" is not "ended"."""
+    if _liveness is not None:
+        try:
+            return _liveness(run_id).get("status") == "running"
+        except FileNotFoundError:  # RelayEngine.load: no run.json under that id
+            return False
+    if _run_view is None:
         raise StudioError("unavailable", "런 상태를 읽을 엔진이 연결되지 않았습니다 (install 의 liveness)")
-    try:
-        return _liveness(run_id).get("status") == "running"
-    except FileNotFoundError:  # RelayEngine.load: no run.json under that id
-        return False
+    view = _run_view(run_id)
+    return view is not None and view.get("status") == "running"
 
 
 def actor_subject(token: str) -> dict | None:
@@ -402,6 +417,38 @@ def mcp_env(run_id: str, stage: str = "") -> dict[str, str] | None:
     if token is None or _cfg is None:
         return None
     return {"STUDIO_URL": _cfg.server_url, "STUDIO_ACTOR_TOKEN": token}
+
+
+def guard_stage(run_id: str, stage: str = "", *, run_dir: Path, cwd: Path, settings: Path | None = None) -> dict | None:
+    """The engine's guard callback (§11.4 의 1; server.py registers it as `engine.guard_stage`): what a stage of
+    a studio run is given on top of its own — `allowed_tools` (`studio-full`, §10.1), `settings_path` (the hook,
+    with the backup hook of `settings` when the workspace has one), `env` (where the hook asks and as whom) and
+    `claude_only` (§10.8 의 9). guard_ctx.json and the settings file are written again at every stage.
+
+    When this server was given the shared token by its environment (`KATAE_TOKEN`), `env` also blanks it for the
+    run (§10.8 의 4): the employee's shell would otherwise read the owner's token there. The key is not added
+    when the server has no such variable.
+
+    None for a run that is not in studio's ledger (a dashboard · CLI · campaign run: its call stays as it was)
+    and while the store is not open. It raises when it cannot tell or cannot write — the engine then fails the
+    stage instead of running a studio run without its guard."""
+    with _lock:
+        store = _store
+    if store is None or _cfg is None:
+        return None
+    head = run_head(store, run_id)
+    if head is None or not head.get("employee_id") or not head.get("room_id"):
+        return None
+    token = actor_token(run_id)
+    if token is None:
+        raise RuntimeError(f"studio 런 {run_id} 의 행위자 토큰을 만들지 못했다")
+    ctx_path = guard.write_ctx(Path(run_dir), _cfg, run_id, cwd, store.list_projects(), settings)
+    env = {"STUDIO_URL": _cfg.server_url, "STUDIO_ACTOR_TOKEN": token}
+    if "KATAE_TOKEN" in os.environ:
+        env["KATAE_TOKEN"] = ""
+    return {"allowed_tools": guard.profile(head["mode"]),
+            "settings_path": guard.write_settings(Path(run_dir), ctx_path, settings),
+            "env": env, "claude_only": True}
 
 
 def run_workdir(run_id: str) -> Path | None:
@@ -689,8 +736,34 @@ def get_employee(id: str, store: StudioStore = Depends(get_store)) -> dict:
 TaskStatus = Literal["proposed", "backlog", "working", "blocked", "review", "done", "rejected", "cancelled"]
 TaskType = Literal["feature", "fix", "chore", "doc", "data"]
 CampaignStatus = Literal["draft", "running", "paused", "done", "cancelled"]
+CampaignMode = Literal["nonstop", "milestone", "each"]
+CampaignAction = Literal["start", "pause", "resume", "cancel"]
 NEW_TASK_REQUIRED = ("project_id", "title", "reason", "spec", "done_criteria", "type")
 TASK_NOT_NULL = TEXT_FIELDS + ("type", "is_milestone", "sort_order")  # PATCH: null clears relay · campaign_id only
+NEW_CAMPAIGN_REQUIRED = ("project_id", "title", "goal")
+# action -> (the status it is taken in, the status it leads to). `transition_campaign` takes a draft and a paused
+# campaign to `running` alike, so the path tells `start` from `resume`; None = wherever the table of §4.10 has it
+CAMPAIGN_ACTIONS = {"start": ("draft", "running"), "pause": ("running", "paused"), "resume": ("paused", "running"),
+                    "cancel": (None, "cancelled")}
+
+
+class NewCampaign(BaseModel):
+    """A draft. The first three are required: an empty or missing one is 422 missing_fields naming all of them."""
+    model_config = ConfigDict(extra="forbid")
+
+    project_id: str | None = None
+    title: str | None = None
+    goal: str | None = None
+    mode: CampaignMode = "milestone"
+
+
+class CampaignPatch(BaseModel):
+    """Only the keys that are sent change; none of them takes null. A new mode holds from the next start (§4.10)."""
+    model_config = ConfigDict(extra="forbid")
+
+    title: str | None = None
+    goal: str | None = None
+    mode: CampaignMode | None = None
 
 
 class NewTask(BaseModel):
@@ -782,6 +855,38 @@ def list_campaigns(project_id: str | None = None, status: CampaignStatus | None 
     return {"items": [{**row, "progress": _progress(counts.get(row["id"], {}))} for row in rows]}
 
 
+@router.post("/campaigns", status_code=201)
+def create_campaign(body: NewCampaign, machine: TaskMachine = Depends(get_machine)) -> dict:
+    """A campaign opens as a draft and starts nothing until its start (§4.10). 201 with the row."""
+    empty = [name for name in NEW_CAMPAIGN_REQUIRED if _empty(getattr(body, name))]
+    if empty:
+        raise StudioError("missing_fields", f"비어 있습니다: {', '.join(empty)}", fields=empty)
+    return machine.create_campaign(OWNER, body.project_id, title=body.title, goal=body.goal, mode=body.mode)
+
+
+@router.patch("/campaigns/{id}")
+def patch_campaign(id: str, body: CampaignPatch, machine: TaskMachine = Depends(get_machine)) -> dict:
+    """Only the keys that are sent change, until the campaign has ended. A new mode holds from the next start."""
+    fields = body.model_dump(exclude_unset=True)
+    empty = [key for key, value in fields.items() if value is None or (key != "mode" and _empty(value))]
+    if empty:
+        raise StudioError("missing_fields", f"비울 수 없습니다: {', '.join(empty)}", fields=empty)
+    row = machine.edit_campaign(id, OWNER, fields)  # None: nothing differs — the row as it is, no write, no event
+    return row if row is not None else _need(machine.store.get_campaign(id), "캠페인", id)
+
+
+@router.post("/campaigns/{id}/{action}")
+def campaign_action(id: str, action: CampaignAction, machine: TaskMachine = Depends(get_machine)) -> dict:
+    """The owner's start (a draft), pause (a running one), resume (a paused one) or cancel (before its end): §4.10."""
+    campaign = _need(machine.store.get_campaign(id), "캠페인", id)
+    frm, to = CAMPAIGN_ACTIONS[action]
+    if frm is not None and campaign["status"] != frm:
+        raise TransitionError("illegal_transition",
+                              f"{action} 은 {frm} 캠페인에만 한다. 이 캠페인은 {campaign['status']} 다",
+                              from_status=campaign["status"], to_status=to)
+    return machine.transition_campaign(id, to, OWNER)
+
+
 @router.get("/tasks")
 def list_tasks(project_id: str | None = None, campaign_id: str | None = None, status: TaskStatus | None = None,
                assignee_id: str | None = None, parent_id: str | None = None,
@@ -807,7 +912,7 @@ def create_task(body: NewTask, machine: TaskMachine = Depends(get_machine)) -> d
 @router.get("/tasks/{id}")
 def get_task(id: str, machine: TaskMachine = Depends(get_machine)) -> dict:
     """The row and what a task screen shows next to it. `queue_position` counts from 1 in the server's whole
-    line (provisional); `run` stays null until S-8 sets `_run_view`."""
+    line (provisional); `run` is `{id, status, changes_status}` of the task's run, null when it has none."""
     store = machine.store
     row = _need(store.get_task(id), "작업", id)
     rooms = store.list_rooms(kind="task", task_id=id, include_archived=True)
@@ -918,7 +1023,8 @@ def get_inbox(machine: TaskMachine = Depends(get_machine)) -> Inbox:
     """The inbox of a request: the request's machine, and the hooks the server gave (install() · use_hooks() —
     studio/runs.py for the runs that are no task's; the turns come with S-7 · S-8)."""
     cfg = _config()
-    return Inbox(machine.store, machine, _hooks, studio_dir=cfg.studio_dir, checks=employees.context(cfg))
+    return Inbox(machine.store, machine, _hooks, studio_dir=cfg.studio_dir, checks=employees.context(cfg),
+                 max_exchanges=cfg.studio_max_exchanges)
 
 
 # --- the engine's side of the inbox (§5.8) ----------------------------------------------------------------
@@ -947,6 +1053,35 @@ def use_queue(queue: Any) -> None:
     _queue = queue
 
 
+def use_cutoff(cutoff: Any) -> None:
+    """Set what follows the answer of a T4 (studio/cutoff.py `Cutoff`), after install(): server.py builds it on
+    its engine. `answered` below is how the tools — and the guard — reach it."""
+    global _cutoff
+    _cutoff = cutoff
+
+
+def use_engine(engine: Callable[[], Any] | None, *, tokens: Callable[[str], dict] | None = None) -> None:
+    """Set the engine the final review reads (studio/review.py), after install(): the `run` of a task, the
+    `package` of a final review and the alias of a run's patch. A function, not the object — the server's
+    engine is a module variable (a test puts another one there), so it is asked for at every read. `tokens`
+    is the server's own `GET /runs/{run_id}/tokens`, which the alias here answers with."""
+    global _engine, _tokens, _run_view
+    _engine, _tokens = engine, tokens
+    _run_view = (lambda run_id: review.run_view(engine(), run_id)) if engine is not None else None
+
+
+def held_runs() -> set[str]:
+    """What server.py gives `RelayEngine.held_runs`: the runs of the tasks under review, whose workspaces
+    `cleanup_workspaces` keeps past the retention period (§4.3 T9). From the store when it is open, else
+    read-only from the DB file — a store that could not start must not let those snapshots go. What this
+    raises the engine reads as "cannot say": nothing expires in that round."""
+    with _lock:
+        store = _store
+    if store is not None:
+        return review.held_runs(store)
+    return review.held_runs_ro(_config().studio_db)
+
+
 def run_inbox() -> Inbox | None:
     """An inbox outside a request, with the effects and hooks the server gave. None while the store is not
     open (it could not start, or nothing has opened it yet): then nothing is filed or closed."""
@@ -955,7 +1090,7 @@ def run_inbox() -> Inbox | None:
     if store is None or _cfg is None:
         return None
     return Inbox(store, TaskMachine(store, _effects), _hooks, studio_dir=_cfg.studio_dir,
-                 checks=employees.context(_cfg))
+                 checks=employees.context(_cfg), max_exchanges=_cfg.studio_max_exchanges)
 
 
 def is_task_run(run_id: str) -> bool:
@@ -1014,8 +1149,13 @@ def list_inbox(status: InboxStatus = "pending", kind: InboxKind | None = None, p
 @router.get("/inbox/{id}")
 def get_inbox_item(id: str, inbox: Inbox = Depends(get_inbox)) -> dict:
     """The row + `task` (null for `hire`) + `allowed_decisions` ([] once it is closed). A final review also
-    has `package` (§5.4): null until S-12 computes it."""
-    return inbox.view(id)
+    has `package` (§5.4), computed now from the run as it is (studio/review.py)."""
+    view = inbox.view(id)
+    if "package" in view:  # an Inbox knows neither the engine nor the queue: the request fills the key
+        view["package"] = review.package(
+            inbox.store, view, view["task"], _engine() if _engine is not None else None,
+            holds=getattr(_queue, "holds", None), scopes=getattr(_config(), "studio_scopes", None))
+    return view
 
 
 @router.post("/inbox/{id}/decide")
@@ -1033,6 +1173,12 @@ class ReadMark(BaseModel):
     message_id: int = Field(ge=0)
 
 
+class RoomPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    muted: bool
+
+
 @router.get("/rooms")
 def list_rooms(kind: RoomKind | None = None, archived: int = Query(0, ge=0, le=1),
                store: StudioStore = Depends(get_store)) -> dict:
@@ -1048,6 +1194,21 @@ def get_room(id: str, store: StudioStore = Depends(get_store)) -> dict:
     return {**row, "members": store.list_room_members(room_id=id), "unread": store.count_unread(id).get(id, 0)}
 
 
+# N-2 (§5.9): what an employee writes in a muted room is not pushed — the room's notices, its task's progress and
+# every inbox item still are (studio/push.py `classify`). `room.updated` only when the value changed. A comment,
+# not a docstring: the saved contract (openapi.json) would carry it as the path's description.
+@router.patch("/rooms/{id}")
+def patch_room(id: str, body: RoomPatch, store: StudioStore = Depends(get_store)) -> dict:
+    with store.transaction() as tx:
+        room = _need(store.get_room(id, tx=tx), "방", id)
+        if bool(room["muted"]) != body.muted:
+            room = store.update_room(id, tx=tx, muted=body.muted)
+            members = store.list_room_members(room_id=id, tx=tx)
+            store.emit(tx, "room.updated", {"room": room, "members": members}, room_id=id,
+                       task_id=room["task_id"], project_id=_room_project(store, room, tx))
+    return room
+
+
 @router.post("/rooms/{id}/read")
 def mark_room_read(id: str, body: ReadMark, store: StudioStore = Depends(get_store)) -> dict:
     """`owner_read_id` only grows, and never past the room's last message (a later message stays unread)."""
@@ -1061,6 +1222,65 @@ def mark_room_read(id: str, body: ReadMark, store: StudioStore = Depends(get_sto
             store.emit(tx, "room.updated", {"room": room, "members": members}, room_id=id,
                        task_id=room["task_id"], project_id=_room_project(store, room, tx))
     return room
+
+
+def _seat(store: StudioStore, id: str, employee_id: str, tx: Tx) -> tuple[dict, dict, dict]:
+    """What both calls on the members of a task room look at first, in this order: the room (404), that it is a
+    task room (`precondition_failed`), the employee (404). (the room, the employee, the room's task)."""
+    room = _need(store.get_room(id, tx=tx), "방", id)
+    if room["kind"] != "task":
+        raise StudioError("precondition_failed", f"작업방이 아닙니다: {id} ({room['kind']}). 구성원은 작업방에서만 "
+                          "넣고 뺍니다")
+    employee = _need(store.get_employee(employee_id, tx=tx), "직원", employee_id)
+    task = _need(store.get_task(room["task_id"], tx=tx) if room["task_id"] else None, "작업", room["task_id"])
+    return room, employee, task
+
+
+def _seated(store: StudioStore, room: dict, tx: Tx, changed: bool) -> dict:
+    """`{members}`: who is in the room now (one who left is not). `room.updated` only when that changed."""
+    members = store.list_room_members(room_id=room["id"], tx=tx)
+    if changed:
+        store.emit(tx, "room.updated", {"room": room, "members": members}, room_id=room["id"],
+                   task_id=room["task_id"], project_id=_room_project(store, room, tx))
+    return {"members": members}
+
+
+@router.post("/rooms/{id}/members/{employee_id}")
+def add_room_member(id: str, employee_id: str, store: StudioStore = Depends(get_store)) -> dict:
+    """Seats an employee of the task's project in the task room (S-9; §6.4), so that the room's mentions reach
+    it. One who is seated already changes nothing; one who left comes back to the row it had — the conversation
+    it kept there —, as `TaskMachine._join_room` does for the assignee."""
+    with store.transaction() as tx:
+        room, employee, task = _seat(store, id, employee_id, tx)
+        if employee["project_id"] is None or employee["project_id"] != task["project_id"]:
+            raise StudioError("precondition_failed", f"{employee['name']} 은(는) 이 작업의 프로젝트에 배치된 직원이 "
+                              "아닙니다. 작업방에는 그 프로젝트의 직원만 넣습니다")
+        member = store.get_room_member(id, employee_id, tx=tx)
+        if member is None:
+            store.create_room_member(id, employee_id, tx=tx)
+        elif member["left_at"] is not None:
+            store.update_room_member(id, employee_id, left_at=None, tx=tx)
+        out = _seated(store, room, tx, changed=member is None or member["left_at"] is not None)
+    return out
+
+
+@router.delete("/rooms/{id}/members/{employee_id}")
+def remove_room_member(id: str, employee_id: str, store: StudioStore = Depends(get_store)) -> dict:
+    """Takes a member out of the task room: `left_at` is set and the row stays (`_may_post` and the turns look at
+    `left_at`; POST brings it back). One who is not in the room changes nothing. Where the employee is placed
+    is not looked at: one who was moved away can still be taken out. The assignee stays — its run writes there;
+    `/tasks/{id}/assign` is how the assignee changes."""
+    with store.transaction() as tx:
+        room, _, task = _seat(store, id, employee_id, tx)
+        if employee_id == task["assignee_id"]:
+            raise StudioError("precondition_failed", "담당은 작업방에서 뺄 수 없습니다. 담당을 바꾸려면 "
+                              f"/studio/tasks/{task['id']}/assign 을 씁니다")
+        member = store.get_room_member(id, employee_id, tx=tx)
+        seated = member is not None and member["left_at"] is None
+        if seated:
+            store.update_room_member(id, employee_id, left_at=now(), tx=tx)
+        out = _seated(store, room, tx, changed=seated)
+    return out
 
 
 # --- messages (§6.6) --------------------------------------------------------------------------------------
@@ -1135,7 +1355,34 @@ def post_message(id: str, body: NewMessage, store: StudioStore = Depends(get_sto
         shutil.rmtree(file.parent, ignore_errors=True)
     if room["kind"] == "dm" and room["employee_id"]:  # §6.6: the employee of a 1:1 room answers (S-7)
         _ask_turn(room["employee_id"], id)
+    elif room["kind"] == "task":  # §6.6: into the task's run, and the read turns of who is mentioned (S-9)
+        _tell_task_room(store, room, message)
+    elif room["kind"] == "department":  # §6.6: only who is mentioned answers (S-9)
+        for employee_id in mentions:
+            _ask_turn(employee_id, id)
     return message
+
+
+def _tell_task_room(store: StudioStore, room: dict, message: dict) -> None:
+    """§6.6, the owner's message in a task room (S-9). While the task is working its run is told the message
+    (`Hooks.tell_run`: `engine.interject`, the call of `/runs/{id}/interject` — into the conversation that is
+    going on, else with the next stage). A task that waits for the owner takes none: its run is about to be cut
+    (§8.3), and the decision is what goes on with it. Each member the message mentions who is not the assignee
+    gets a read turn — the assignee's turn in that room is the run. Nothing is counted: the owner's messages
+    are no exchange (§4.6). Like `_ask_turn` it never fails the POST: the message is stored by now."""
+    task = store.get_task(room["task_id"]) if room["task_id"] else None
+    if task is None:
+        return
+    names = ", ".join(str(a.get("name")) for a in message.get("attachments") or [] if isinstance(a, dict))
+    text = ((message["body"] or "").strip() + (f"\n(작업방에 붙인 파일: {names})" if names else "")).strip()
+    if _hooks is not None and text and task["status"] == "working" and task["run_id"]:
+        try:
+            _hooks.tell_run(task["run_id"], f"owner 가 작업방에 쓴 글이다: {text}")
+        except Exception:  # noqa: BLE001
+            log.exception("studio: owner 의 글을 작업 %s 의 런 %s 에 넣지 못했다", task["id"], task["run_id"])
+    for employee_id in message["mentions"] or []:
+        if employee_id != task["assignee_id"]:
+            _ask_turn(employee_id, room["id"])
 
 
 def _ask_turn(employee_id: str, room_id: str) -> None:
@@ -1171,6 +1418,15 @@ def untrack_run(run_id: str) -> None:
         _tracked.pop(run_id, None)
 
 
+def tracked_run(run_id: str) -> dict | None:
+    """The chat · read turn that run is of, while it is tracked: None before `track_run`, after `untrack_run`
+    and for every task run. Memory only — nothing of the DB is read, so the engine's notifier may ask on the
+    run's own thread (studio/push.py leaves a tracked turn's failure to the notice written in its room)."""
+    with _runs_lock:
+        head = _tracked.get(run_id)
+    return dict(head) if head is not None else None
+
+
 def live_runs(store: StudioStore) -> dict[str, dict]:
     """The studio runs that may be running now, by run id: LIVE_HEAD plus `project_id` (for the envelope).
     The runs of working tasks (`mode` work) and the tracked chat · read turns."""
@@ -1183,10 +1439,9 @@ def live_runs(store: StudioStore) -> dict[str, dict]:
 def run_head(store: StudioStore, run_id: str) -> dict | None:
     """Whose run this is, in the shape of live_runs() — also for a task run that has stopped (blocked,
     review, done keep tasks.run_id). None for a run studio did not start."""
-    with _runs_lock:
-        head = _tracked.get(run_id)
+    head = tracked_run(run_id)
     if head is not None:
-        return dict(head)
+        return head
     rows = store.list_task_runs(run_id=run_id)
     return {**rows[0], "mode": "work"} if rows else None
 
@@ -1209,6 +1464,33 @@ def get_run_live(run_id: str, store: StudioStore = Depends(get_store)) -> dict:
     stored, so `after_id` does not bring it back. 404 for a run that is not a studio run."""
     head = _need(run_head(store, run_id), "런", run_id)
     return _need(live_data(head), "런", run_id)
+
+
+@router.get("/runs/{run_id}/patch", response_class=PlainTextResponse)
+def get_run_patch(run_id: str, store: StudioStore = Depends(get_store)) -> str:
+    """The run's `result.patch` as text: what `package.changes.patch_url` of a final review points at (§5.4).
+    Empty when the run changed no file. 404 for a run that is not a studio run."""
+    _need(run_head(store, run_id), "런", run_id)
+    if _engine is None:
+        raise StudioError("unavailable", "런을 읽을 엔진이 연결되지 않았습니다 (use_engine)")
+    engine = _engine()
+    _need(review.run_view(engine, run_id), "런", run_id)  # a studio run the engine has no more
+    return engine.patch_text(run_id)
+
+
+@router.get("/runs/{run_id}/tokens")
+def get_run_tokens(run_id: str, store: StudioStore = Depends(get_store)) -> dict:
+    """The token watch of that run, as the server's `GET /runs/{run_id}/tokens` gives it (§6.4). 404 for a run
+    that is not a studio run."""
+    _need(run_head(store, run_id), "런", run_id)
+    if _tokens is None:
+        raise StudioError("unavailable", "런을 읽을 엔진이 연결되지 않았습니다 (use_engine)")
+    try:
+        return _tokens(run_id)
+    except HTTPException as e:  # the server's own 404: a studio run the engine has no more
+        if e.status_code != 404:
+            raise
+        raise StudioError("not_found", f"런을(를) 찾을 수 없습니다: {run_id}") from e
 
 
 # --- studio MCP (§8): the employees' tools ------------------------------------------------------------------
@@ -1350,8 +1632,53 @@ def get_caller(request: Request, store: StudioStore = Depends(get_store)) -> too
                         task_id=who["task_id"], mode=who["mode"])
 
 
-def _tool(name: str, body: BaseModel, caller: tools.Caller, machine: TaskMachine, inbox: Inbox) -> dict:
-    return tools.call(name, caller, body.model_dump(), machine=machine, inbox=inbox)
+def answered(rule: str, task_id: str | None, *, caller_run_id: str | None, inbox_id: str | None) -> str:
+    """The one way into what the server does once the item of a T4 · T6 has been filed and the answer is made
+    (§8.3 '서버의 뒤처리'; studio/cutoff.py `Cutoff.after`): the two tools below call it, and the guard's T4
+    (S-10) is to call it with what it filed. A task run that asked is cut when it is still at work after the
+    wait; a T4 from another turn cuts the task's run at once (§5.7); a T6 cuts nothing. Returns `none` · `cut`
+    · `timed` — `none` while no cutoff is connected — and never raises: the answer goes out as it is."""
+    if _cutoff is None or not task_id or not inbox_id:
+        return "none"
+    return _cutoff.after(rule, task_id, caller_run_id=caller_run_id, inbox_id=inbox_id)
+
+
+def _tool(name: str, body: BaseModel, caller: tools.Caller, machine: TaskMachine, inbox: Inbox, *,
+          rule: str | None = None) -> dict:
+    """Run a tool. `rule` is the transition its success is (T4 · T6): what follows that answer is `answered`'s."""
+    out = tools.call(name, caller, body.model_dump(), machine=machine, inbox=inbox)
+    if rule is not None and out.get("ok"):
+        answered(rule, caller.task_id, caller_run_id=caller.run_id, inbox_id=out.get("inbox_id"))
+    return out
+
+
+# --- the guard (§6.4 '가드', §10.5): the hook's question about a command of the ask list -------------------------
+class GuardCheck(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    tool: str
+    command: str
+    rule_id: str
+
+
+def _stage_now(run_id: str) -> str:
+    """The stage that run is in — `stage` of a risky_command's payload (§5.3). "" when the engine does not say."""
+    try:
+        return str((_liveness(run_id) if _liveness is not None else {}).get("stage") or "")
+    except Exception:  # noqa: BLE001 - the item is filed without it
+        return ""
+
+
+@router.post("/guard/check")
+def guard_check(body: GuardCheck, caller: tools.Caller = Depends(get_caller),
+                machine: TaskMachine = Depends(get_machine), inbox: Inbox = Depends(get_inbox)) -> dict:
+    """The guard hook asks about a command of the ask list (§10.4). `{decision, message, inbox_id, end_turn}`."""
+    # the four rows of §6.4 are studio/guard.py `check`; a filed item is a T4, followed as `ask_owner`'s is
+    out = guard.check(caller, body.tool, body.command, body.rule_id, machine=machine, inbox=inbox,
+                      stage=_stage_now(caller.run_id))
+    if out["inbox_id"]:
+        answered("T4", caller.task_id, caller_run_id=caller.run_id, inbox_id=out["inbox_id"])
+    return out
 
 
 @router.post("/mcp/task_propose")
@@ -1394,14 +1721,18 @@ def mcp_task_request_review(body: McpTaskRequestReview, caller: tools.Caller = D
                             machine: TaskMachine = Depends(get_machine),
                             inbox: Inbox = Depends(get_inbox)) -> dict:
     """T6: file the final review. `{inbox_id}` and `end_turn: true`."""
-    return _tool("task_request_review", body, caller, machine, inbox)
+    # the same way in as T4, and nothing is cut: T6 is not in `cutoff.TIMED` (§8.3). The docstring is the saved
+    # contract's description (design/studio/openapi.json), so this is said here.
+    return _tool("task_request_review", body, caller, machine, inbox, rule="T6")
 
 
 @router.post("/mcp/ask_owner")
 def mcp_ask_owner(body: McpAskOwner, caller: tools.Caller = Depends(get_caller),
                   machine: TaskMachine = Depends(get_machine), inbox: Inbox = Depends(get_inbox)) -> dict:
     """T4: file a blocking item (§5.7). `{inbox_id}` and `end_turn: true`."""
-    return _tool("ask_owner", body, caller, machine, inbox)
+    # the task's run is cut when it is still at work after the wait — at once when this turn is not that run
+    # (§8.3 '서버의 뒤처리', `answered`)
+    return _tool("ask_owner", body, caller, machine, inbox, rule="T4")
 
 
 @router.post("/mcp/room_post")
@@ -1410,7 +1741,14 @@ def mcp_room_post(body: McpRoomPost, caller: tools.Caller = Depends(get_caller),
     """Write in a room (default: the room of this turn). `{message_id, queued[]}`."""
     if body.attachments:  # §6.6: a path is checked against the folder this run works in — asked only then
         caller = dataclasses.replace(caller, workdir=run_workdir(caller.run_id))
-    return _tool("room_post", body, caller, machine, inbox)
+    out = _tool("room_post", body, caller, machine, inbox)
+    if out.get("code") == "exchange_limit" and out.get("inbox_id"):
+        # §4.6: this call had the system ask the owner (T4) — the same way in as `ask_owner`: the task's run is cut
+        # when it is still at work after the wait, at once when the call came from a read turn (§5.7). A call that
+        # filed nothing (the task waits already) starts no wait: the one that is running must not begin again.
+        item = inbox.store.get_inbox_item(out["inbox_id"])
+        answered("T4", item["task_id"] if item else None, caller_run_id=caller.run_id, inbox_id=out["inbox_id"])
+    return out
 
 
 @router.post("/mcp/employee_list")
@@ -1611,6 +1949,65 @@ def pair_device(body: Pair, store: StudioStore = Depends(get_store)) -> dict:
 @router.get("/devices")
 def list_devices(store: StudioStore = Depends(get_store)) -> dict:
     return {"items": [devices.public(row) for row in store.list_devices()]}
+
+
+QuietTime = Annotated[str, StringConstraints(pattern=r"^([01]\d|2[0-3]):[0-5]\d$")]  # HH:MM, 00:00–23:59
+
+
+class QuietHours(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    start: QuietTime  # on the device's own clock: from `start` until just before `end`, over midnight too
+    end: QuietTime
+    utc_offset_min: int | None = Field(default=None, ge=-720, le=840)  # that clock's minutes ahead of UTC
+
+
+class DeviceSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    quiet_hours: QuietHours | None = None  # null or left out = no quiet hours
+
+
+class DevicePatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: DeviceName | None = None  # null = as it is
+    fcm_token: str | None = Field(default=None, max_length=4096)  # sent as null or '' = none any more
+    settings: DeviceSettings | None = None  # replaced as a whole; null = {}
+
+
+# N-2 · A-11 (§6.4, §5.9): only the keys that were sent change. `me` is the device of the token that asks — the
+# shared token is no device. A push token belongs to one device, as at pairing: an unrevoked row that holds the
+# same one gives it up. `settings` is replaced as a whole (the quiet hours: studio/push.py `quiet_now`; without
+# `utc_offset_min` this PC's clock is read). A revoked device is not there any more. No stream event: no client
+# draws a device from the stream.
+@router.patch("/devices/{id}")
+def patch_device(id: str, body: DevicePatch, request: Request, store: StudioStore = Depends(get_store)) -> dict:
+    if id == "me":
+        who = getattr(request.state, "studio_subject", None) or {}
+        if not who.get("device_id"):
+            raise StudioError("precondition_failed", "`me` 는 기기 토큰으로 부를 때만 씁니다 — 공용 토큰에는 기기가 "
+                                                     "없습니다. 기기 id 를 적으세요 (GET /studio/devices).")
+        id = who["device_id"]
+    sent = body.model_fields_set
+    with store.transaction() as tx:
+        row = store.get_device(id, tx=tx)
+        row = _need(row if row is not None and row["revoked_at"] is None else None, "기기", id)
+        fields: dict[str, Any] = {}
+        if body.name is not None:
+            fields["name"] = body.name
+        if "fcm_token" in sent:
+            fcm = (body.fcm_token or "").strip() or None
+            if fcm:
+                for other in store.list_devices(tx=tx):
+                    if other["id"] != id and other["fcm_token"] == fcm:
+                        store.update_device(other["id"], fcm_token=None, tx=tx)
+            fields["fcm_token"] = fcm
+        if "settings" in sent:
+            fields["settings"] = body.settings.model_dump(exclude_none=True) if body.settings is not None else {}
+        if fields:
+            row = store.update_device(id, tx=tx, **fields) or row
+    return devices.public(row)
 
 
 # §6.5 의 5: the token is 401 from the next request (owner_device reads revoked_at), and the listeners of

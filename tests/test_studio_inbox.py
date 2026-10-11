@@ -593,6 +593,61 @@ def test_rework_feeds_the_comment_and_revert_rolls_back(world):
     refused(world.decide(item, "revert"), 409, "already_decided")
 
 
+@pytest.mark.parametrize("decision, rule, body", [("rework", "T8", {"comment": "착지 판정이 틀렸다"}),
+                                                  ("revert", "T9", {})])
+def test_rework_and_revert_mark_what_had_started_behind_the_task(world, decision, rule, body):
+    # S-14 "선행 반려" (§4.3 T8, §5.9): the mark, its `flag` row and `task.updated`, and a line in that task's room
+    first, item = world.review()
+    started, waiting, apart = world.task(), world.task("backlog"), world.task()
+    for later in (started, waiting):
+        world.store.create_task_dep(later["id"], first["id"])
+    ok(world.decide(item, decision, **body))
+    marked = {task["id"]: world.store.get_task(task["id"])["upstream_rejected"] for task in (started, waiting, apart)}
+    assert marked == {started["id"]: True, waiting["id"]: False, apart["id"]: False}  # only what had started on it
+    flag = world.store.list_task_events(started["id"])[-1]
+    assert (flag["kind"], flag["actor_kind"], flag["reason"]) == ("flag", "system", "선행 작업이 반려됐다")
+    assert flag["detail"] == {"upstream_task_id": first["id"], "rule": rule}
+    [told] = [event["data"] for event in world.store.list_stream_events(limit=10_000)
+              if event["type"] == "task.updated" and event["data"]["change"] == "flag"]
+    assert told["event_id"] == flag["id"] and told["task"] == world.store.get_task(started["id"])
+
+    def notes(task):
+        return [m for m in world.said(world.room(task["id"])) if (m["meta"] or {}).get("event") == "upstream_rejected"]
+
+    [note] = notes(started)
+    assert note["author_kind"] == "system" and first["title"] in note["body"] and first["id"] in note["body"]
+    assert note["meta"] == {"event": "upstream_rejected", "task_id": started["id"], "upstream_task_id": first["id"]}
+    assert notes(waiting) == notes(apart) == notes(first) == []
+
+
+@pytest.mark.parametrize("rule, stays", [("T6", True), ("T8", True), ("T7", False), ("T9", False), ("T11", False)])
+def test_the_mark_goes_when_the_marked_task_leaves_what_it_had_started(world, rule, stays):
+    # §4.3 T8: the mark says "what this stands on was sent back". It stays while the task is at work, asks or is
+    # in review (T4 · T6 · T8) and goes with the transition that closes it or takes it back (T7 · T9 · T11) — in
+    # the detail of that row, with no row and no line of its own
+    first, item = world.review()
+    later = world.task()
+    world.store.create_task_dep(later["id"], first["id"])
+    ok(world.decide(item, "rework", comment="착지 판정이 틀렸다"))
+    assert world.store.get_task(later["id"])["upstream_rejected"] is True
+    if rule == "T11":
+        world.file("question", later)  # T4: blocked is still "started"
+        assert world.store.get_task(later["id"])["upstream_rejected"] is True
+        world.m.transition(later["id"], "cancelled", OWNER, reason="방향이 바뀌었다")
+    else:
+        _, mine = world.review(later)  # T6
+        if rule != "T6":
+            body = {"comment": "착지가 어색하다"} if rule == "T8" else {}
+            ok(world.decide(mine, {"T7": "pass", "T8": "rework", "T9": "revert"}[rule], **body))
+    events = world.store.list_task_events(later["id"])
+    move = [event for event in events if event["kind"] == "transition"][-1]
+    assert move["rule"] == rule and world.store.get_task(later["id"])["upstream_rejected"] is stays
+    assert move["detail"].get("upstream_rejected") == (None if stays else False)
+    assert [event["kind"] for event in events].count("flag") == 1  # the row of the mark going up; none for down
+    lines = [m for m in world.said(world.room(later["id"])) if (m["meta"] or {}).get("event") == "upstream_rejected"]
+    assert len(lines) == 1
+
+
 def test_judgment_marks_reach_hr_or_the_system_room(world):
     marks = [{"index": 0, "mark": "should_have_asked"}, {"index": 1, "mark": "ok"}]
     task, item = world.review()
@@ -988,7 +1043,11 @@ def test_an_item_shows_its_task_and_what_can_be_decided(world):
     task, item = world.review()
     view = ok(world.owner.get(f"/studio/inbox/{item['id']}"))
     assert view["task"]["id"] == task["id"] and view["allowed_decisions"] == ["pass", "rework", "revert"]
-    assert view["package"] is None and view["payload"]["summary"] == "2단 점프를 넣었다"  # package: S-12
+    assert view["payload"]["summary"] == "2단 점프를 넣었다"
+    pack = view["package"]  # §5.4: computed when read (tests/test_studio_review.py); no engine has this run
+    assert pack["run"] is None and pack["changes"]["files"] == [] and pack["cost"] == {"usd": 0}
+    # a run the engine has no more: nothing to pass, and a revert is taken with nothing reverted (§4.3 `run_gone` 의 예외)
+    assert [pack["can"][name]["ok"] for name in ("pass", "rework", "revert")] == [False, True, True]
     ok(world.decide(item, "pass"))
     view = ok(world.owner.get(f"/studio/inbox/{item['id']}"))
     assert view["allowed_decisions"] == [] and view["task"]["status"] == "done" and view["decision"] == "pass"

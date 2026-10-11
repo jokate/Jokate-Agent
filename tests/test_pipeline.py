@@ -245,3 +245,27 @@ stages:
                          runner_factory=lambda _: runner)
     engine.advance(engine.create(relay, "g", tmp_path).id)
     assert [(c.stage, c.model) for c in runner.calls] == [("build", "sonnet"), ("review", "fable"), ("build", "fable"), ("review", "fable")]
+
+
+def test_a_reopened_run_goes_on_in_its_conversation_without_the_retry_model(tmp_path):
+    """`reopen` (a studio rework) hands the stage its finished conversation back: not a redo from scratch, so
+    neither `retry_model` nor `retry_effort` is spent — under `approval="ai"` as well, as the studio's runs are."""
+    (tmp_path / "role.md").write_text("role", encoding="utf-8")
+    relay = tmp_path / "m.yaml"
+    relay.write_text("""
+name: m
+stages:
+  - {name: build, runner: mock, model: sonnet, effort: low, retry_model: fable, retry_effort: high, prompt: role.md}
+  - {name: review, runner: mock, model: sonnet, prompt: role.md, on_retry: build, max_retries: 1}
+""", encoding="utf-8")
+    runner = MockRunner({})
+    engine = RelayEngine(tmp_path / "runs", UsageStore(tmp_path / "u.sqlite"), HistoryStore(tmp_path / "h.sqlite"),
+                         runner_factory=lambda _: runner)
+    run = engine.advance(engine.create(relay, "g", tmp_path, approval="ai").id)
+    assert run.status == "done" and run.done_sessions.get("build")
+    assert engine.reopen(run.id).stage_sessions == {"build": run.done_sessions["build"]}
+    engine.interject(run.id, "점프가 너무 높다")
+    assert engine.advance(run.id, resume=True).status == "done"
+    assert [(c.stage, c.model, c.effort) for c in runner.calls] == [("build", "sonnet", "low"), ("review", "sonnet", None)] * 2
+    started = [e["detail"] for e in engine.history.events(run.id) if e["kind"] == "stage_started" and e["stage"] == "build"]
+    assert [d["escalated"] for d in started] == [False, False] and started[-1]["model"] == "sonnet"

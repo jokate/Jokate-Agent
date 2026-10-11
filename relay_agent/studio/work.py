@@ -31,7 +31,7 @@ failed run that goes on by itself. `recover` is the five steps of the server's s
 approval is filed by `runs.RunSink` when `advance` lets go of it; the table asks the same code
 (`runs.file_stop`), which files nothing for a task that is blocked by then — so no stop is filed twice.
 A task's run is not narrowed with `mcp_only`: the project's own MCP servers are part of the work. In a folder
-without a project context the engine attaches no MCP at all, `studio` included (§9.5).
+without a project context `studio` and the registry servers the employee picked are attached all the same (§9.5).
 """
 
 from __future__ import annotations
@@ -39,6 +39,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import threading
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -46,10 +47,10 @@ import yaml
 
 from ..config import ROOT
 from ..pipeline import RelaySpec, cap_effort, cap_model
-from . import employees, runs
+from . import campaigns, cutoff, employees, review, runs
 from .inbox import SYSTEM_ROOM
 from .store import StudioStore
-from .tasks import STATE_INBOX, SYSTEM, Effects
+from .tasks import PRE_EFFECT, STATE_INBOX, SYSTEM, Effects, TransitionError
 
 CODES = ("unknown_stage", "provider_unguarded", "model_unavailable", "effort_unsupported", "model_over_cap",
          "effort_over_cap")  # §9.5: the `failed[]` of a `start` that is refused, in the order of the steps 4 · 5 · 6
@@ -58,6 +59,8 @@ SERVER_CODE = "relay_agent"  # the folder of the server root a project must not 
 GOAL_SECTIONS = (("사유", "reason"), ("명세", "spec"), ("완료 기준", "done_criteria"))  # after the title, this order
 RELAY_ERRORS = (OSError, ValueError, yaml.YAMLError)  # what reading a relay file raises
 JOINS_LINE = ("queued", "T5", "T8")  # what `Effects.after` hears when a task has got a `queued_at` (§4.6)
+GATES = {"T5": "rework", "T7": "pass", "T8": "rework", "T9": "revert", "T11": "revert"}  # rule -> what `review.gate` judges
+INSTEAD_OF_CANCEL = "취소 대신 결재를 결정해(T5) 작업을 이어 간다"  # §4.3 T11: what a cancel that cannot revert is told
 # the bodies of the `question` the system files when a task's run has stopped (§4.7 의 표 · §5.3)
 STOPPED = "owner 가 작업을 중지했다. 다시 시도하거나 지금까지 한 것으로 검수를 요청할 수 있다."
 CANCELLED = "작업 런이 취소됐다. 다시 시도하거나 지금까지 한 것으로 검수를 요청할 수 있다."
@@ -242,15 +245,27 @@ class WorkEffects(Effects):
     registry, else the config's —, `server_root` the folder `holds_server_code` measures against.
 
     `kick` is the queue's look at the line (`queue.TaskQueue.kick`; server.py sets it): `after` calls it when a
-    task has joined the line. None = nobody starts or resumes a run. The other hooks of `Effects` (the gates,
-    apply and rollback) are the base's — they do nothing — until the next parts of S-8."""
+    task has joined the line. None = nobody starts or resumes a run.
+
+    `check` and `before` are the final review's (S-12; studio/review.py part 2): the conditions of T5 · T7 · T8
+    · T9 · T11 on the task's run, and — T7 · T9 · T11 — the run closed, then its changes applied and committed,
+    or reverted. `holds` is the queue's "does that task hold a slot" (`queue.TaskQueue.holds`; server.py sets
+    it): a run whose thread has not let go of its slot has not stopped yet (§4.6). None = no queue, so nothing
+    holds one. The harness gate of T6 is still the base's (S-11).
+
+    `campaign` is the look at the studio's campaigns (S-14; `CampaignRunner.advance_studio`, server.py sets it):
+    `after` calls it when a change may have made a task of a running campaign ready, or ended the campaign
+    (`campaigns.LOOKS`, §4.10). None = no campaign goes on by itself."""
 
     kick: Callable[[], Any] | None = None
+    holds: Callable[[str], bool] | None = None
+    campaign: Callable[..., Any] | None = None  # (campaign id or None), and `again=True` after a start · resume
 
     def __init__(self, engine, cfg, store: Callable[[], StudioStore],
                  catalog: Callable[[], list[dict]] | None = None, server_root: Path | str | None = None):
         self.engine, self.cfg, self.store = engine, cfg, store
         self._catalog, self.server_root = catalog, server_root
+        self._guard, self._deciding = threading.Lock(), {}  # task id -> the lock of its pass · revert · cancel
 
     def folder(self, task: dict) -> Path | None:
         """The folder that task's run works in: what the queue asks `RelayEngine.folder_holder` about before it
@@ -309,16 +324,76 @@ class WorkEffects(Effects):
         except (OSError, ValueError):
             pass
 
+    def _judge(self, rule: str, task: dict) -> Any:
+        """`review.gate` for that rule on the task's run as it is now: the run (None when the task has none
+        that can be read and the rule needs none — a rework, or a revert · cancel of a run the engine has no
+        more: `review.lost`), or `precondition_failed` with the gate's code."""
+        want = GATES[rule]
+        if want == "rework" and not task.get("run_id"):
+            return None
+        run = _load(self.engine, task.get("run_id"))
+        held = self.holds is not None and bool(self.holds(task["id"]))
+        stopped = run is not None and run.status != "running" and not held
+        gone = run is None and review.lost(self.engine, task.get("run_id"))
+        code, why = review.gate(self.store(), task, self.engine, run, stopped, want=(want,), lost=gone,
+                                instead=INSTEAD_OF_CANCEL if rule == "T11" else review.REWORK)[want]
+        if code:
+            raise TransitionError("precondition_failed", why, from_status=task["status"], rule=rule, failed=[code])
+        return run
+
+    def check(self, rule: str, task: dict) -> None:
+        """§4.3 '언제' of T7 · T9 · T11 (the run has stopped, the changes can be applied or reverted) and of T8
+        · T5 (the run can still go on): nothing is done here, a refusal is `precondition_failed` with one of
+        `review.CODES`."""
+        if rule in GATES:
+            self._judge(rule, task)
+
+    def before(self, rule: str, task: dict) -> str | None:
+        """T7 · T9 · T11, before step 1 (§4.5): the run is closed, then its changes are applied and committed
+        (`review.passed`) or reverted (`review.reverted`). One at a time for a task, and judged again on the
+        run as it is by then — a pass and a revert that came together do not both act. What the engine or git
+        refuses goes up as it is (ValueError -> `engine_error`); either way nothing is written.
+        A revert · cancel whose run the engine has no more (§4.3 `run_gone` 의 예외) reverts nothing and returns
+        `review.LOST` — the transition row says so after its reason. None otherwise."""
+        if rule not in PRE_EFFECT:
+            return None
+        with self._guard:
+            lock = self._deciding.setdefault(task["id"], threading.Lock())
+        with lock:
+            run = self._judge(rule, task)
+            if rule == "T7":
+                review.passed(self.engine, run, task)
+            elif run is None:  # the gate took it: nothing is there to close or to revert from
+                log.warning("studio: 작업 %s 의 런 %s 이 엔진에 없다 — 변경을 되돌리지 않고 %s 를 받는다",
+                            task["id"], task.get("run_id"), rule)
+                return review.LOST
+            else:
+                review.reverted(self.engine, run)
+        return None
+
     def after(self, what: str, row: dict, event_ids: tuple[int, ...]) -> None:
         """A task that has joined the line (`queued` · T5 · T8): the queue looks at the line (§4.6) — it starts
         or resumes the run when there is a slot; what it raises is logged, the change stands.
         T3: the session of the run just made becomes the assignee's in the task's room — the row is there
-        from T3's own transaction on —, so the task's next run is filed under it (§11.2 `session_id`)."""
+        from T3's own transaction on —, so the task's next run is filed under it (§11.2 `session_id`).
+        A change that may have made a task of a running campaign ready, or ended the campaign
+        (`campaigns.target`): that campaign — or all of them — is looked at (§4.10); what that raises is
+        logged as well. A campaign that has just gone to `running` (`CAMPAIGN_STARTED`) is looked at with
+        `again=True`: its notices are said anew (§5.9). Every other look is called with the one argument."""
         if what in JOINS_LINE and row.get("queued_at") and self.kick is not None:
             try:
                 self.kick()
             except Exception:  # noqa: BLE001 - the task is in the line; a later look takes it up
                 log.exception("studio: 작업 %s 이 줄을 섰는데 큐를 보지 못했다", row.get("id"))
+        scope = campaigns.target(what, row)
+        if scope is not None and self.campaign is not None:
+            try:
+                if what == campaigns.CAMPAIGN_STARTED:
+                    self.campaign(scope, again=True)
+                else:
+                    self.campaign(None if scope == campaigns.EVERY else scope)
+            except Exception:  # noqa: BLE001 - the change stands; the next occasion looks again
+                log.exception("studio: %s (%s) 뒤에 캠페인을 보지 못했다", what, row.get("id"))
         if what != "T3" or not row.get("run_id") or not row.get("assignee_id"):
             return
         store = self.store()
@@ -468,7 +543,8 @@ def _load(engine, run_id: str | None):
 def deliver(inbox, run_id: str | None = None) -> list[str]:
     """Step 2 of §4.7, and step 2 of §4.8 when no run is named: the decided items whose text has not reached
     their run (`delivery = 'pending'`), in the order they were closed, each fed by `Inbox.deliver`. A run that
-    is at work or `done` takes none — its item stays pending. Returns the ids that went in now. The text of an
+    is at work takes none — its item stays pending —; one that is `done` is opened again for it
+    (`runs.EngineHooks.interject`). Returns the ids that went in now. The text of an
     item may go in twice (a server that died between the note and the mark): at least once is the contract."""
     owed = [item for item in inbox.store.list_inbox(delivery="pending", run_id=run_id) if item["run_id"]]
     went_in = []
@@ -568,7 +644,13 @@ def stopped(engine, inbox, task_id: str, *, owner_stop: bool = False,
 def _stopped_runs(engine, inbox, out: dict) -> list[str]:
     """Step 1: every task with a run, in working · blocked · review. A working task out of the line whose run
     never began (`pending`) or `resumes` is given back — it joins the line after step 2 —; for the others the
-    skipped stages and the table."""
+    skipped stages and the table.
+
+    A blocked task whose run is still `running` has it cut first (`cutoff.cut`, its id goes to `out["cut"]`):
+    the wait that follows a T4 (§8.3) did not outlive the server, and no time left is worked out. The engine's
+    own recovery has closed the runs this server was advancing, so only a run another live process holds is
+    found so — `cancel` then writes `cancelled` on disk and does not reach that process. A review task's run
+    is left at work (§4.3 T6)."""
     again = []
     for status in WITH_RUN:
         for task in inbox.store.list_tasks(status=status):
@@ -576,6 +658,10 @@ def _stopped_runs(engine, inbox, out: dict) -> list[str]:
                 run = _load(engine, task["run_id"])
                 if run is None:
                     continue
+                if status == "blocked" and run.status == "running" and cutoff.cut(
+                        engine, inbox.store, task["id"], run_id=run.id):
+                    out["cut"].append(task["id"])
+                    run = _load(engine, run.id) or run
                 if status == "working" and task["queued_at"] is None and (run.status == "pending" or resumes(run)):
                     again.append(task["id"])
                     continue
@@ -657,7 +743,8 @@ def recover(engine, inbox_factory: Callable[[], Any], kick: Callable[[], Any] | 
     """§4.8: the studio recovery at the server's start, after the engine's own (`recover_interrupted` has
     closed the runs that were at work as failed, '서버 재시작…').
 
-    1. the runs of the tasks are read (`_stopped_runs`); 2. the decision texts still owed go into their runs,
+    1. the runs of the tasks are read (`_stopped_runs`) — and the run of a blocked task that is still at work
+    is cut: the wait after its T4 went with the server (studio/cutoff.py); 2. the decision texts still owed go into their runs,
     and then — not before: a task in the line is taken up at once, and a run at work takes no text — the tasks
     of step 1 whose run was cut off join the line; 3. `kick()`: the line is looked at once, with an empty book
     of slots; 4. the employees' statuses (§4.9); 5. the tasks without their item are told of in the system room
@@ -665,9 +752,10 @@ def recover(engine, inbox_factory: Callable[[], Any], kick: Callable[[], Any] | 
 
     `inbox_factory` is `api.run_inbox`; while the store is not open only step 3 is done. Never raises — the
     server must start —: a step or a task that fails is logged and the rest goes on. Returns the ids of what
-    was done: `{requeued, filed, delivered, employees, broken}` (tasks · items · items · employees · tasks;
-    `broken` is the tasks told of now, not every task that is broken)."""
-    out: dict[str, list[str]] = {REQUEUED: [], FILED: [], "delivered": [], "employees": [], "broken": []}
+    was done: `{requeued, filed, cut, delivered, employees, broken}` (tasks · items · tasks · items · employees
+    · tasks; `cut` is the blocked tasks whose run was cut, `broken` the tasks told of now, not every task that
+    is broken)."""
+    out: dict[str, list[str]] = {REQUEUED: [], FILED: [], "cut": [], "delivered": [], "employees": [], "broken": []}
 
     def step(name: str, do: Callable[[], Any]) -> None:
         try:

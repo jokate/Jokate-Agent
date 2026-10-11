@@ -308,6 +308,10 @@ class RelayEngine:
         # server name -> (run id, stage) -> its env for that stage, or None = do not attach it to this run.
         # Empty unless a layer registers one (studio: the actor token of a studio run); see _env_mcp.
         self.mcp_env: dict[str, Callable[[str, str], dict | None]] = {}
+        # (run id, stage, run_dir=, cwd=, settings=) -> what a guarded run's stage gets on top of its own
+        # ({allowed_tools, settings_path, env, claude_only}), or None = this run's call stays as it is. None
+        # unless a layer registers one (studio: design/studio/ARCHITECTURE.md §11.4). If it raises, the stage fails.
+        self.guard_stage: Callable[..., dict | None] | None = None
         self.notifier = notifier
         self.handoff_writer = handoff_writer  # lightweight model that writes the stop hand-over
         self.router = router  # (prompt, model) -> (answer, usage): picks the relay for an `auto` run
@@ -482,16 +486,20 @@ class RelayEngine:
         return names if only is None else [name for name in names if name in only]
 
     def _attached_mcp(self, run: RunState, ctx: ProjectContext | None, repo: RepoSpec | None) -> dict[str, dict]:
-        """name -> config of every project/optional MCP server this run uses (stage `mcp:` entries come on top)."""
-        if ctx is None:
-            return {}
-        attached = dict(ctx.mcp)
+        """name -> config of every project/optional MCP server this run uses (stage `mcp:` entries come on top).
+        Without a project context there is none — unless the run picked a server an `mcp_env` callback speaks
+        for (studio: an employee's turn or task run). The registry servers it picked are then attached all the
+        same; the project's and the user's own are not looked for, so a pick of those is an `mcp_missing`."""
+        if ctx is None and not any(name in self.mcp_env for name in run.mcp or []):
+            return {}  # a run that picked no such server (dashboard · CLI · campaign): no MCP, as it was
+        attached = dict(ctx.mcp) if ctx is not None else {}
+        optional = ctx.optional_mcp if ctx is not None else {}
         for name in (run.mcp if run.mcp is not None else (repo.mcp if repo else [])):
             if name in attached or name in self.mcp_registry:
                 if name in self.mcp_registry and name not in attached:
                     attached[name] = self.mcp_registry[name]
-            elif name in ctx.optional_mcp:
-                attached[name] = ctx.optional_mcp[name]["config"]
+            elif name in optional:
+                attached[name] = optional[name]["config"]
             else:
                 self._event(run, "-", "mcp_missing", server=name)
         if run.mcp_only is not None:  # the same narrowing as _run_mcp_names; a stage's own `mcp:` is not narrowed
@@ -907,11 +915,23 @@ class RelayEngine:
         except OSError:
             pass
 
+    # () -> the ids of the runs whose workspace outlives the retention period. None unless a layer registers one
+    # (studio: the runs of the tasks under review, design/studio/ARCHITECTURE.md §4.3 T9). If it raises, nothing
+    # expires in that round: a snapshot somebody may still need is not deleted on a guess.
+    held_runs: Callable[[], set[str]] | None = None
+
     def cleanup_workspaces(self, retention_days: float = 7) -> dict:
         """Free disk: workspaces with nothing left to decide go now; undecided ones (patch not applied,
-        failed/cancelled runs that could be resumed) go after retention_days. result.patch is always kept."""
+        failed/cancelled runs that could be resumed) go after retention_days — unless `held_runs` names the
+        run. result.patch is always kept."""
         cutoff = time.time() - retention_days * 86400
         cleaned, freed = [], 0
+        held: set[str] | None = set()
+        if self.held_runs is not None:
+            try:
+                held = set(self.held_runs())
+            except Exception:  # noqa: BLE001 - nobody can say which runs are held: none expires this time
+                held = None
         uploads = self.runs_dir / "uploads"  # staged attachments; a run keeps its own copy
         if uploads.is_dir():
             for folder in uploads.iterdir():
@@ -931,6 +951,8 @@ class RelayEngine:
                 continue
             if not (decided or old):
                 continue
+            if not decided and (held is None or run.id in held):
+                continue  # only its age would take it, and it is held (or nobody could say)
             ws = self.workspace(run)
             try:
                 freed += ws.cleanup()
@@ -1492,6 +1514,13 @@ class RelayEngine:
             return model
         return self.providers.get(provider).resolve_model(model)
 
+    def _hookable(self, name: str) -> bool:
+        """Does that provider run Claude Code — the one runner that takes `--settings`, and so the guard hook?
+        `mock` passes too: it is the tests' and calls no tool. `is_claude` below is wider (API runners)."""
+        if self.providers is not None and name in self.providers.specs:
+            return self.providers.get(name).kind in ("claude_cli", "mock")
+        return name in ("claude", "mock")
+
     def _run_stage(self, run: RunState, stage: StageSpec, call: StageCall, primary: str | None = None):
         """Try the primary provider (the run's pick or the relay's), then alternates."""
         primary = primary or stage.primary
@@ -1503,7 +1532,12 @@ class RelayEngine:
         if self.providers is not None:
             # alternates are only fallbacks: which of them are unusable matters only if the primary fails
             options, skipped = self.providers.candidates(primary, options[1:], stage.writes)
-        unusable = "; ".join(f"{s['provider']}: {s['reason']}" for s in skipped)
+        if call.claude_only:  # a studio run: no runner the guard hook cannot be hung on (ARCHITECTURE.md §10.8 의 9)
+            kept = [o for o in options if self._hookable(o["provider"])]
+            skipped = skipped + [{**o, "reason": "가드 훅을 걸 수 없는 AI (studio 런은 Claude Code 만 쓴다)"}
+                                 for o in options if o not in kept]
+            options = kept
+        unusable ="; ".join(f"{s['provider']}: {s['reason']}" for s in skipped)
         if not options:
             raise RunnerError("사용 가능한 AI 가 없습니다" + (f" ({unusable})" if unusable else ""), "unavailable")
 
@@ -1687,9 +1721,9 @@ class RelayEngine:
                 run.stage_sessions[stage.name] = session_id
                 self.save(run)  # known before the AI starts, so a cancel/crash can continue this conversation
 
-            # Cheap first pass; spend more only when this stage is being redone from scratch.
-            escalate = redo and not continuing and run.approval != "auto"  # auto: finish the work, don't switch to a
-            effort = stage.retry_effort if escalate and stage.retry_effort else stage.effort  # model that burns the budget
+            reopened = bool(resume_sid) and resume_sid == run.done_sessions.get(stage.name)  # `reopen` handed it back
+            escalate = redo and not (continuing or reopened) and run.approval != "auto"  # spend more only on a redo from
+            effort = stage.retry_effort if escalate and stage.retry_effort else stage.effort  # scratch, never under auto
             choice = run.stage_models.get(stage.name) or {}
             if choice.get("effort"):
                 effort = choice["effort"]  # the user's pick, also on retries
@@ -1762,6 +1796,19 @@ class RelayEngine:
                 session_id=None if resume_sid else session_id,
                 resume_session=resume_sid,
             )
+            if self.guard_stage is not None:  # nothing registered (CLI, tests): the call stays as it was
+                try:
+                    guard = self.guard_stage(run.id, stage.name, run_dir=self._dir(run.id), cwd=Path(cwd),
+                                             settings=hook_settings)
+                except Exception as e:  # noqa: BLE001 - closed side: a guarded run does not go on without its guard
+                    return self._fail(run, stage.name, f"가드를 걸지 못했습니다 — {type(e).__name__}: {e}"[:300])
+                if guard:  # pre-approvals, the hook's settings file, where the hook asks, Claude Code only
+                    call = replace(
+                        call, claude_only=bool(guard.get("claude_only")),
+                        allowed_tools=call.allowed_tools + [t for t in guard.get("allowed_tools") or []
+                                                            if t not in call.allowed_tools],
+                        env={**call.env, **(guard.get("env") or {})},
+                        settings_path=guard.get("settings_path") or call.settings_path)
             if resume_sid:
                 # continue the same conversation: only what changed, not the whole baton again
                 fresh_prompt = call.prompt
@@ -1914,3 +1961,58 @@ class RelayEngine:
                 self.after_advance(run_id)
             except Exception:  # noqa: BLE001
                 pass
+
+    # --- what a final review asks of a run that has ended (studio/review.py, S-12) ----------------------------
+    # Down here for the same reason: design/studio/ARCHITECTURE.md §4.7 (`done` 행) · §11.2.
+    def reopen(self, run_id: str) -> RunState:
+        """A `done` run goes on: the work is sent back by whoever reviewed it after the relay (a rework), with
+        the conversation it ended in. The run is `pending` again at the stage a reviewer of the relay sends work
+        back to — from the end, the first stage some stage names as `on_retry`; the last stage when none does —
+        and that stage continues the conversation of its last finished attempt (`done_sessions`), so
+        `advance(resume=True)` tells it with `stage_resumed`. Nothing is run here.
+
+        ValueError: the run is not `done`, a thread still holds it, or its changes are decided already
+        (`applied` · `discarded` · `rolled_back`) — the engine collects no new changes of such a run."""
+        if run_id in self._cancel:
+            raise ValueError(f"run {run_id} is still advancing")
+        run = self.load(run_id)
+        if run.status != "done":
+            raise ValueError(f"run {run_id} is {run.status}, not done")
+        if run.changes_status in ("applied", "discarded", "rolled_back"):
+            raise ValueError(f"changes already {run.changes_status}")
+        try:
+            spec, _ = RelaySpec.load(Path(run.relay))
+        except (OSError, yaml.YAMLError) as e:
+            raise ValueError(f"릴레이를 읽지 못했습니다: {e}") from e
+        names = [s.name for s in spec.stages]
+        if not names:
+            raise ValueError("릴레이에 단계가 없습니다")
+        back = next((s.on_retry for s in reversed(spec.stages) if s.on_retry in names), names[-1])
+        run.index, run.status, run.error, run.retries = names.index(back), "pending", None, {}
+        session = run.done_sessions.get(back)
+        if session:
+            run.stage_sessions[back] = session
+        if run.changes_status == "none":
+            run.workspace_cleaned = False  # it was cleaned when the run ended with nothing changed: prepared anew
+        self._event(run, "-", "run_reopened", to=back, session=session)
+        self.save(run)
+        return run
+
+    def keep_changes(self, run_id: str) -> RunState:
+        """The changes of an `inplace` run are decided as "they stay": `changes_status` becomes `applied` and
+        the snapshot (or journal) goes — after this the run is neither rolled back nor reopened. The folder is
+        not touched. ValueError unless the run is `done` · `cancelled`, `inplace` and `ready`."""
+        run = self.load(run_id)
+        if run.status not in ("done", "cancelled"):
+            raise ValueError(f"실행이 끝난 뒤에만 가능합니다 (현재: {run.status})")
+        if run.workspace_mode != "inplace" or run.changes_status != "ready":
+            raise ValueError(f"keep is for the undecided changes of an inplace run "
+                             f"({run.workspace_mode}, {run.changes_status})")
+        ws = self.workspace(run)
+        if ws is not None and ws.prepared:
+            ws.cleanup()
+        run.changes_status, run.workspace_cleaned = "applied", True
+        self._event(run, "-", "changes_applied", files=(run.changes or {}).get("files", 0), kept=True)
+        self.save(run)
+        gc_shadow(self.runs_dir / "shadow")
+        return run

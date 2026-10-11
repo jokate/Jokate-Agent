@@ -259,9 +259,9 @@ def test_disk_is_asked_of_the_nearest_folder_that_exists(tmp_path):
 
 
 def test_limits_come_from_the_config(tmp_path):
-    cfg = SimpleNamespace(runs_dir=tmp_path, studio_max_runs=2)
+    cfg = SimpleNamespace(runs_dir=tmp_path, studio_max_runs=2, studio_max_exchanges=20)
     assert machine.report(cfg, [], fakes())["limits"] == {"max_concurrent_runs": 2, "max_exchanges": 20}
-    cfg.studio_max_exchanges = 7  # the field S-9 adds (§3.16; its name is provisional)
+    cfg.studio_max_exchanges = 7  # `Config.studio_max_exchanges` (§3.16 · §4.6), read at every report
     assert machine.report(cfg, [], fakes())["limits"] == {"max_concurrent_runs": 2, "max_exchanges": 7}
 
 
@@ -284,7 +284,8 @@ def test_get_machine_answers_the_eleven_fields_of_the_document(served, monkeypat
                                 "uproject": "D:\\Game\\Game.uproject"}]
     assert list(body["disk"]) == ["path", "free_bytes", "total_bytes"]
     assert body["disk"]["free_bytes"] == 600 and body["disk"]["total_bytes"] == 1000
-    assert body["limits"] == {"max_concurrent_runs": served.cfg.studio_max_runs, "max_exchanges": 20}
+    assert body["limits"] == {"max_concurrent_runs": served.cfg.studio_max_runs,
+                              "max_exchanges": served.cfg.studio_max_exchanges}
     assert TestClient(served.app).get("/studio/machine").status_code == 401  # the owner's path, like the rest
 
 
