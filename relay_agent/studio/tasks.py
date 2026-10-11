@@ -245,6 +245,12 @@ class Effects:
         """A gate without side effects, after the DB conditions: harness gate (T6), "the run has stopped" and
         "the changes can be reverted" (T7 · T9 · T11), "already applied" (T8)."""
 
+    def check_start(self, task: dict, stage_models: dict | None = None) -> list[dict]:
+        """A `start` request that asks to be looked at (`request_start(vet=True)`, §9.5 '두 번 본다'): what
+        stands in the way of this task's run with that override — `[{code, stage, message}]`, [] when nothing
+        does. `stage_models` None: the override the task keeps. It never raises."""
+        return []
+
     def before(self, rule: str, task: dict) -> None:
         """T7 · T9 · T11: run cleanup, then apply + commit (T7) or rollback (T9 · T11). Raising = no transition."""
 
@@ -381,6 +387,7 @@ class TaskMachine:
         held = {r["status"] for r in tx.rows(
             "SELECT DISTINCT status FROM tasks WHERE assignee_id = ? AND status IN ('working', 'blocked')",
             (employee_id,))}
+        # the same rules as employees.derive_status — written out here: this module imports nothing but the store
         status = "working" if "working" in held else "blocked" if "blocked" in held else "idle"
         if status == employee["status"]:
             return None
@@ -828,9 +835,15 @@ class TaskMachine:
         self.effects.after(kind, fresh, ids)
         return Outcome(task=fresh, rule=None, event=event, stream_ids=ids)
 
-    def request_start(self, task_id: str, actor: Actor, *, reason: str = "") -> Outcome:
+    def request_start(self, task_id: str, actor: Actor, *, reason: str = "", stage_models: dict | None = None,
+                      vet: bool = False) -> Outcome:
         """The trigger of T3 (§4.3): check the request-time conditions and join the line. The task stays in
-        backlog; the queue (S-8) does T3 when it has a slot."""
+        backlog; the queue (studio/queue.py) does T3 when it has a slot.
+
+        stage_models  the override of this start (§6.4 · §9.5 의 3): written to `stage_models_json` together with
+                 `queued_at` — `{}` clears the one the task kept, None leaves it as it is.
+        vet      also ask `Effects.check_start` (§9.5 '두 번 본다'): what it finds is `precondition_failed` with
+                 its codes in `failed`, and nothing is written. The REST `start` asks; without it T3 alone looks."""
         task = self._task(task_id)
         frm = task["status"]
         cell = classify(frm, "working")
@@ -861,8 +874,19 @@ class TaskMachine:
                 problems.append("선행 작업이 채워지지 않았다")
         if problems:
             raise self._unmet(problems, task, "working", "T3")
-        return self._change(task, actor, "queued", reason, cols={"queued_at": now()},
-                            guard=" AND queued_at IS NULL")
+        if vet:
+            found = self.effects.check_start(task, stage_models)
+            if found:
+                told = " / ".join(str(p.get("message") or p.get("code")) for p in found)
+                raise TransitionError("precondition_failed", f"이 설정으로는 런을 만들 수 없다: {told}",
+                                      from_status=frm, to_status="working", rule="T3",
+                                      failed=list(dict.fromkeys(str(p.get("code")) for p in found)))
+        cols: dict[str, Any] = {"queued_at": now()}
+        detail = None
+        if stage_models is not None:  # the column is NOT NULL: no override is '{}' (§3.10)
+            cols["stage_models_json"] = json.dumps(stage_models, ensure_ascii=False)
+            detail = {"stage_models": stage_models}
+        return self._change(task, actor, "queued", reason, cols=cols, guard=" AND queued_at IS NULL", detail=detail)
 
     def unqueue(self, task_id: str, actor: Actor, *, reason: str = "") -> Outcome:
         """Leave the line without changing state: the owner takes a start request back, or the queue starts
@@ -874,6 +898,26 @@ class TaskMachine:
             raise self._unmet(["줄 서 있지 않다"], task, None, None)
         return self._change(task, actor, "unqueued", reason, cols={"queued_at": None},
                             guard=" AND queued_at IS NOT NULL", detail={"queued_at": task["queued_at"]})
+
+    def requeue(self, task_id: str, actor: Actor, *, reason: str = "") -> Outcome:
+        """Join the line again without changing state: a working task whose run was cut off and goes on by
+        itself (§4.7 '스스로 다시 잇는다', §4.8 의 1). Only the system does it; the queue takes the run up when it
+        has a slot. `Effects.after` hears `queued`, as for a start request."""
+        task = self._task(task_id)
+        if actor.kind != "system":
+            raise TransitionError("actor_not_allowed", "끊긴 런을 다시 줄에 세우는 것은 system 만 한다",
+                                  from_status=task["status"])
+        problems = []
+        if task["status"] != "working":
+            problems.append("working 작업만 다시 줄에 세운다")
+        if task["queued_at"] is not None:
+            problems.append("이미 줄 서 있다")
+        if not task["run_id"]:
+            problems.append("이을 런이 없다")
+        if problems:
+            raise self._unmet(problems, task, None, None)
+        return self._change(task, actor, "queued", reason or "끊긴 런을 다시 잇는다", cols={"queued_at": now()},
+                            guard=" AND queued_at IS NULL", detail={"resume": True})
 
     def assign(self, task_id: str, actor: Actor, employee_id: str | None, *, reason: str = "") -> Outcome:
         """Set or clear the assignee. Only in backlog (§3.10), and not while the task is in the line — the

@@ -11,6 +11,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from relay_agent.studio import Actor, Effects, Hooks, Inbox, InboxError, TaskMachine, TransitionError, api, inbox
+from relay_agent.studio import employees
 from relay_agent.studio.store import now
 from relay_agent.studio.tasks import BLOCKING_KINDS, OWNER, SYSTEM
 
@@ -36,7 +37,7 @@ PAYLOAD = {
 }
 BY_SYSTEM = ("design_approval", "budget", "risky_command")  # §4.3 T4: the server files these
 DRAFT = {"name": "서연", "department_id": "program", "persona_md": "# 서연\n", "guide_md": "# 지침\n",
-         "employee_yaml": "department: program\n"}
+         "employee_yaml": "version: 1\ndepartment: program\n"}
 
 
 class Fx(Effects):
@@ -101,7 +102,7 @@ class World:
         self.store = s = api.get_store()
         self.fx, self.hk, self.dir = fx, hk, server.cfg.studio_dir
         self.m = TaskMachine(s, fx)
-        self.box = Inbox(s, self.m, hk, studio_dir=self.dir)
+        self.box = Inbox(s, self.m, hk, studio_dir=self.dir, checks=employees.context(server.cfg))
         self.pid = s.create_project("게임", "D:/game", "game")["id"]
         self.emp, self.dm = self.staff("민수")
         self.me = Actor.employee(self.emp)
@@ -285,7 +286,7 @@ def test_routes_are_the_s5_rows_of_the_inbox_table():
 
 
 def test_install_hands_the_hooks_to_the_requests(world, monkeypatch):
-    for name in ("_cfg", "_effects", "_liveness", "_hooks"):
+    for name in ("_cfg", "_effects", "_liveness", "_hooks", "_workdir", "_repos"):
         monkeypatch.setattr(api, name, getattr(api, name))  # install() sets them: put back afterwards
     hk = Hk()
     api.install(FastAPI(), api._cfg, world.fx, hooks=hk)
@@ -773,7 +774,7 @@ def test_an_approved_hire_makes_the_employee(world):
     folder = world.dir / "employees" / employee["id"]
     assert employee["department_id"] == "program" and employee["project_id"] is None
     assert {p.name: p.read_bytes().decode("utf-8") for p in folder.iterdir()} == {
-        "PERSONA.md": "# 서연\n", "GUIDE.md": "# 지침\n", "MEMORY.md": "", "employee.yaml": "department: program\n"}
+        "PERSONA.md": "# 서연\n", "GUIDE.md": "# 지침\n", "MEMORY.md": "", "employee.yaml": DRAFT["employee_yaml"]}
     dm, = world.store.list_rooms(kind="dm", employee_id=employee["id"])
     assert [m["employee_id"] for m in world.store.list_room_members(room_id=dm["id"])] == [employee["id"]]
     assert employee["id"] in [m["employee_id"] for m in world.store.list_room_members(room_id="room_dep_program")]
@@ -828,7 +829,8 @@ def test_a_hire_decided_in_between_is_already_decided(world, monkeypatch):
 def test_a_hire_overtaken_by_another_approval_is_refused_like_the_first_check(world, monkeypatch):
     hr, _ = world.hr()
     named = world.hire()
-    successor = world.hire(draft_id="drf_hr", draft={**DRAFT, "name": "새 인사", "department_id": "hr"})
+    successor = world.hire(draft_id="drf_hr", draft={**DRAFT, "name": "새 인사", "department_id": "hr",
+                                                     "employee_yaml": "version: 1\ndepartment: hr\n"})
     world.store.update_employee(hr, retired_at=now())  # HR has left: the part takes one successor
     real, between = world.box._name_taken, []
 

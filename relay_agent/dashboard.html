@@ -394,6 +394,7 @@ textarea.field { resize: vertical; min-height: 84px; }
         <div class="sub-actions">
           <button type="button" class="btn btn-ghost" id="addRepo">＋ 저장소 등록</button>
           <button type="button" class="btn btn-ghost" id="ccImport">⤵ Claude Code 가져오기</button>
+          <button type="button" class="btn btn-ghost" id="pairPhone">📱 폰 연결</button>
         </div>
       </form>
     </div>
@@ -491,6 +492,7 @@ async function api(path, opts = {}, retried = false) {
   if (res.status === 401 && !retried) {
     const sent = TOKEN;
     const entered = await askToken(sent ? "저장된 토큰이 서버의 토큰과 다릅니다. 다시 입력하세요 (대소문자 구분)"
+                                        : path.startsWith("/studio/") ? "스튜디오 기능(폰 연결 등)은 이 PC 에서도 서버의 토큰을 묻습니다"
                                         : "다른 기기에서 접속하려면 서버의 토큰이 필요합니다");
     if (entered) {
       TOKEN = entered;
@@ -1504,6 +1506,34 @@ $("addRepo").onclick = () => {
       toast(`📁 ${f.name} 등록`); bg.remove(); await loadRepos(); $("repoSelect").value = f.name;
     } catch (e) { toast(e.message, true); }
   };
+};
+
+/* phone pairing (studio M-2): a one-time code and the address the phone reaches this PC at. No QR library is
+   loaded here, so both are shown as text — the app takes them typed in, or the JSON line pasted. */
+$("pairPhone").onclick = async () => {
+  let p;
+  try { p = await api("/studio/devices/pairing", { method: "POST" }); }
+  catch (e) { return toast(e.message, true); }
+  const onlyHere = /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:|\/|$)/.test(p.qr.url);
+  const mono = "font-family:ui-monospace,Consolas,monospace";
+  const bg = document.createElement("div");
+  bg.className = "modal-bg";
+  bg.innerHTML = `<div class="glass modal" style="width:min(520px, calc(100vw - 32px))"><h3>📱 폰 연결</h3>
+    <div class="sub" style="color:var(--muted);margin-bottom:12px">카태 스튜디오 앱의 컴퓨터 연결 화면에 아래 주소와 코드를 넣으세요.
+      코드는 한 번만 쓸 수 있고 ${esc(p.expires_at.slice(11, 19))} (서버 PC 시각)에 만료됩니다.</div>
+    ${onlyHere ? `<div class="sub" style="margin-bottom:12px">⚠ 이 주소는 이 PC 에서만 열립니다. 서버 PC 에서
+      <code>uv run relay remote on --tailscale</code> 을 실행하고 서버를 다시 시작한 뒤 코드를 새로 받으세요.</div>` : ""}
+    <div class="form-grid">
+      <label>서버 주소<input class="field" readonly value="${esc(p.qr.url)}" style="${mono}"></label>
+      <label>페어링 코드<input class="field" readonly value="${esc(p.code)}" style="${mono}"></label>
+      <label>한 줄로 붙여넣기 (QR 에 담길 내용)<textarea class="field" readonly style="min-height:64px;${mono}">${esc(JSON.stringify(p.qr))}</textarea></label>
+      <div class="row" style="display:flex;gap:8px;justify-content:flex-end">
+        <button type="button" class="btn btn-ghost" id="ppClose">닫기</button></div>
+    </div></div>`;
+  document.body.appendChild(bg);
+  bg.querySelectorAll("[readonly]").forEach((el) => { el.onfocus = () => el.select(); });
+  bg.querySelector("#ppClose").onclick = () => bg.remove();
+  bg.onclick = (e) => { if (e.target === bg) bg.remove(); };
 };
 
 /* resizable, collapsible layout (remembered per browser) */

@@ -266,7 +266,8 @@ def test_header_or_first_message_opens_the_stream(world):
         assert len(ws.hub) == 1
     assert list(hello) == ["type", "last_id", "now", "machine"] and hello["type"] == "hello"
     assert hello["last_id"] == 0 and datetime.fromisoformat(hello["now"])
-    assert list(hello["machine"]) == ["name"] and isinstance(hello["machine"]["name"], str)
+    assert list(hello["machine"]) == ["name", "server_version", "schema_version", "utc_offset_minutes"]  # §7.1
+    assert hello["machine"] == api.machine_brief() and isinstance(hello["machine"]["name"], str)
     for client in (world.local, world.remote):  # a browser: the token as the first message
         with connect(client) as sock:
             sock.send_json({"type": "auth", "token": TOKEN})

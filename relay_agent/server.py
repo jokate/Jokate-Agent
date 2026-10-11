@@ -22,13 +22,16 @@ from .campaign import CampaignRunner, to_dict as campaign_dict
 from .config import Config, build_engine
 from .pipeline import RelaySpec, RunState
 from .runners import RunnerError, probe_claude_limits
-from .studio import api as studio_api, runs as studio_runs, ws as studio_ws
+from .studio import api as studio_api, chat as studio_chat, runs as studio_runs, work as studio_work, ws as studio_ws
 
 cfg = Config.load()
 engine = build_engine(cfg)
 campaigns = CampaignRunner(engine, cfg.relays_dir)
 app = FastAPI(title="Agent 카태")
-studio_api.install(app, cfg, liveness=lambda run_id: engine.liveness(run_id))  # /studio/* (ARCHITECTURE.md §6)
+studio_api.install(app, cfg, liveness=lambda run_id: engine.liveness(run_id),  # /studio/* (ARCHITECTURE.md §6)
+                   workdir=lambda run_id: studio_runs.workdir(engine, run_id),
+                   repos=lambda: engine.repos)  # a function: _reload_repos replaces the object
+engine.mcp_env["studio"] = studio_api.mcp_env  # §8.2: the actor token of a studio run's stage; None = not attached
 DASHBOARD = Path(__file__).with_name("dashboard.html")
 
 
@@ -920,8 +923,11 @@ def _released(run: RunState) -> RunState:
 
 
 # A run that stops for approval or at a budget files an inbox item (the sink sits beside the toast and hears the
-# same events), and the decision of an item without a task comes back to this engine.
-studio_api.use_hooks(studio_runs.attach(engine, studio_api.run_inbox, advance=_advance_bg))
+# same events), and the decision of an item without a task comes back to this engine. The chat turns (S-7; §6.6 ·
+# §9.5) go the same way: the owner's message in a 1:1 room and a decision that asks for one start a turn here.
+chat_turns = studio_chat.ChatTurns(engine, cfg)
+studio_api.use_hooks(studio_runs.attach(engine, studio_api.run_inbox, advance=_advance_bg,
+                                        chat=chat_turns.request))
 
 
 # The stops nobody heard — a run the CLI advanced, or one that stopped while the studio store was not open — are
@@ -930,3 +936,51 @@ studio_api.use_hooks(studio_runs.attach(engine, studio_api.run_inbox, advance=_a
 @app.on_event("startup")
 def file_waiting_runs() -> None:
     studio_runs.file_waiting(engine, studio_api.run_inbox)
+
+
+# The seed employee (S-7; design/studio/ARCHITECTURE.md §2.2 · §3.15): made once, in a studio DB that has no
+# employee at all. A startup function of its own down here, for the reasons given above.
+@app.on_event("startup")
+def seed_studio_employee() -> None:
+    studio_api.seed_employee()
+
+
+# Task runs (S-8, part 1; design/studio/ARCHITECTURE.md §9.5 · §11.2): what T3 makes a task's run with on this
+# engine, and the models `GET /studio/models` lists — this engine's registry, which knows the benched ones. Down
+# here for the reasons given above.
+task_runs = studio_work.WorkEffects(engine, cfg, studio_api.get_store)
+studio_api.use_effects(task_runs, models=task_runs.catalog)
+
+
+# The line and its slots (S-8, part 2; design/studio/ARCHITECTURE.md §4.6 · §4.7 · §6.4): a task that joins the
+# line reaches the queue through `task_runs.kick`, `stop` through `use_queue`; each slot advances its run on a
+# thread of its own. The import is down here too: the lines above are cited by number.
+from .studio import queue as studio_queue  # noqa: E402
+
+task_queue = studio_queue.TaskQueue(engine, task_runs, studio_api.run_inbox, limit=lambda: cfg.studio_max_runs)
+task_runs.kick = task_queue.kick
+studio_api.use_queue(task_queue)
+
+
+# The studio recovery at the server's start (S-8, part 3; design/studio/ARCHITECTURE.md §4.8), after the engine's
+# own (recover() above) and after the stops nobody heard were filed: the runs a stop cut off stand in the line
+# again, the decision texts still owed go into their runs, the line is looked at once — §4.6 '서버가 시작했을 때':
+# the tasks that stood in it when the server stopped; the book of slots starts empty —, the employees' statuses
+# are worked out anew and a task without its inbox item is told of in the system room. It never raises. A startup
+# function of its own, registered last.
+@app.on_event("startup")
+def start_task_queue() -> None:
+    studio_work.recover(engine, studio_api.run_inbox, kick=task_queue.kick)
+
+
+# This computer (M-1; design/studio/ARCHITECTURE.md §6.4 · §7.1): `GET /studio/machine` and the stream's `hello`
+# get from here what only this process knows — the checks of `relay doctor`, the answer of `GET /providers` above
+# and the hash of the code that was loaded. The registry, the editors and the disk they read themselves
+# (studio/machine.py). Down here for the reasons given above.
+def _doctor_checks() -> list[dict]:
+    from .cli import doctor_checks  # at the call: the terminal's entry point is not needed to serve
+
+    return doctor_checks(cfg)
+
+
+studio_api.use_machine(doctor=_doctor_checks, providers=list_providers, version=lambda: RUNNING_CODE)

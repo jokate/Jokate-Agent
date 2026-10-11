@@ -167,7 +167,9 @@ def test_actor_paths_answer_with_their_own_codes(world):
 
 
 def test_only_post_pair_passes_without_a_token(world):
-    assert world.remote.post("/studio/devices/pair", json={}).status_code == 404  # let through; the route is M-2's
+    # let through without a token: what is checked there is the code (M-2, tests/test_studio_devices.py)
+    refused(world.remote.post("/studio/devices/pair", json={"code": "x", "name": "폰"}), 400, "pairing_invalid")
+    assert world.remote.post("/studio/devices/pair", json={}).status_code == 422
     refused(world.remote.get("/studio/devices/pair"), 401, "unauthorized")
     refused(world.remote.post("/studio/devices/pairing"), 401, "unauthorized")
 
@@ -219,12 +221,13 @@ def test_routes_are_the_s3_rows_of_the_document():
     for line in doc_section("**프로젝트 · 에디터 · 생성 작업**", "**캠페인 · 작업**").splitlines():
         cells = [c.strip() for c in line.strip().strip("|").split("|")]
         row = re.fullmatch(r"`(GET|POST|PATCH|PUT|DELETE) (/studio/[^`]+)`", cells[0]) if len(cells) == 5 else None
-        if row and "S-3" in cells[4]:
+        if row and re.search(r"S-3|M-6", cells[4]):
             doc.add((row.group(1), row.group(2)))
     scope = ("/studio/projects", "/studio/jobs", "/studio/departments", "/studio/employees", "/studio/rooms",
              "/studio/attachments")
     built = {(method, r.path) for r in api.router.routes for method in r.methods if r.path.startswith(scope)}
-    assert len(doc) == 14 and built == doc  # nothing of M-* · H-* · S-7 and later is built here
+    assert ("POST", "/studio/projects") in doc  # M-6: bringing in a project (tests/test_studio_importer.py)
+    assert len(doc) == 15 and built == doc  # S-3's 14 and M-6's one; nothing else of M-* · H-* · S-7 and later
 
 
 def test_studio_error_carries_the_fields_of_its_code():

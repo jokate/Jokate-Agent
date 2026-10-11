@@ -54,6 +54,10 @@ class Config(BaseModel):
     handoff_model: str = "haiku"  # writes the hand-over when a run stops ("" = no AI, engine-built only)
     # Before a run's first stage, check that the MCP servers it attaches answer (editor closed -> stop, no cost).
     mcp_check: bool = True
+    # Katae Studio: the ceilings of an employee whose file and part name none (ARCHITECTURE.md §9.5 의 6).
+    studio_model_cap: str | None = None   # haiku | sonnet | opus | fable
+    studio_effort_cap: str | None = None  # low | medium | high | xhigh | max
+    studio_max_runs: int = 3  # Katae Studio: task runs at work at once, over all projects (ARCHITECTURE.md §4.6)
 
     @classmethod
     def load(cls, path: Path | None = None) -> "Config":
@@ -89,6 +93,8 @@ class Config(BaseModel):
             "docs_read": {"command": py, "args": [str(ROOT / "mcp_servers" / "docs_read.py"), str(self.docs_root)]},
             "handoff": {"command": py, "args": [str(ROOT / "mcp_servers" / "handoff.py"), str(self.runs_dir)]},
             "digest": {"command": py, "args": [str(ROOT / "mcp_servers" / "digest.py"), str(self.runs_dir / "digest-cache")]},
+            # its env (server address, actor token) is filled per stage by RelayEngine.mcp_env, for studio runs only
+            "studio": {"command": py, "args": [str(ROOT / "mcp_servers" / "studio.py")]},
         }
         return builtin | self.mcp_servers
 

@@ -119,10 +119,18 @@ CHECK 제약과 API · WS · MCP 가 같은 값을 쓴다.
 | `relay_agent/studio/runs.py` | 엔진 런의 정지(승인 대기 · 예산 초과)를 결재로 올리고, 작업 없는 결재의 결정을 엔진에 잇는다 (§5.8) | S-5 | 잠정 |
 | `relay_agent/studio/api.py` | `/studio/*` REST (§6) | S-3 | 잠정 |
 | `relay_agent/studio/ws.py` | `WS /studio/ws` (§7) | S-4 | 잠정 |
-| `relay_agent/studio/employees.py` | 직원 폴더 읽기 · 쓰기, 상태 유도 (§4.9, §9) | S-7 | 잠정 |
-| `relay_agent/studio/chat.py` | 채팅 턴 실행 | S-7 | 잠정 |
-| `relay_agent/studio/queue.py` | 슬롯과 대기 줄 (§4.6) | S-8 | 잠정 |
-| `relay_agent/studio/work.py` | 작업 런 시작 · 재개 · 종료 처리 (§4.7) | S-8, S-9 | 잠정 |
+| `relay_agent/studio/sat.py` | 행위자 토큰 `sat1.` 의 발급과 서명 검사 (§8.2 의 검사 1) | S-6 | 확정 |
+| `relay_agent/studio/tools.py` | studio MCP 도구의 서버 쪽 본체 — `POST /studio/mcp/<도구>` 가 부른다 (§8.3–§8.5) | S-6 | 확정 |
+| `relay_agent/studio/files.py` | 첨부가 되는 파일 — 한도 · 이름 정리 · 복사, 직원이 넘긴 경로의 검사 (§6.6) | S-6 | 확정 |
+| `relay_agent/studio/drafts.py` | 인사의 초안 `runs/studio/drafts/<id>.json` 과 `problems[]` (§8.4) | S-6 | 확정 |
+| `relay_agent/studio/employees.py` | 직원 폴더 읽기 · 쓰기, `employee.yaml` 검사와 값 읽기, 프롬프트 조립, 상태 유도, 시드 직원 (§3.15, §4.9, §9) | S-7 | 확정 |
+| `relay_agent/studio/chat.py` | 채팅 턴 실행 — `ChatTurns`: 값 읽기 · 런 만들기 · 대화 잇기 · 새 대화로 넘기기 · 답 저장 (§3.7, §6.6, §9.5) | S-7 | 확정 |
+| `relay_agent/studio/queue.py` | 슬롯과 대기 줄 (§4.6) | S-8 | 확정 |
+| `relay_agent/studio/work.py` | 작업 런 시작 · 재개 · 종료 처리 (§4.7) | S-8, S-9 | 확정 |
+| `relay_agent/studio/machine.py` | 컴퓨터 진단 — 엔진 레지스트리 · 실행 중 에디터 · 디스크 · 한도를 읽어 `GET /studio/machine` 의 응답과 `hello` 의 `machine` 을 만든다 (§6.4, §7.1) | M-1 | 확정 |
+| `relay_agent/studio/devices.py` | 기기 페어링 — 메모리의 1회용 코드 장부(`Pairings`), 기기 토큰 발급, 폰에 알려 줄 서버 주소 고르기(`reach_url`). 라우트 넷은 `api.py` 에 있다 (§6.5, §3.14) | M-2 | 확정 |
+| `relay_agent/studio/importer.py` | 기존 프로젝트 가져오기 — UE 프로젝트 폴더를 읽기만 해서 `.uproject` · 엔진 · MCP 포트 · 하네스 · git 을 알아내 `detected` 를 만든다(`detect`). 등록하는 라우트 `POST /studio/projects` 는 `api.py` 의 `import_project` 다 (§6.4, §3.3) | M-6 | 확정 |
+| `relay_agent/studio/seed/` | 시드 직원의 파일 — `PERSONA.md` · `GUIDE.md` · `employee.yaml`. 다루는 코드는 `employees.py` 다 | S-7 | 확정 |
 | `relay_agent/studio/review.py` | 검수 패키지, 통과 · 재작업 · 되돌리기 | S-12 | 잠정 |
 | `relay_agent/studio/stats.py` | 진척 집계, 일일 보고 | S-13 | 잠정 |
 | `relay_agent/studio/push.py` | FCM 발송 | N-1 | 잠정 |
@@ -134,7 +142,9 @@ CHECK 제약과 API · WS · MCP 가 같은 값을 쓴다.
 | `mcp_servers/studio.py` | studio MCP 서버 (§8). 기존 `mcp_servers/` 의 `katae.py` · `handoff.py` 옆 | S-6 |
 | `relay_agent/studio_guard.py` | PreToolUse 훅 (§10). 위치 잠정 — 기존 `relay_agent/backup_hook.py` 와 같은 층 | S-10 |
 | `relays/employee-chat.yaml` | 채팅용 단일 단계 릴레이 | S-7 |
+| `prompts/employee-chat.md` | 채팅 릴레이의 단계 프롬프트 — `relays/employee-chat.yaml` 의 `prompt` 가 가리킨다 | S-7 |
 | `relay_agent/campaign.py` | 기존 파일을 확장한다 (새로 만들지 않는다) | S-14 |
+| `relays/studio-campaign.yaml` · `studio-plan.yaml` · `studio-task.yaml` | CAMPAIGN.md 의 작업을 돌리는 캠페인 릴레이와 그것이 쓰는 내부 릴레이 둘(계획 · 작업). 전 단계 Opus 고정 | 작업 없음 — 캠페인 실행용 (CAMPAIGN.md 489행) |
 
 ### 2.2 데이터
 
@@ -164,6 +174,7 @@ runs/
 ```
 
 - 직원 폴더의 자체 git 이력(H-3)은 `employees/<employee_id>/.git` 에 둔다 (잠정, H-3).
+- 검증용 시드 직원(S-7)의 원본은 `runs/` 밖, 저장소의 `relay_agent/studio/seed/` 에 있다 (`PERSONA.md` · `GUIDE.md` · `employee.yaml`. `MEMORY.md` 는 채용 때처럼 빈 파일로 시작한다). 서버가 조건이 맞을 때 `employees/emp_5eed0001/` 로 옮겨 쓴다 (§3.15). 내용은 임시값이다. 설치본에도 들어가도록 `pyproject.toml` 의 `[tool.setuptools.package-data]` 에 `seed/*` 를 적는다.
 - studio 런이면 기존 런 폴더 `runs/<run_id>/` 에 `guard_ctx.json` 과 훅 설정 파일이 더 생긴다 (§10.2, §11.4).
 - `runs/` 는 `.gitignore` 에 들어 있다 (5행). 그래서 `runs/studio/` 의 DB 와 직원 폴더는 이 저장소의 git 에 올라가지 않는다.
 
@@ -350,7 +361,7 @@ CREATE TABLE room_members (
 CREATE INDEX room_members_employee ON room_members(employee_id);
 ```
 
-- 행 하나가 전제 1의 "직원×방 대화 하나"다. 채팅 턴과 읽기 전용 턴이 이 대화를 잇는다. 대화가 길어져 새 대화로 넘길 때(S-7) `conversation_id` 를 비운다.
+- 행 하나가 전제 1의 "직원×방 대화 하나"다. 채팅 턴과 읽기 전용 턴이 이 대화를 잇는다. 대화가 길어져 새 대화로 넘길 때(S-7) `conversation_id` 를 비운다 — 끝난 턴의 입력 토큰이 `chat.HANDOFF_TOKENS`(10만. 값 잠정)를 넘었을 때와, `--resume` 이 실패해 그 턴이 새로 시작했을 때다. 다음 턴은 그 세션에서 마지막으로 `done` 으로 끝난 런의 `state` · `open_issues` · `next_steps` 를 인계(HANDOFF)로 실어 새 대화로 시작한다. 모델을 따로 불러 요약하지 않는다. `session_id` 는 직원×방에 하나이고 새 대화로 넘어가도 그대로다. `fed_message_id` 는 턴이 `done` 으로 끝났을 때 그 턴이 읽은 마지막 글의 id 로 올린다 (답이 비어도 같다, §9.5. `studio/chat.py`).
 - 작업방에서 담당의 작업 런은 이 대화가 아니라 `tasks.run_id` 의 런이 가진 단계별 대화(`RunState.stage_sessions` · `done_sessions`, `pipeline.py` 200 · 216–217)를 쓴다. 릴레이는 단계마다 대화가 따로라 "직원×방 대화 하나"와 글자 그대로 같지 않다. `[§12]`
 - 구성원: `dm` 은 그 직원 1행, `task` 는 담당과 owner 가 넣은 직원(§4.3 의 T3, S-9), `department` 는 그 파트의 재직 직원, `system` 은 행이 없다.
 - 쓰기 권한 열은 없다. 작업방에서 쓰는 사람은 `tasks.assignee_id` 한 명이다 (S-9).
@@ -563,7 +574,8 @@ CREATE UNIQUE INDEX devices_fcm ON devices(fcm_token)
 ```
 
 - 공용 토큰(`Config.auth_token`, `config.py` 46)은 그대로 두고 기기별 토큰을 더한다 (M-2). 인증 순서는 §6.2 다.
-- 1회용 페어링 코드(5분 만료)는 테이블에 두지 않고 서버 메모리에 둔다. 서버가 재시작되면 코드는 무효가 된다 (잠정, M-2). `[§12]`
+- 1회용 페어링 코드(5분 만료)는 테이블에 두지 않고 서버 메모리에 둔다 — `studio/devices.py` 의 `Pairings` 가 코드의 SHA-256 과 만료 시각만 쥔다. 서버가 재시작되면 코드는 무효가 된다 (M-2 가 확정했다). `[§12]`
+- `fcm_token` 은 폐기되지 않은 기기 가운데 하나만 가진다 (`devices_fcm`). 같은 값으로 다시 페어링하면 앞 기기 행의 `fcm_token` 을 NULL 로 바꾸고 새 기기에 넣는다 — 앞 기기를 폐기하지는 않는다. 빈 문자열은 NULL 로 넣는다 (M-2).
 
 ### 3.15 버전 1 의 시드
 
@@ -581,7 +593,7 @@ VALUES ('hr', '인사', 1, NULL, 0,
         strftime('%Y-%m-%dT%H:%M:%S', 'now', 'localtime'));
 ```
 
-직원은 시드에 넣지 않는다. 검증용 시드 직원 1명은 S-7 이 파일로 둔다.
+직원은 마이그레이션의 시드에 넣지 않는다. 검증용 시드 직원 1명은 S-7 이 파일로 둔다 (`relay_agent/studio/seed/`, §2.2). 서버가 시작할 때 — `server.py` 의 startup 함수 `seed_studio_employee` → `api.seed_employee()` → `employees.seed()`, 저장소를 연 뒤 — `employees` 에 행이 하나도 없으면(퇴사자 포함) 한 번 만든다: 폴더 `runs/studio/employees/emp_5eed0001/` 의 파일 넷 → 한 트랜잭션에서 직원 행(`id = emp_5eed0001`, 파트 `program`, 미배치) · 1:1 방 · 그 방과 파트 방의 구성원. 행이 하나라도 있으면 아무것도 하지 않으므로 다시 켜도 중복이 없고, 시드를 퇴사시켜도 다시 생기지 않는다. 트랜잭션이 실패하면 새로 만든 폴더를 지우고, 실패해도 서버는 뜬다. 첫 git 커밋(H-3)과 첫 인사 글은 만들지 않는다. 이름과 파일 내용은 임시값이다.
 
 ### 3.16 12개 테이블에 두지 않은 것
 
@@ -589,7 +601,7 @@ VALUES ('hr', '인사', 1, NULL, 0,
 |---|---|---|
 | WS 재접속용 단일 순번 (`after_id`) | 12개 테이블에 없다. 13번째 테이블 `stream_events` 를 마이그레이션 버전 2 로 둔다 (§7.2 가 정했다) | §7.2 `[§12]` |
 | 페어링 코드 | 서버 메모리 | M-2 |
-| 한도 설정값 (동시 3 · 왕복 20) | `Config`(`config.py` 17–)에 필드 추가. 이름 잠정: `studio_max_concurrent_runs` · `studio_max_exchanges` | S-8, S-9 |
+| 한도 설정값 (동시 3 · 왕복 20) | `Config`(`config.py` 17–)에 필드 추가. 동시 한도의 이름은 `studio_max_runs` 로 확정했다 (S-8. 큐가 줄을 볼 때마다 읽는다). 왕복 한도의 이름은 잠정 (S-9): `studio_max_exchanges` | S-8, S-9 |
 | 가드 감사 로그 | `runs/studio/audit/guard-<YYYYMMDD>.jsonl`. 훅이 직접 쓴다 | §10.7 |
 | 지침 이력 | 직원 폴더의 git | H-3 |
 | 검수 패키지 본문 | `inbox.payload_json` (`final_review`) | §5 |
@@ -668,13 +680,13 @@ T10 · T11 도 CAMPAIGN.md §2 의 그림에 없는 전이다. owner 가 더했�
 - 런을 만들지 못하면(릴레이 없음, `stage_models` 오류, 서버 코드를 품은 프로젝트의 런이 원본 폴더에서 파일을 고칠 참인 경우 등. 마지막은 아래) `backlog` 에 그대로 두고 `queued_at` 을 비우며 `run` 이벤트에 오류를 남기고 시스템 방에 알린다.
 - 에디터 검사 (MCP 를 쓰는 작업)는 전이 조건이 아니라 전이 뒤의 걸음이다. T3 를 커밋한 뒤, 런을 진행시키기 전에 한다(§4.5 실행 순서 3). 에디터가 꺼져 있으면 M-7 이 켜고 응답을 기다린다. 무응답이면 런을 진행시키지 않고(`pending` 그대로) 슬롯을 놓으며, system 이 T4(`question`)를 한 뒤 큐를 다시 본다 — 작업은 `working` 이 된 직후 곧바로 `blocked` 가 된다. T5 뒤 런을 재개하기 직전에도 같은 검사를 한다(§4.7). 조건으로 두지 않은 이유: M-7 은 무응답을 "결재로 알린다"(CAMPAIGN.md 282행)고 적는데 `backlog` 는 차단 결재를 가질 수 없다(F2). `backlog` 에 두고 시스템 방에만 알리면 푸시가 가지 않고 캠페인 자동 진행이 조용히 멈춘다 (잠정, M-7). `[§12]` studio 의 검사를 지나도 엔진이 다시 본다 — `_check_mcp_ready`(`pipeline.py` 1031–1061, 호출 1563–1565)가 실패하면 단계를 시작하지 않은 채 런을 `failed` 로 끝내고, §4.7 표의 `failed` · `working` 행이 T4 를 한다.
 - 런의 워크스페이스 방식은 `create` 가 정하고 `RunState.workspace_mode` 에 남는다. 저장소 설정에서 출발하지만(`pipeline.py` 556) 엔진이 바꿀 수 있다 — 파일을 고치는 단계가 없는 릴레이는 `none`(554–555), 읽기 전용이 아닌 MCP 가 하나라도 붙으면 `copy` 가 `inplace` 이고 이벤트 `workspace_forced` 가 남는다(581–586 · 629–630). studio 는 런을 만든 뒤 이 값을 읽어 T7 · T8 · T9 · T11 의 갈래에 쓰고, 저장소 설정을 다시 읽지 않는다 (§11.2).
-- 서버 코드를 품은 프로젝트의 작업 런은 원본 작업으로 만들지 않는다 — 파일을 고치는 단계가 있으면 `copy` 로만 만든다 (잠정, S-8 · S-10. §10.8 의 8).
+- 서버 코드를 품은 프로젝트의 작업 런은 원본 작업으로 만들지 않는다 — 파일을 고치는 단계가 있으면 `copy` 로만 만든다 (S-8 확정 — `create` 의 `pin_copy`. 훅이 쓰기를 막는 쪽은 잠정, S-10. §10.8 의 8).
   - 기준: `projects.path` 를 §10.2 의 방식으로 정규화해 서버 루트의 `relay_agent/`(서버 루트는 `config.py` 14 의 `ROOT`)와 견준다. 둘이 같거나 한쪽이 다른 쪽을 품으면 "서버 코드를 품은 프로젝트"다 — 서버 루트나 그 상위 폴더를 등록한 프로젝트도, `relay_agent/` 의 하위 폴더만 등록한 프로젝트도 든다. 저장소 이름으로 가리지 않는다. 이름은 바뀔 수 있다.
-  - 이 프로젝트의 작업 런은 `create` 에 `copy` 고정 인자(이름 잠정, S-8. §11.2)를 함께 넘긴다. 방식이 `inplace` 로 정해졌거나(556), 파일을 고치는 단계가 있는데 `none` 으로 정해졌거나(556. 아래), `copy` 인데 읽기 전용이 아닌 MCP 때문에 `inplace` 로 바뀔 참이면(584–586) 엔진은 런을 만들지 않고 `ValueError` 를 낸다. 마지막 경우 메시지에 그 MCP 의 이름을 싣는다. 만든 뒤 `workspace_mode` 를 보고 취소하는 방식은 쓰지 않는다 — 버려지는 런이 남는다.
+  - 이 프로젝트의 작업 런은 `create` 에 `copy` 고정 인자(`pin_copy`, S-8 확정. §11.2)를 함께 넘긴다. 판정은 `studio/work.py` 의 `holds_server_code` 가 하고, `projects.path` 와 런이 실제로 도는 폴더(저장소 설정의 경로) 둘 중 하나라도 걸리면 준다. 방식이 `inplace` 로 정해졌거나(556), 파일을 고치는 단계가 있는데 `none` 으로 정해졌거나(556. 아래), `copy` 인데 읽기 전용이 아닌 MCP 때문에 `inplace` 로 바뀔 참이면(584–586) 엔진은 런을 만들지 않고 `ValueError` 를 낸다. 마지막 경우 메시지에 그 MCP 의 이름을 싣는다. 만든 뒤 `workspace_mode` 를 보고 취소하는 방식은 쓰지 않는다 — 버려지는 런이 남는다.
   - 그 뒤는 위의 "런을 만들지 못하면"과 같다. 새 오류 코드는 없다.
   - `none` 은 파일을 고치는 단계가 하나도 없을 때만 통과한다 (그런 릴레이는 554–555 가 `none` 으로 둔다). 그래도 하는 쓰기는 `relay_agent/` 에서 훅이 막는다 (§10.8). 고치는 단계가 있는데 방식이 `none` 이면 `inplace` 와 똑같이 `ValueError` 로 거부한다. 방식은 저장소 설정(`RepoSpec.workspace`, `repos.py` 34. 기본값 없음) → 릴레이 파일의 값(`RelaySpec.workspace`, `pipeline.py` 156. 적지 않으면 `none`) 순으로 그대로 받으므로(556) 고치는 단계가 있어도 `none` 이 될 수 있다. `none` 런은 `Workspace` 없이(382–384) 원본 폴더를 작업 폴더로 쓴다(1551) — 복사본도 스냅샷도 없이 원본을 고친다.
   - 걸리는 MCP 는 세 곳에서 온다 — 릴레이 단계의 `mcp`, 직원의 `employee.yaml` 의 `mcp`, 프로젝트 폴더에서 찾은 MCP (§9.5). 읽기 전용이 아닌 것이 하나라도 있으면 그 프로젝트의 작업은 그것을 뺄 때까지 시작되지 않는다. `studio` 는 `READ_ONLY_MCP` 에 더하므로 걸리지 않는다 (§11.2).
-- `auto_apply` 는 저장소 설정을 따르지 않고 항상 `False` 로 넘긴다. 켜져 있으면 `copy` 런이 `done` 이 되는 순간 엔진이 검수 전에 변경을 원본에 반영하고 `changes_status` 를 `applied` 로 둔다(`pipeline.py` 1798–1803). 그러면 T7 의 반영과 T9 의 되돌리기를 엔진이 모두 거부한다(1121–1122). 인자가 `None` 일 때만 저장소 · 릴레이 설정을 보므로(587–588) 명시한 값이 이긴다 (잠정, S-8). `[§12]`
+- `auto_apply` 는 저장소 설정을 따르지 않고 항상 `False` 로 넘긴다. 켜져 있으면 `copy` 런이 `done` 이 되는 순간 엔진이 검수 전에 변경을 원본에 반영하고 `changes_status` 를 `applied` 로 둔다(`pipeline.py` 1798–1803). 그러면 T7 의 반영과 T9 의 되돌리기를 엔진이 모두 거부한다(1121–1122). 인자가 `None` 일 때만 저장소 · 릴레이 설정을 보므로(587–588) 명시한 값이 이긴다 (S-8 확정). `[§12]`
 - 전이가 시작 요청 때가 아니라 슬롯을 얻은 때 일어난다. 상태 8개에 "줄 선 중"이 없어서 `queued_at` 컬럼으로 표현했다. `[§12]`
 
 **T4 `working` → `blocked` 결재 올림**
@@ -694,7 +706,7 @@ T10 · T11 도 CAMPAIGN.md §2 의 그림에 없는 전이다. owner 가 더했�
 
 - 언제: 작업이 `working` 이다. 슬롯을 기다리는 중(`queued_at` 이 있다)이어도 된다. `ask_owner` 는 그 작업방의 구성원인 직원이 부른다. 담당이 아닌 구성원이 불렀을 때 어느 런을 끊고 어느 런을 잇는지는 §5.7 이다 — `inbox.run_id` 는 항상 작업 런이다.
 - 부수 효과: 차단 결재를 만든다(`task_id`, `run_id`, `requester`). `queued_at` 이 있었으면 비우고 `unqueued` 이벤트를 남긴다 — `blocked` 는 `queued_at` 을 가질 수 없다(§3.10 의 CHECK). 담당의 직원 상태를 다시 계산한다. 푸시(즉시 등급). 작업 런이 돌고 있었으면 진행 스레드가 돌아올 때 슬롯이 비고 큐가 다음 작업을 본다(§4.6).
-- 런을 끝내는 방법: `ask_owner` 는 "이제 턴을 끝내라"를 돌려준다. 엔진이 스스로 멈추는 것은 `gate: human` 인 단계가 `needs_approval` 을 냈고 뒤 단계가 남았을 때뿐이다(`pipeline.py` 1777–1778). 그 밖에는 런이 계속 가므로, 도구 응답 뒤에도 런이 `running` 이면 서버가 `RelayEngine.cancel` 로 끊는다 (대기 시간 잠정, S-6). 끊긴 단계의 대화는 `RunState.stage_sessions` 에 남아 재개 때 이어진다(1606–1608). M-7 이 런 도중 무응답을 감지해 T4 를 할 때도 서버가 `cancel` 로 끊는다 (잠정, M-7).
+- 런을 끝내는 방법: `ask_owner` 는 "이제 턴을 끝내라"를 돌려준다. 엔진이 스스로 멈추는 것은 `gate: human` 인 단계가 `needs_approval` 을 냈고 뒤 단계가 남았을 때뿐이다(`pipeline.py` 1777–1778). 그 밖에는 런이 계속 가므로, 도구 응답 뒤에도 런이 `running` 이면 서버가 `RelayEngine.cancel` 로 끊는다 (§8.3. 미구현, 받을 작업 미정). 끊긴 단계의 대화는 `RunState.stage_sessions` 에 남아 재개 때 이어진다(1606–1608). M-7 이 런 도중 무응답을 감지해 T4 를 할 때도 서버가 `cancel` 로 끊는다 (잠정, M-7).
 - CAMPAIGN.md 의 그림은 계기를 "질문 · 구조 선택 · 사전 승인 · 위험 명령" 넷만 적는다. 아래 여섯은 여기서 더했다. 런이 실패한 작업을 `working` 에 두면 아무도 알림을 받지 못한다. `[§12]`
 
 **T5 `blocked` → `working` 내가 결정**
@@ -835,7 +847,7 @@ T10 · T11 도 CAMPAIGN.md §2 의 그림에 없는 전이다. owner 가 더했�
 
 - `backlog` 에서 줄 선 작업은 슬롯을 얻는 순간 T3 가 일어난다. `working` 에서 줄 선 작업(T5 · T8 뒤)은 상태는 그대로이고 런만 이어진다. 줄 선 `working` 작업에 T4 가 오면 줄에서 빠진다(`queued_at = NULL`). owner 의 `stop` 도 줄에서 빼고 T4 로 간다 (§6.4). 앞서 받은 결정의 `delivery = 'pending'` 은 그대로 남는다(§4.7).
 - `blocked` 와 `review` 는 런이 멈추면 슬롯이 빈다. 그래서 한 작업이 결재를 기다리는 동안 같은 프로젝트의 다른 작업이 돌 수 있다 (S-14: 결재는 그 작업만 멈춘다). 같은 폴더에 두 작업의 변경이 섞일 수 있고, T9 의 조건 2가 이 때문에 있다 (T11 도 같은 조건을 쓴다).
-- 채팅 턴과 읽기 전용 턴(`workspace: none`)은 큐를 타지 않고 두 한도에 세지 않는다 (S-8 문장의 해석. 잠정, S-8). `[§12]`
+- 채팅 턴과 읽기 전용 턴(`workspace: none`)은 큐를 타지 않고 두 한도에 세지 않는다 (S-8 문장의 해석. S-8 이 확정했다 — 이 턴들은 `studio/chat.py` 가 직접 진행시키고, 큐의 슬롯 장부에는 작업 런만 오른다). `[§12]`
 - 한 직원이 작업 런 여러 개를 동시에 갖는 것은 막지 않는다. 한도는 위 표의 것뿐이다.
 - 프로젝트 쓰기 1은 엔진의 폴더 락과 같은 제약이다. 락은 `inplace` 워크스페이스에만 걸리고, 겹치면 엔진이 그 런을 `failed` 로 끝낸다(`pipeline.py` 1516–1523). 큐가 먼저 줄을 세우므로 정상 흐름에서는 일어나지 않는다. studio 밖의 런(CLI · 대시보드)이 폴더를 쥐고 있을 수 있으므로 슬롯을 주기 전에 `RelayEngine.folder_holder(workdir)`(813–828)를 보고, 있으면 기다린다.
 
@@ -880,7 +892,7 @@ T10 · T11 도 CAMPAIGN.md §2 의 그림에 없는 전이다. owner 가 더했�
 
 에디터 무응답(M-7)은 표에 행을 따로 두지 않는다. 엔진의 `_check_mcp_ready` 가 잡으면 런이 `failed` 로 끝나 `failed` · `working` 행이 T4 를 한다. `blocked` · `review` 에서 서버가 끊은 런(§4.5)은 `cancelled` · `blocked` 행과 `review` 행을 따른다. T3 직후의 검사에 걸려 진행하지 않은 런은 `pending` 으로 남고 진행 스레드가 없어 이 표를 거치지 않는다 — T4 는 검사한 쪽이 하고, T5 뒤에는 아래 표의 `pending` 행대로 잇는다 (잠정, M-7).
 
-`failed` 가운데 셋은 T4 로 보내지 않고 기존 `CampaignRunner._drive_run`(`campaign.py` 431–465)처럼 스스로 다시 잇는다 (잠정, S-8): 오류가 "서버 재시작"으로 시작하면 바로, "다른 실행(" 이 들어 있으면(폴더를 다른 런이 쓰는 중) 기다렸다가, 사용량 한도면 풀릴 때까지 기다렸다가. 다시 이을 때는 작업을 줄에 세운다(`queued_at`).
+`failed` 가운데 둘은 T4 로 보내지 않고 기존 `CampaignRunner._drive_run`(`campaign.py` 431–465)처럼 스스로 다시 잇는다 (S-8 확정): 오류가 "서버 재시작"으로 시작하면 바로, "다른 실행(" 이 들어 있으면(폴더를 다른 런이 쓰는 중) 기다렸다가 — 기다림은 큐가 슬롯을 주기 전의 `folder_holder` 확인이다 (§4.6). 다시 이을 때는 작업을 줄에 세운다(`queued_at`. system 의 `queued` 이벤트이고 `detail_json` 은 `{resume: true}` 다). 사용량 한도로 `failed` 된 런은 아직 스스로 잇지 않고 T4(`run_failed`)로 보낸다 — 한도가 풀릴 때까지 줄에서 기다리게 할 장치가 없어, 바로 세우면 같은 실패를 되풀이한다 (잠정, S-14). 진행 스레드가 `advance` 에서 돌아온 것이 아니라 예외로 돌아왔으면(런을 진행시키지 못했다) 런은 그대로이므로 스스로 잇지 않는다 — 다시 세우면 같은 예외로 끝없이 돈다. 그때는 그 예외 문구를 `error` 로 T4(`run_failed`)를 올린다. 런이 `pending` 인 채 진행시키지 못한 경우도 같다 — 두면 작업이 `working` · 줄 밖으로 남아 아무도 잇지 않는다 (S-8 확정). 예외로 돌아왔어도 그 진행 중에 엔진이 이 런의 실패를 기록했으면(진행 직전보다 뒤에 쓴 `run_failed` 이벤트) 런은 실제로 `failed` 로 끝난 것이다 — `error` 와 본문에 예외 문구가 아니라 `RunState.error` 를 쓰고, 이때도 줄에는 다시 세우지 않는다. 예외로 돌아왔는데 런이 `running` 이면 다른 곳(대시보드 · CLI · 다른 스레드)이 그 런을 진행 중인 것이다("already advancing"). T4 를 하지 않고 줄에도 세우지 않는다 — 줄에 세우면 큐가 런이 어떻게 끝났든 이어 버린다. 큐가 그 작업을 메모리에 기억해 두고 줄을 볼 때마다, 그리고 `retry_after` 타이머로 다시 보다가, 런이 멈추면 위 표를 예외 없이 적용한다. 이 기억은 재시작하면 사라지고 그때는 §4.8 의 걸음 1이 같은 일을 한다 (S-8 확정).
 
 **런을 이을 때 (T5 · T8).** 두 걸음이다. 결정문 넣기(`interject`)는 런이 멈춘 것을 확인한 즉시 하고 슬롯을 기다리지 않는다 — 런이 이미 멈춰 있으면 결정한 직후, 아직 돌고 있으면 진행 스레드가 돌아올 때(위의 걸음 2)다. 진행(`approve` · `advance`)은 슬롯을 얻은 뒤에 한다. 넣었는지는 `inbox.delivery` 가 기억한다(§3.13). 그래서 런이 도는 중에 T5 를 받았고 그 런이 `ask_owner` 를 또 불러 T4 가 다시 와도, 첫 결정문은 `pending` 으로 남아 있다가 스레드가 돌아올 때 들어간다. `interject` 는 됐는데 `delivered` 로 바꾸기 전에 서버가 죽으면 복구 때 다시 넣는다(§4.8). 결정 직후의 넣기와 걸음 2가 겹쳐도 마찬가지다 — 적어도 한 번 들어가고, 같은 결정문이 두 번 들어갈 수 있다. MCP 를 쓰는 작업이면 슬롯을 얻은 뒤 진행(`approve` · `advance`) 직전에 에디터 검사를 한다(§4.3 T3). 무응답이면 진행하지 않고 슬롯을 놓은 뒤 system 이 T4(`question`)를 한다 — 런은 멈춰 있던 상태 그대로 남는다 (잠정, M-7).
 
@@ -893,20 +905,20 @@ T10 · T11 도 CAMPAIGN.md §2 의 그림에 없는 전이다. owner 가 더했�
 
 - `approve` 는 런을 `pending` 으로만 돌린다. 진행 스레드는 호출한 쪽이 띄운다 (`pipeline.py` 656–671, `server.py` 817–818).
 - `interject` 는 런이 돌든 멈췄든 항상 `notes.jsonl` 에 적는다(`pipeline.py` 687–688). live 로 전달했는지는 그 줄의 `live` 표시로만 남는다. `_merge_notes`(694–707)는 `notes_seen` 뒤의 줄을 `live` 표시와 무관하게 baton 의 `user_notes` 에 합친다. 합치는 때는 다음 단계가 시작할 때다(1593).
-- 작업 런은 승인 방식 `ai` 로 만든다 (잠정, S-8). `auto` 는 설계 게이트에서 멈추지 않고 "모두 승인됐다"고 알리므로(`pipeline.py` 207–210) 전제 3과 맞지 않는다. `ai` 에서도 엔진이 멈추는 것은 `gate: human` 단계가 `needs_approval` 을 냈고 뒤 단계가 남았을 때뿐이라(1777–1778), 런을 끝내는 기본 수단은 T4 의 `RelayEngine.cancel` 이다.
-- 건너뛴 단계는 작업 기록에 남긴다. 엔진은 `optional` 단계를 돌릴 AI 가 없으면(`RunnerError` 의 `unavailable`) 이벤트 `stage_skipped`(`reason` 은 오류 문구 200자)를 남기고 다음 단계로 넘어간다 (`pipeline.py` 1733–1737. 이벤트는 `_event` 374–375 가 `history.add_event` 로 저장한다). 런이 실패하지 않으므로 위의 표로는 드러나지 않는다. 진행 스레드가 `advance` 에서 돌아오면 걸음 3 앞에서 그 런의 이벤트를 읽어(`HistoryStore.events(run_id, after_id)`, `history.py` 232–236 — `id` 순이고 행마다 `id` · `stage` · `kind` · `detail`) `stage_skipped` 하나마다 `task_events` 의 `run` 행을 쓴다. `reason` 은 엔진이 적은 이유, `detail_json` 은 `{run_id, stage, event}` 이고 `event` 는 `stage_skipped` 다. 런이 어떤 상태로 돌아왔든 쓰고, 방에는 알리지 않는다 — owner 는 검수 패키지의 `incidents[]` 에서 본다 (§5.4). 같은 이벤트를 두 번 쓰지 않게 가리는 키는 S-8 이 정한다 (잠정). 걸음의 번호는 늘리지 않는다.
+- 작업 런은 승인 방식 `ai` 로 만든다 (S-8 확정). `auto` 는 설계 게이트에서 멈추지 않고 "모두 승인됐다"고 알리므로(`pipeline.py` 207–210) 전제 3과 맞지 않는다. `ai` 에서도 엔진이 멈추는 것은 `gate: human` 단계가 `needs_approval` 을 냈고 뒤 단계가 남았을 때뿐이라(1777–1778), 런을 끝내는 기본 수단은 T4 의 `RelayEngine.cancel` 이다.
+- 건너뛴 단계는 작업 기록에 남긴다. 엔진은 `optional` 단계를 돌릴 AI 가 없으면(`RunnerError` 의 `unavailable`) 이벤트 `stage_skipped`(`reason` 은 오류 문구 200자)를 남기고 다음 단계로 넘어간다 (`pipeline.py` 1733–1737. 이벤트는 `_event` 374–375 가 `history.add_event` 로 저장한다). 런이 실패하지 않으므로 위의 표로는 드러나지 않는다. 진행 스레드가 `advance` 에서 돌아오면 걸음 3 앞에서 그 런의 이벤트를 읽어(`HistoryStore.events(run_id, after_id)`, `history.py` 232–236 — `id` 순이고 행마다 `id` · `stage` · `kind` · `detail`) `stage_skipped` 하나마다 `task_events` 의 `run` 행을 쓴다. `reason` 은 엔진이 적은 이유, `detail_json` 은 `{run_id, stage, event, event_id}` 이고 `event` 는 `stage_skipped`, `event_id` 는 그 엔진 이벤트의 `id` 다. 런이 어떤 상태로 돌아왔든 쓰고, 방에는 알리지 않는다 — owner 는 검수 패키지의 `incidents[]` 에서 본다 (§5.4). 같은 이벤트를 두 번 쓰지 않게 가리는 키는 `event_id` 다 — 그 작업에 같은 `run_id` · `event_id` 의 `run` 행이 있으면 다시 쓰지 않는다 (S-8 확정). 걸음의 번호는 늘리지 않는다.
 - studio 밖(대시보드 · CLI)에서 작업 런을 승인 · 재개 · 취소했을 때 결재와 작업 상태를 맞추는 규칙은 §5.8 (다)가 정했다 (기존 경로 쪽 접점은 §11.3).
 - 작업 취소(T10 · T11)는 런을 잇지 않는다. T11 은 멈춘 런을 T9 처럼 정리하고 변경을 되돌린 뒤 `run_id` 를 비운다 (§4.3 T11). 거꾸로 런이 `cancelled` 로 끝났다고 작업이 `cancelled` 가 되지는 않는다 — 위 표대로 T4 이거나 그대로다.
 
 ### 4.8 재시작 복구
 
-서버 시작 때 기존 복구(`server.py` 49–53: `engine.recover_interrupted()` → `campaigns.recover()`) 뒤에 studio 복구를 돈다 (S-8. 호출 자리는 잠정). 작업 없는 런의 승인 대기를 결재로 채우는 것만은 S-5 가 이미 한다 (§5.8 나의 "시작할 때"). 작업 런의 같은 경우는 아래 걸음 1이 맡는다.
+서버 시작 때 기존 복구(`server.py` 49–53: `engine.recover_interrupted()` → `campaigns.recover()`) 뒤에 studio 복구를 돈다 (S-8. 호출 자리는 확정했다: `server.py` 에 마지막으로 등록한 startup 함수 `start_task_queue` 가 `studio/work.py` 의 `recover(engine, inbox_factory, kick)` 를 부른다 — 기존 복구, 승인 대기 채우기, 시드 직원 뒤라 저장소가 열려 있다. 저장소가 열려 있지 않으면 걸음 3만 한다. 걸음 하나 · 작업 하나가 실패해도 기록만 남기고 나머지를 하며, 예외를 올리지 않는다). 작업 없는 런의 승인 대기를 결재로 채우는 것만은 S-5 가 이미 한다 (§5.8 나의 "시작할 때"). 작업 런의 같은 경우는 아래 걸음 1이 맡는다.
 
-1. 슬롯 장부는 비어 있다. `recover_interrupted`(`pipeline.py` 1016–1029)가 서버가 멈출 때 `running` 이던 런을 `failed`(오류가 "서버 재시작"으로 시작)로 바꿔 둔다. `run_id` 가 있는 `working` · `blocked` · `review` 작업마다 런을 읽는다. `working` 이고 줄 서지 않은 작업의 런이 그렇게 끊겼거나 `pending` 이면(만들고 진행시키기 전에 멈췄다) 줄에 세워(`queued_at`) 다시 잇는다. 그 밖의 상태면 §4.7 의 "런이 멈췄을 때" 표대로 처리한다.
+1. 슬롯 장부는 비어 있다. `recover_interrupted`(`pipeline.py` 1016–1029)가 서버가 멈출 때 `running` 이던 런을 `failed`(오류가 "서버 재시작"으로 시작)로 바꿔 둔다. `run_id` 가 있는 `working` · `blocked` · `review` 작업마다 런을 읽는다. `working` 이고 줄 서지 않은 작업의 런이 그렇게 끊겼거나 `pending` 이면(만들고 진행시키기 전에 멈췄다) 줄에 세워(`queued_at`) 다시 잇는다. §4.7 의 스스로 다시 잇는 다른 `failed`("다른 실행(")도 같다. 줄에 세우는 것은 걸음 2 뒤에 한다 — 줄에 서면 큐가 곧 진행시키고, 도는 런에는 결정문을 넣지 않기 때문이다. 그 밖의 상태면 §4.7 의 "런이 멈췄을 때" 표대로 처리한다 (건너뛴 단계의 기록도 함께).
 2. `delivery = 'pending'` 인 결재를 모두 찾아(`inbox_undelivered`) 그 `run_id` 의 런에 §4.7 의 걸음 2를 한다. 재시작 직후에는 이 서버가 돌리던 런이 모두 멈춰 있다(1의 `recover_interrupted`). 다른 프로세스가 쥐고 있어 `running` 인 런과 `done` 인 런은 건너뛰고 `pending` 으로 둔다. `interject` 는 했는데 `delivered` 로 바꾸기 전에 서버가 죽었던 결재는 여기서 한 번 더 들어간다.
 3. `queued_at` 이 있는 작업은 그대로 줄에 남아 있다. 큐를 한 번 돌린다.
 4. 모든 재직 직원의 상태를 §4.9 로 다시 계산한다.
-5. `proposed` · `blocked` · `review` 인데 `pending` 결재가 없는 작업이 있으면 고치지 않고 시스템 방에 알린다 (불변식이 깨진 것이다).
+5. `proposed` · `blocked` · `review` 인데 `pending` 결재가 없는 작업이 있으면 고치지 않고 시스템 방에 알린다 (불변식이 깨진 것이다). 서버를 띄울 때마다 같은 작업을 다시 알리지는 않는다 — 시스템 방에 그 작업의 `invariant_broken` 글이 이미 있고 그 뒤로 작업이 바뀌지 않았으면(`tasks.updated_at` 이 그 글의 `created_at` 보다 늦지 않다) 넘어간다. 고쳤다가 다시 깨진 작업은 다시 알린다 (S-8 확정).
 
 ### 4.9 직원 상태 유도
 
@@ -1039,7 +1051,7 @@ A-10 의 "후속 작업 만들기"는 결정이 아니다. owner 가 `parent_id`
 | `reason` | 올리는 쪽 | 계기 (§4.3 T4) | 서버가 넣는 `options` (잠정, S-5) |
 |---|---|---|---|
 | `asked` | employee | `ask_owner(kind = question)` | 직원이 준 것 |
-| `run_failed` | system | 런이 `failed` 로 끝남. `error` 에 `RunState.error` | `retry`(다시 시도) · `wrap_up`(지금까지 한 것으로 검수 요청) |
+| `run_failed` | system | 런이 `failed` 로 끝남. `error` 에 `RunState.error`. 진행 스레드가 런을 진행시키지 못하고 예외로 돌아왔으면 그 예외 문구다 — 그 진행 중에 엔진이 런의 실패를 기록했으면 `RunState.error` 그대로다 (§4.7) | `retry`(다시 시도) · `wrap_up`(지금까지 한 것으로 검수 요청) |
 | `run_cancelled` | system | 런이 `cancelled` 로 끝남 (owner 의 중지 포함, §6.4. 런이 이미 멈춘 줄 선 작업의 `stop` 은 런 상태가 `cancelled` 가 아니어도 이 사유를 쓴다) | `retry` · `wrap_up` |
 | `no_review_request` | system | 런이 검수 요청 없이 `done` | 없음 |
 | `exchange_limit` | system | 직원 간 왕복 한도 (§4.6) | `continue`(다시 세고 계속) · `wrap_up` |
@@ -1169,7 +1181,7 @@ payload (저장):
 
 S-5 의 "기존 런 승인 대기 · 예산 초과도 결재로 들어오게"와 §4.7 이 미룬 "studio 밖에서 작업 런을 조작했을 때"를 정한다.
 
-**(가) 작업 런.** §4.7 의 표가 처리한다. 진행 스레드가 `advance` 에서 돌아와 런이 `awaiting_approval` 이고 작업이 `working` 이면 `StopNote.kind` 로 종류를 정한다. S-8 의 진행 스레드가 생기기 전에는 (나)의 수신기가 이 두 행을 맡는다 — `advance` 가 런을 놓은 직후(`after_advance`), 런이 `tasks.run_id` 에 있고 작업이 `working` 이며 줄 서 있지 않으면 system 이 T4 를 한다(`title` 은 작업 제목). 그 밖의 작업 상태에서는 아무것도 만들지 않는다. 진행 스레드가 네 걸음을 맡으면 이 갈래는 걸음 3으로 옮긴다 (잠정, S-8).
+**(가) 작업 런.** §4.7 의 표가 처리한다. 진행 스레드가 `advance` 에서 돌아와 런이 `awaiting_approval` 이고 작업이 `working` 이면 `StopNote.kind` 로 종류를 정한다. S-8 의 진행 스레드가 생기기 전에는 (나)의 수신기가 이 두 행을 맡는다 — `advance` 가 런을 놓은 직후(`after_advance`), 런이 `tasks.run_id` 에 있고 작업이 `working` 이며 줄 서 있지 않으면 system 이 T4 를 한다(`title` 은 작업 제목). 그 밖의 작업 상태에서는 아무것도 만들지 않는다. 진행 스레드가 생긴 뒤에도 이 갈래는 수신기에 남는다 (S-8 확정): §4.7 의 걸음 3과 재시작 복구의 걸음 1(§4.8)은 같은 코드를 다시 부르고(`runs.file_stop`), 작업이 그때 이미 `blocked` 면 아무것도 만들지 않으므로 결재가 두 번 오르지 않는다. 결정문 넣기는 `EngineHooks.interject` 가 한다 — 런이 `running` 이면 넣지 않고 `pending` 으로 둔다 (§4.7 "런을 이을 때").
 
 | `StopNote.kind` | 쓰는 곳 | 결재 | `scope` |
 |---|---|---|---|
@@ -1183,7 +1195,7 @@ S-5 의 "기존 런 승인 대기 · 예산 초과도 결재로 들어오게"와
 
 - 받는 자리: 엔진이 알림을 낼 때 부르는 `Notifier.__call__(run_id, kind, title, detail)`(`notify.py` 50)와 같은 자리에 studio 수신기를 하나 더 건다. 엔진은 `RelayEngine._event`(`pipeline.py` 374–380)에서 이벤트를 기록한 뒤, 종류가 `NOTIFY_KINDS` 에 있으면 `self.notifier(run.id, kind, 목표의 첫 줄 80자, detail)` 을 부르고 예외는 삼킨다(376–380). 그 자리에 `Fanout`(`notify.py`)으로 `Notifier` 와 수신기(`studio/runs.py` 의 `RunSink`)를 함께 건다 — 토스트는 그대로다 (S-5 에서 확인 · 구현).
 - 만드는 때: 그 호출은 정지 기록과 저장보다 먼저다 (`budget_exceeded` 1586 → `_write_stop` 1588 → `save` 1591. 다른 두 정지도 같은 순서다). 그때는 `StopNote` 도 `awaiting_approval` 상태도 디스크에 없다. 그래서 수신기는 이벤트(kind · title · detail)를 기억만 하고, 결재는 `advance` 가 런을 놓은 직후에 만든다 — `advance` 의 `finally` 끝(1509)이 부르는 `RelayEngine._let_go` 가 런 잠금을 놓고 `after_advance(run_id)` 를 부른다 (S-5 가 더한 연결 지점. 인용한 줄 번호가 밀리지 않게 클래스 끝에 뒀다). 런을 놓은 뒤라야 뒤따르는 승인이 런 스레드의 마지막 `save` 에 덮이지 않는다 — `_write_stop` 은 먼저 저장한 뒤 인계 AI 를 부른다(1351–1353). 기존 대시보드의 `/runs/{id}/approve` 는 이 틈을 그대로 갖는다.
-- 붙는 엔진: 서버 프로세스의 엔진뿐이다 (`server.py` 맨 아래의 `studio_runs.attach`). CLI 는 자기 프로세스의 엔진으로 런을 진행시키고(`cli.py` 657–661) studio DB 를 열지 않으므로(§3.1), CLI 가 진행시킨 런의 정지는 서버가 도는 동안 결재함에 들어오지 않는다 — 다음 서버 시작 때 채운다 (아래 "시작할 때". 잠정, S-5). studio 저장소가 열리지 않았을 때도 만들지 않는다 — 런과 토스트는 그대로 가고, 그 정지도 다음 시작 때 채운다.
+- 붙는 엔진: 서버 프로세스의 엔진뿐이다 (`server.py` 맨 아래의 `studio_runs.attach`). CLI 는 자기 프로세스의 엔진으로 런을 진행시키고(`cli.py` 668–672) studio DB 를 열지 않으므로(§3.1), CLI 가 진행시킨 런의 정지는 서버가 도는 동안 결재함에 들어오지 않는다 — 다음 서버 시작 때 채운다 (아래 "시작할 때". 잠정, S-5). studio 저장소가 열리지 않았을 때도 만들지 않는다 — 런과 토스트는 그대로 가고, 그 정지도 다음 시작 때 채운다.
 - 대응: 이벤트 `awaiting_approval` → `design_approval`, `budget_exceeded` · `stage_budget_exceeded` → `budget` (`NOTIFY_KINDS`, `notify.py` 16–24). `task_id` 는 NULL, `requester_kind = 'system'`, `run_id` 는 그 런, `project_id` 는 런의 `repo` 가 `projects.repo` 에 있으면 그 프로젝트, `title` 은 세션 제목이다(없으면 목표의 첫 줄). 그 런에 `pending` 인 작업 없는 결재가 이미 있으면 — 알려지지 않은 채 풀린 앞 정지의 것이다 — `cancelled` 로 닫고 새로 만든다. 내용이 같으면 그대로 둔다 (잠정, S-5).
 - 결정: `approve` 는 기존 `/runs/{id}/approve`(`server.py` 814–819)와 같다 — `engine.approve` 뒤 진행 스레드를 띄운다. `design_approval` 의 `revise` 는 코멘트를 `engine.interject` 한 뒤 같은 걸음이다. `budget` 의 `reject` 는 `engine.cancel` 이다 (작업이 없어 주인 없는 작업이 생기지 않는다). 결정과 함께 그 자리에서 처리하므로 `delivery` 는 `none` 이다. 잇는 것은 `Hooks.approve_run` · `cancel_run` · `advance_run`(`studio/inbox.py`. 엔진에 붙인 구현은 `studio/runs.py` 의 `EngineHooks`)이다. 엔진을 부르기 전에 런이 `awaiting_approval` 인지 먼저 본다 — 아니면 코멘트도 넣지 않는다. 엔진 호출은 저장소 트랜잭션 밖에서 하고 잠금 하나로 직렬화한다. 엔진이 연결되지 않았으면 `precondition_failed` 이고 결재는 `pending` 으로 남는다. `revise` 의 코멘트를 넣은 뒤 `engine.approve` 가 거부하면 코멘트는 런에 남고 `engine_error` 로 답하며 결재는 `pending` 이다 — 다시 결정하면 코멘트가 한 번 더 들어간다. 순서를 뒤집으면 수정 요청이 코멘트 없이 승인되므로 이대로 둔다 (잠정, S-5).
 - 밖에서 풀렸을 때: 대시보드가 `/runs/{id}/approve` · `cancel` 을 부르면 그 런의 `pending` 결재를 `cancelled` 로 닫는다(`server.py` 817 · 836 의 `_released`). 서버를 거치지 않은 변화에 대비해, 결정할 때 런이 더는 `awaiting_approval` 이 아니면 결재를 `cancelled` 로 닫고 409 `stale_state` 를 돌려준다 — 본문의 `inbox` 에 닫힌 결재를 싣는다 (§6.3). `GET /studio/inbox` 도 목록을 읽기 전에 `pending` 인 작업 없는 결재의 런 상태를 보고 같은 정리를 한다(`Inbox.sweep_runs`). 런이 없어졌어도 닫는다. 결정이 진행 중이면 이 정리는 건너뛴다 — 승인 직후 런이 `pending` 인 틈에 결재를 닫지 않게 한다. 엔진이 연결되지 않았으면 하지 않는다 (잠정, S-5).
@@ -1200,7 +1212,7 @@ S-5 의 "기존 런 승인 대기 · 예산 초과도 결재로 들어오게"와
 
 막는 이유: 밖에서 승인하면 결재는 `pending` 인데 런이 가 버리고, 밖에서 변경을 되돌리면 통과한 작업의 커밋과 폴더가 어긋난다. 오류 본문은 기존 형식(`{detail}`, `_conflict` 214–218)을 따른다. 막는 곳은 `server.py` 맨 아래의 `_outside` 다 — 런이 없으면 먼저 404, 작업 런이면 409. 작업 런인지는 `studio_api.is_task_run` 이 `tasks.run_id` 로 본다. studio 저장소가 열리지 않았거나 읽지 못하면 작업 런이 아닌 것으로 보고 기존대로 받는다 — 대시보드가 studio 레이어 때문에 멈추지 않는다 (잠정, S-5).
 
-CLI 는 서버를 거치지 않고 엔진을 직접 부른다 (S-5 에서 확인): `relay cancel` · `apply` · `discard` · `rollback` · `approve` · `resume` 이 자기 프로세스의 엔진 메서드를 그대로 부른다(`cli.py` 647–661). 그래서 CLI 로 작업 런을 승인하거나 변경을 되돌리는 것은 막지 못한다. 어긋남은 §4.8 의 5처럼 시스템 방에 알린다 — 알아채는 쪽은 진행 스레드다 (잠정, S-8). 작업 없는 런을 CLI 가 풀었으면 (나)의 정리가 그 결재를 닫는다.
+CLI 는 서버를 거치지 않고 엔진을 직접 부른다 (S-5 에서 확인): `relay cancel` · `apply` · `discard` · `rollback` · `approve` · `resume` 이 자기 프로세스의 엔진 메서드를 그대로 부른다(`cli.py` 658–672). 그래서 CLI 로 작업 런을 승인하거나 변경을 되돌리는 것은 막지 못한다. 서버가 도는 동안 그 어긋남을 알아채 시스템 방에 알리는 코드는 없다 (미구현, 받을 작업 미정). 있는 것은 둘이다 — `working` 작업의 런이 서버 밖에서 돌다 멈추면 큐가 §4.7 의 표대로 처리하고(`studio/queue.py` `_stopped_elsewhere`), 서버를 띄울 때 §4.8 의 5가 `proposed` · `blocked` · `review` 인데 그 상태를 받치는 `pending` 결재가 없는 작업을 시스템 방에 알린다(`studio/work.py` `_broken`). 작업 없는 런을 CLI 가 풀었으면 (나)의 정리가 그 결재를 닫는다.
 
 ### 5.9 알림 — 결재가 아닌 것과 푸시
 
@@ -1280,7 +1292,7 @@ CAMPAIGN.md §2(76행), S-5, A-9 가 적은 결재는 모두 9가지이고 이�
 | 행위자 | `sat1.<claims>.<서명>` (§8.2) | employee | §8.2 |
 
 - 주체별 경로: 행위자 경로(`/studio/mcp/*` · `/studio/guard/*`)는 행위자 토큰만, 나머지 `/studio/*` 는 owner 만 받는다. 403 `actor_not_allowed` 는 주체가 정해졌는데 그 경로의 주체가 아닐 때만 쓴다 — owner(맞는 공용 · 기기 토큰)가 행위자 경로에 오거나, §8.2 의 검사 1–3 을 지난 행위자 토큰이 owner 경로에 올 때다. 주체를 정하지 못하면 401 이다: 헤더가 없는 요청과 끝난 런의 행위자 토큰은 owner 경로에서 401 `unauthorized`, 행위자 경로에서 401 `actor_invalid` 다.
-- 기존 가드와 다른 점은 둘이다. `[§12]` (1) 공용 토큰을 설정하지 않은 서버에 원격으로 오면 기존 가드는 403 인데(109–110) `/studio/*` 는 401 이다 — S-3 · M-2 의 완료 기준이 401 이다. 기기 토큰은 공용 토큰이 없어도 받는다 (잠정, M-2). (2) 루프백도 토큰을 요구한다 — 헤더가 없으면 401 이고(4), 있으면 검사한다(3). 기존 가드는 루프백이면 토큰을 보지 않는다(107). 직원의 스크립트도, 끝난 런의 행위자 토큰을 든 MCP 서버도 루프백이라는 이유로 owner 가 되지 않게 한다.
+- 기존 가드와 다른 점은 둘이다. `[§12]` (1) 공용 토큰을 설정하지 않은 서버에 원격으로 오면 기존 가드는 403 인데(109–110) `/studio/*` 는 401 이다 — S-3 · M-2 의 완료 기준이 401 이다. 기기 토큰은 공용 토큰이 없어도 받는다 (M-2 가 확정했다). (2) 루프백도 토큰을 요구한다 — 헤더가 없으면 401 이고(4), 있으면 검사한다(3). 기존 가드는 루프백이면 토큰을 보지 않는다(107). 직원의 스크립트도, 끝난 런의 행위자 토큰을 든 MCP 서버도 루프백이라는 이유로 owner 가 되지 않게 한다.
 - 구현 자리: 가드의 토큰 검사(107–112)가 경로가 `/studio/` 로 시작하면 studio 인증 함수로 넘긴다. 이 갈래는 루프백 통과(107)보다 앞에 둔다 — 뒤에 두면 헤더 없는 루프백 요청이 studio 인증에 닿지 않는다. S-3 의 "기존 토큰 가드를 그대로 탄다"와 달리 가드에 갈래가 하나 생긴다. `[§12]`
 - 기기 토큰은 `/studio/*` 에서만 통한다. 폰을 잃었을 때 그 토큰으로 `/admin/restart` · `/repos` 같은 기존 경로를 부를 수 없게 한다. 그래서 앱이 읽는 기존 조회는 `/studio` 아래에 별칭을 둔다 (§6.4 의 런 · 사용량). `[§12]`
 - 대시보드의 studio 화면이 토큰을 묻는 방법. 페이지 `/` 와 `/studio` 가 아닌 기존 경로는 루프백이면 지금처럼 토큰 없이 열린다. 대시보드가 `/studio/*` 를 처음 불러 401 을 받으면 기존 토큰 창(`dashboard.html` 462–486 의 `askToken`)으로 공용 토큰을 묻고, `localStorage` 의 `katae-token` 에 저장해 그 뒤 요청에 `Authorization: Bearer` 로 붙인다 — 원격 접속 때의 흐름(487–500) 그대로이고 안내 문구만 studio 용으로 바꾼다. 저장된 토큰이 맞으면 묻지 않는다. WS 는 같은 토큰을 첫 메시지 `auth` 로 보내고(§7.1) 4401 로 끊기면 다시 묻는다. 토큰 값은 서버 PC 에서 `uv run relay remote status` 로 본다 (대시보드의 기존 안내 문구 473 과 `cli.py` 256. 출력 모양은 확인 필요, S-3). 공용 토큰을 설정하지 않은 서버에서는 studio 화면을 열 수 없다 — 401 의 `detail` 이 설정 방법(`relay.config.local.yaml` 의 `auth_token` 또는 환경 변수 `KATAE_TOKEN`)을 알리고, 서버가 토큰을 대신 만들지 않는다 (잠정, S-3). 서버가 맡는 것은 401 과 그 `detail` 까지다. 대시보드 쪽 변경은 studio 화면을 붙이는 작업이 이 흐름대로 한다.
@@ -1340,14 +1352,14 @@ CAMPAIGN.md §2(76행), S-5, A-9 가 적은 결재는 모두 9가지이고 이�
 | `PATCH /studio/devices/{id}` | `{name, fcm_token, settings}` 중 일부. `id` 에 `me` 를 쓰면 지금 토큰의 기기 | 기기 행 | | A-11, N-2 |
 | `POST /studio/devices/{id}/revoke` | — | 기기 행 | | M-2 |
 
-- `machine` 의 필드: `doctor` 는 `relay doctor` 결과, `engines` 는 설치된 엔진 목록, `disk` 는 `{free_bytes, total_bytes}`, `providers` 는 기존 `/providers` 응답, `editors` 는 `[{project_id, pid, mcp_port, healthy}]`, `limits` 는 `{max_concurrent_runs, max_exchanges}` (§3.16). 세부 모양은 M-1 이 확정한다. `/providers` 응답의 전체 모양은 확인 필요 (§11.3).
+- `machine` 의 필드 (M-1 이 정했다. `studio/machine.py`). `name` 은 컴퓨터 이름, `server_version` 은 서버가 올려 둔 코드의 해시 12자(`server.py` 의 `RUNNING_CODE`), `schema_version` 은 `MIGRATIONS` 의 마지막 버전(§3.2), `now` · `utc_offset_minutes` 는 이 컴퓨터의 지역 시각과 UTC 와의 차(분)다 (§6.1). `doctor` 는 `relay doctor` 의 점검 목록 `[{id, ok, what, hint}]` — `ok` 가 `null` 이면 문제로 세지 않는 참고 줄이고, `hint` 는 실패한 점검에만 있다. `engines` 는 `[{version, path, exists}]` — `HKLM\SOFTWARE\EpicGames\Unreal Engine` 아래 버전 키의 `InstalledDirectory` 를 읽어(64비트 뷰 다음 32비트 뷰. 읽기만 한다) 버전 순으로 낸다. 키가 없거나 Windows 가 아니면 빈 배열이고, 소스에서 빌드한 엔진은 나오지 않는다. `disk` 는 `{path, free_bytes, total_bytes}` — `runs_dir` 가 놓인 드라이브다. `providers` 는 기존 `/providers` 응답 그대로다. `editors` 는 `[{project_id, pid, mcp_port, healthy, uproject}]` — 실행 중인 `UnrealEditor` · `UE4Editor` 프로세스(`-Cmd` 는 제외)이고, 명령줄의 `.uproject` 가 등록된 프로젝트의 `path` 아래면 그 프로젝트다(못 찾으면 `project_id` · `mcp_port` 는 `null`). `healthy` 는 그 프로젝트의 `mcp_port` 에 TCP 연결이 되는지다 (잠정 — `health_check` 는 M-7). `limits` 는 `{max_concurrent_runs, max_exchanges}` (§3.16. `max_exchanges` 는 S-9 가 설정을 넣기 전까지 20). 출처 하나를 읽지 못해도 응답은 200 이고 그 칸만 빈 배열이다(`disk` 는 두 값이 `null`). 캐시는 없다 — 부를 때마다 `claude --version` 한 번과 프로세스 조회(PowerShell 한 번, 최대 8초)를 돌리므로 몇 초 걸릴 수 있다. 그래서 앱은 이 값을 보여 주는 화면을 열거나 새로 고칠 때만 부르고, 값싼 네 값(`name` · `server_version` · `schema_version` · `utc_offset_minutes`)은 `hello` 의 `machine` (§7.1) 에서 읽는다 (M-1 확정). `/providers` 응답의 전체 모양은 확인 필요 (§11.3).
 
 **프로젝트 · 에디터 · 생성 작업**
 
 | 메서드 · 경로 | 요청 | 응답 | 오류 | 작업 |
 |---|---|---|---|---|
 | `GET /studio/projects` | `?archived=0·1` | 행 목록 | | S-3 |
-| `POST /studio/projects` | 가져오기: `{path, name, repo}` (`name` · `repo` 는 선택) | 201 행 | `conflict` · `precondition_failed` | M-6 |
+| `POST /studio/projects` | 가져오기: `{path, name, repo}` (`name` · `repo` 는 선택) | 201 행 + `{detected}` | `conflict` · `precondition_failed` | M-6 |
 | `POST /studio/projects/create` | 새로 만들기: `{name, engine_version, parent_dir, plugins[], harness}` | 202 `{job}` | `conflict` · `precondition_failed` | M-3–M-5 |
 | `GET /studio/projects/{id}` | — | 행 + `{employees[], task_counts, editor}` | | S-3 |
 | `PATCH /studio/projects/{id}` | `{name, engine_version, mcp_port}` 중 일부 | 행 | `conflict` | S-3 |
@@ -1359,6 +1371,7 @@ CAMPAIGN.md §2(76행), S-5, A-9 가 적은 결재는 모두 9가지이고 이�
 | `GET /studio/jobs/{id}` | — | `{id, kind, status, steps[], project_id, error}` | | M-8 |
 | `POST /studio/jobs/{id}/retry` · `/cleanup` | — | 202 `{job}` | `precondition_failed` | M-8 |
 
+- `POST /studio/projects` (M-6 이 정했다. `studio/importer.py`). 이미 있는 UE 프로젝트 폴더를 읽어 `projects` 행으로 등록한다. 폴더는 읽기만 한다 — 파일을 만들거나 고치지 않고 git 명령도 돌리지 않는다(`git status` 는 `.git/index` 를 고칠 수 있다). 빠진 MCP · 하네스는 `detected.missing` 으로 알리기만 하고, 채우는 일은 M-4 · M-5 가 한다. `path` 는 `.uproject` 가 있는 폴더의 절대 경로다. 저장소는 `RepoRegistry.match(path)` 가 돌려주는 것이고(§3.3), `repo` 를 주면 `RepoRegistry.get(repo)` 로 확인한 뒤 그 둘이 같아야 한다. 등록된 저장소 안의 폴더가 아니면 `precondition_failed` 다 — `relay repo add <이름> <경로>` 로 먼저 등록한다. 이 검사는 폴더가 있는지보다 먼저 해서, 저장소 밖 경로는 있든 없든 같은 답을 받는다. 그 뒤 폴더가 없거나 그 바로 아래에 `.uproject` 가 없으면 `precondition_failed`(`failed` 는 `[]`)다. `path` 가 폴더가 아니라 파일이어도(`.uproject` 파일 자체 포함) 같다 — 받는 것은 폴더뿐이다. `path` · `name` · `repo` 가 공백뿐이면 `missing_fields` 다. 경로(슬래시 방향 · 대소문자 · 끝 슬래시는 무시) · 이름 · 저장소가 이미 있는 프로젝트(보관된 것 포함)와 같으면 `conflict` 이고 `field` 는 `path` · `name` · `repo` 중 이 순서로 먼저 걸린 것이다. `name` 을 주지 않으면 `.uproject` 파일 이름(확장자 제외)이고, 저장하는 `path` 는 심볼릭 링크 등을 푼 절대 경로다. `engine_version` 은 `.uproject` 의 `EngineAssociation` 이 `5.7` 같은 버전 꼴이면 그 값이고(그 엔진이 이 컴퓨터에 없어도 같다), GUID(소스 빌드)나 빈 값이면 `''` 다 — `PATCH` 로 고친다. `mcp_port` 는 `Config/DefaultEngine.ini` 의 `[UnrealMCP]` 구역 `Port` 가 먼저고(에디터 플러그인이 읽는 값), 그 값이 `null` 이면(없거나 포트 꼴이 아니면) `.mcp.json` 의 `mcpServers.<이름>.env.UNREAL_MCP_PORT` 다. 포트 꼴은 1–65535 의 정수나 그 수를 숫자로만 적은 문자열이다(따옴표 · 앞뒤 공백은 뗀다). 구역에 `Port` 가 여러 번 나오면 엔진이 읽는 대로 마지막 것이 세고, 그 값이 포트 꼴이 아니면 앞의 값으로 돌아가지 않고 ini 값은 `null` 이다. `.mcp.json` 쪽은 파일에 적힌 순서로 `UNREAL_MCP_PORT` 를 적은 첫 서버의 값이고, 그 값이 포트 꼴이 아니면 다음 서버를 보지 않고 `null` 이다. 그 포트를 보관 안 된 다른 프로젝트가 쓰고 있으면 거절하지 않고 `mcp_port` 를 `null` 로 등록한 뒤 `detected.mcp.in_use_by` 에 그 프로젝트 id 를 낸다. 응답은 201 로 행에 `detected` 를 얹은 것이고, `project.updated` 이벤트의 `project` 에는 행만 싣는다. `detected` 는 `{uproject, engine, mcp, harness, git, missing[]}` 다. `uproject` 는 파일 이름이다. `engine` 은 `{association, installed}` — `EngineAssociation` 그대로와, 그 버전이 `machine` 의 `engines` 에 있고 그 폴더가 있는지(`exists`)다. `mcp` 는 `{port, ini, mcp_json, in_use_by}` — 두 파일에서 읽은 값과 그중 고른 값이다(못 읽으면 `null`). `harness` 는 `{claude_md, docs}` — 폴더에 `CLAUDE.md` 파일과 `Docs` 폴더가 있는지다. `git` 은 프로젝트 폴더에서 저장소 루트까지 올라가며 `.git` 이 있는지이고, `missing` 은 `mcp`(포트를 찾지 못했다) · `harness`(둘 중 하나라도 없다) 가운데 빠진 것이다 (M-6 확정).
 - 생성 작업(job)은 12개 테이블에 없다. `runs/studio/jobs/<job_id>.json` 에 두고 id 는 `job_<hex8>` 이다 (잠정, M-8). 단계와 이벤트는 §7.4.
 
 **파트 · 직원**
@@ -1379,7 +1392,7 @@ CAMPAIGN.md §2(76행), S-5, A-9 가 적은 결재는 모두 9가지이고 이�
 | `POST /studio/employees/{id}/leave` | `{on}` | 행 | `precondition_failed` | H-3 |
 | `POST /studio/employees/{id}/retire` | — | 행 | `precondition_failed` | H-3 |
 
-- 직원을 만드는 엔드포인트는 없다. 직원은 `hire` 결재의 승인(§5.5)으로만 생긴다. 검증용 시드 직원을 들이는 방법은 S-7 이 정한다 (잠정).
+- 직원을 만드는 엔드포인트는 없다. 직원은 `hire` 결재의 승인(§5.5)으로만 생긴다. 검증용 시드 직원만 예외다: 직원이 한 명도 없는 DB 에서 서버가 시작할 때 한 번 만든다 (§3.15).
 - `files` 는 `{persona_md, guide_md, memory_md, employee_yaml}` 이다. 값은 그 파일의 본문이고 파일이 없으면 `null` 이다. `tasks[]` 는 그 직원이 담당이고 종결(`done` · `rejected` · `cancelled`)이 아닌 작업 행이다 — 끝난 작업까지는 `GET /studio/tasks?assignee_id` 로 본다 (S-3). `runs` 는 그 직원의 지금 도는 studio 런 `[{run_id, room_id, task_id, mode}]` 이다.
 - H-3 의 경로(파일 · 이력 · 되돌리기 · 배치 · 휴직 · 퇴사)는 잠정이고 H-3 이 확정한다.
 
@@ -1422,17 +1435,17 @@ CAMPAIGN.md §2(76행), S-5, A-9 가 적은 결재는 모두 9가지이고 이�
 | `GET /studio/tasks/{id}/events` | `?after_id` · `?limit` | `{items, has_more}` | | S-3 |
 
 - `progress` 는 `{by_status: {…}, total, done_ratio}` 다 (S-13). `run` 은 `{id, status, changes_status}` 또는 NULL 이다.
-- `by_status` 는 §4.1 의 여덟 상태가 모두 키이고 없는 상태는 0 이다. `total` 은 그 캠페인의 작업 수다. `done_ratio` 는 `done` 인 작업 수를 `total` 로 나눈 값(0–1)이고 작업이 없으면 0 이다 — 취소 · 반려된 작업도 분모에 든다 (잠정, S-3. S-13 이 확정한다). `run` 은 S-8 이 엔진 조회를 붙이기 전까지 항상 NULL 이다 (S-3).
+- `by_status` 는 §4.1 의 여덟 상태가 모두 키이고 없는 상태는 0 이다. `total` 은 그 캠페인의 작업 수다. `done_ratio` 는 `done` 인 작업 수를 `total` 로 나눈 값(0–1)이고 작업이 없으면 0 이다 — 취소 · 반려된 작업도 분모에 든다 (잠정, S-3. S-13 이 확정한다). `run` 은 지금 항상 NULL 이다 — `api._run_view` 에 값을 넣는 코드가 없다 (`api.install` 이 받지 않고 `server.py` 도 넘기지 않는다). S-8 은 엔진 조회를 붙이지 않았다 (S-3. 받을 작업 미정).
 - 목록의 `?status` 는 값 하나다. 캠페인은 §4.10, 작업은 §4.1 의 이름이고 그 밖의 값은 422(검증 오류)다. 작업 목록의 순서는 `sort_order`, 그다음 만든 순서다 (S-3).
 - `POST /studio/tasks` 는 필수 여섯 중 빈 것을 모두 모아 `missing_fields` 의 `fields[]` 에 싣는다. 없는 프로젝트 · 부모 · 캠페인 · 선행 작업, 프로젝트가 다른 캠페인 · 선행 작업, 재직 중이 아닌 담당은 `precondition_failed` 이고 `failed[]` 는 빈 배열이다 (§6.3). `depends_on[]` 은 작업을 만드는 트랜잭션에서 함께 넣는다 (§3.11. S-3).
-- `GET /studio/tasks/{id}` 가 덧붙이는 것: `room_id` 는 작업방 id, `depends_on[]` · `dependents[]` 는 작업 id 목록, `deps_met` 은 §4.6 의 "선행 조건" 판정, `pending_inbox_id` 는 그 작업의 `pending` 결재 id 다 (없으면 NULL). `queue_position` 은 서버 전체 줄(`queued_at` 오름차순)에서 1부터 센 자리이고 줄에 없으면 NULL 이다 (잠정, S-3. 프로젝트별로 셀지는 S-8 이 확정한다).
+- `GET /studio/tasks/{id}` 가 덧붙이는 것: `room_id` 는 작업방 id, `depends_on[]` · `dependents[]` 는 작업 id 목록, `deps_met` 은 §4.6 의 "선행 조건" 판정, `pending_inbox_id` 는 그 작업의 `pending` 결재 id 다 (없으면 NULL). `queue_position` 은 서버 전체 줄(`queued_at` 오름차순)에서 1부터 센 자리이고 줄에 없으면 NULL 이다 (S-3. S-8 확정 — 프로젝트별로 세지 않고 서버 전체 줄 그대로다).
 - `PATCH /studio/tasks/{id}` 는 보낸 키만 바꾼다. 줄 서 있는(`queued_at` 이 찬) 작업은 `backlog` 여도 앞의 일곱 필드를 고칠 수 없다 — 시작 요청이 검사한 내용이 그대로여야 한다. `stop` 으로 줄에서 뺀 뒤 고친다 (잠정, S-3). NULL 은 `relay` · `campaign_id` 만 받고(비운다는 뜻) 나머지에 NULL 이나 빈 글이 오면 `missing_fields` 다. 바뀐 값이 없으면 쓰지 않고 지금 행을 준다. 바꾸면 `task_events` 에 `edited` 행이 남는다 (`detail.fields` 에 필드별 `{from, to}`). `is_milestone` 은 `from` · `to` 모두 true/false 이고, T1 승인 수정이 남기는 `edited` 행도 같다. 담당은 `assign`, 선행 관계는 `deps` 경로로만 바꾼다 (S-3).
 - 글 필드 네 개(`title` · `reason` · `spec` · `done_criteria`)는 등록 · 수정 모두 받은 그대로 저장한다. 앞뒤 공백을 자르지 않고, 공백만 다른 글도 다른 값이다. 공백뿐이면 빈 글이다 (§3.10 의 CHECK). `relay` · `campaign_id` · `parent_id` · `assignee_id` 는 앞뒤 공백을 자르고 빈 글은 NULL 이다 (S-3).
 - `PUT /studio/tasks/{id}/deps` 는 선행 집합을 통째로 바꾼다. 자기 자신 · 없는 작업 · 다른 프로젝트의 작업 · 순환은 `precondition_failed` 이고 `failed[]` 는 빈 배열이다. 줄 서 있는 작업도 같다 (잠정, S-3). 집합이 같으면 쓰지 않는다. 바꾸면 `deps` 행이 남는다 (`detail` 은 `{from[], to[]}`).
-- `POST /studio/tasks/{id}/cancel` 의 `engine_error` 는 쓰기 전에 엔진이 거부한 경우뿐이다 — 작업과 결재는 그대로다. 커밋 뒤의 후속 처리가 실패하면 전이는 유지되고 서버 오류(500)로 나간다. 다시 읽으면 작업은 `cancelled` 다 (S-3. 후속 처리의 오류 종류는 S-8 이 정한다).
+- `POST /studio/tasks/{id}/cancel` 의 `engine_error` 는 쓰기 전에 엔진이 거부한 경우뿐이다 — 작업과 결재는 그대로다. 커밋 뒤의 후속 처리가 실패하면 전이는 유지되고 서버 오류(500)로 나간다. 다시 읽으면 작업은 `cancelled` 다 (S-3. 후속 처리의 오류 종류는 S-8 도 정하지 않았다 — 받을 작업 미정).
 - `GET /studio/tasks/{id}/events` 는 `id` 오름차순이고 `after_id` 뒤의 처음 `limit` 개다 (기본 50, 최대 200 — 글 목록과 같다. S-3).
 - `start` 는 T3 의 계기다 (§4.3). 전이는 슬롯을 얻은 때 일어나므로 응답의 작업은 아직 `backlog` 다. `stage_models` 는 `tasks.stage_models_json` 에 저장하고, 상한(`model_cap` · `effort_cap`)을 넘으면 `precondition_failed` 다 (§11.2). 상한이 어디서 오는지, 검사 순서, `failed[]` 의 코드는 §9.5 다.
-- `stop` 은 전이가 아니다. 줄 서 있는 `backlog` 작업은 줄에서 뺀다(`queued_at = NULL`, `unqueued`). 줄 서 있는 `working` 작업(T5 · T8 뒤)도 먼저 줄에서 뺀다(`queued_at = NULL`, `unqueued`) — 런이 이미 멈춰 있으면 그 자리에서 system 이 T4(`question`, `run_cancelled`)를 하고 런은 멈춰 있던 상태 그대로 둔다. 런이 아직 돌면 줄에서 뺀 뒤 `RelayEngine.cancel` 로 끊는다. 줄에서 먼저 빼므로 진행 스레드가 돌아올 때 §4.7 표의 `cancelled` · `working` 행이 받는다 (잠정, S-8). 런이 도는 작업은 `RelayEngine.cancel` 로 끊고, 진행 스레드가 돌아오면 §4.7 표의 `cancelled` 행이 T4(`question`, `run_cancelled`)를 한다. `stop` 은 작업을 종결하지 않는다 — 그만두려면 `blocked` 가 된 뒤 `cancel` 을 부른다(T11). 그래서 "중지"의 끝은 `blocked` 다. `[§12]`
+- `stop` 은 전이가 아니다. 줄 서 있는 `backlog` 작업은 줄에서 뺀다(`queued_at = NULL`, `unqueued`). 줄 서 있는 `working` 작업(T5 · T8 뒤)도 먼저 줄에서 뺀다(`queued_at = NULL`, `unqueued`) — 런이 이미 멈춰 있으면 그 자리에서 system 이 T4(`question`, `run_cancelled`)를 하고 런은 멈춰 있던 상태 그대로 둔다. 런이 아직 돌면 줄에서 뺀 뒤 `RelayEngine.cancel` 로 끊는다. 줄에서 먼저 빼므로 진행 스레드가 돌아올 때 §4.7 표의 `cancelled` · `working` 행이 받는다 (S-8 확정). 런이 도는 작업은 `RelayEngine.cancel` 로 끊고, 진행 스레드가 돌아오면 §4.7 표의 `cancelled` 행이 T4(`question`, `run_cancelled`)를 한다. `stop` 은 작업을 종결하지 않는다 — 그만두려면 `blocked` 가 된 뒤 `cancel` 을 부른다(T11). 그래서 "중지"의 끝은 `blocked` 다. `[§12]`
 - `cancel` 은 작업 취소다 — `backlog` 면 T10, `blocked` 면 T11 (§4.3). owner 만 부른다. `reason` 은 `task_events.reason` 에 남는다. 그 밖의 상태는 `illegal_transition` 이다 — `proposed` · `working` · `review` 는 F10, `done` · `rejected` 는 F9, 이미 `cancelled` 면 F0 이다 (§4.4 의 표). `working` 은 `stop` 을 먼저 불러 `blocked` 가 된 뒤, `review` 는 결재의 되돌리기(T9)로 `backlog` 가 된 뒤 부른다. `blocked` 인데 런이 아직 돌거나 변경을 되돌릴 수 없으면 `precondition_failed` 다. 이름이 같은 것과 구분한다 — 캠페인의 `cancel`(위 표, §4.10)은 작업을 취소하지 않고, 런을 끊는 `RelayEngine.cancel` 은 `stop` 이 부르며, 결재의 `cancelled` 는 T11 이 차단 결재를 닫을 때만 따라온다 (§5.1).
 - S-3 의 "tasks(+전이 액션)"에 해당하는 것은 `start` · `stop` · `cancel` 과 결재의 `decide` 다. T1 · T2 · T5 · T7 · T8 · T9 를 직접 부르는 경로는 없다 — 결재 결정으로만 일어난다. owner 가 경로로 직접 부르는 전이는 취소(T10 · T11)뿐이다 (§4.2 의 "통로").
 
@@ -1483,7 +1496,7 @@ CAMPAIGN.md §2(76행), S-5, A-9 가 적은 결재는 모두 9가지이고 이�
 | 3 | 작업 런이고 작업이 `blocked` · `review` 다 (런이 아직 도는 구간, §4.5) | 결재를 만들지 않는다. §4.5 의 표대로 `task_events` 에 `guard` 행을 남긴다 (`task.updated`, §7.5) | `deny`. `end_turn` 은 `blocked` 면 `true`(서버가 곧 그 런을 끊는다), `review` 면 `false`(런이 남은 단계를 마저 돈다) |
 | 4 | 그 밖 — 작업 런이 아닌 턴(읽기 · 채팅)이거나 작업이 위 세 상태가 아니다 | 결재도 `task_events` 행도 만들지 않는다 | `deny` · `end_turn: false` |
 
-- 2 의 뒤처리는 `ask_owner` 와 같다 — 응답을 보낸 뒤 60초(잠정, S-6)가 지나도 그 런이 `running` 이면 `RelayEngine.cancel` 로 끊는다 (§8.3). 이벤트와 푸시도 T4 그대로다 (§4.2, §5.9).
+- 2 의 뒤처리는 `ask_owner` 와 같다 — 응답을 보낸 뒤 60초가 지나도 그 런이 `running` 이면 `RelayEngine.cancel` 로 끊는다 (§8.3. 미구현, 받을 작업 미정). 이벤트와 푸시도 T4 그대로다 (§4.2, §5.9).
 - 4 에서 결재를 만들지 않는 이유: 1회 허용은 작업에 남고 그 작업의 작업 런만 쓴다 (§5.5). 명령을 시도한 것이 작업 런이 아닌 턴이면 승인해도 그 턴이 허용을 쓸 수 없다. 직원은 거부 문장을 읽고 방에 그대로 묻는다. S-10 의 "런을 멈추고 결재함으로 보낸다"와 다른 점이다 (잠정, S-10). `[§12]`
 - 훅의 실패 처리: 훅은 `decision` 이 `allow` 인 200 응답을 받았을 때만 명령을 통과시킨다. 401 · 403 · 503 · 그 밖의 HTTP 오류 · 연결 실패 · 시간 초과는 모두 거부다 (잠정, S-10). 열린 쪽으로 실패하면 서버가 죽었을 때 위험 명령이 그대로 실행된다. owner 확정 (§12.6 의 6): 서버에 닿지 못하면 명령을 거부한다.
 - 여기서 정하지 않은 것. §10 이 정했다(10.2–10.7): 차단 목록과 "물어보고 진행" 목록, `rule_id` · `tool` 의 값, 훅이 Claude Code 에 돌려주는 응답 형식, 1회 허용의 저장 자리와 키의 구체 형식(같은 명령으로 보는 기준 포함. 키가 작업 기준이라는 것과 수명은 §5.5 가 정했다), 감사 로그. §11.4 가 정한다: 서버 주소와 행위자 토큰을 훅 프로세스에 넘기는 자리. 지금 코드의 `hook_settings`(`journal.py` 285–292)는 설정 파일에 PreToolUse 명령 줄을 argv 로만 적고, 그 설정 파일은 `JournalWorkspace` 런에만 넘어간다(`pipeline.py` 1552, `runners.py` 594–595). 가드 훅을 studio 의 런 전부에 걸려면 이 자리를 넓혀야 한다.
@@ -1492,11 +1505,11 @@ CAMPAIGN.md §2(76행), S-5, A-9 가 적은 결재는 모두 9가지이고 이�
 
 ### 6.5 기기 페어링 (M-2)
 
-1. owner 가 대시보드에서 `POST /studio/devices/pairing` 을 부른다. 이 경로는 owner 토큰이 필요하다 — 헤더 없는 요청은 루프백이어도 401 `unauthorized` 다 (§6.2 의 4). 토큰 없이 받는 것은 2 의 `/pair` 하나다. 서버가 코드(`secrets.token_urlsafe(16)`)를 만들어 메모리에 해시와 만료 시각(5분)을 둔다 (§3.14). 응답의 `qr` 은 `{v: 1, url, code, name}` 이고 대시보드가 QR 로 그린다. `url` 은 폰이 닿을 서버 주소다 — `Config` 의 어느 값에서 얻는지는 확인 필요 (M-2. `relay remote on --tailscale` 이 무엇을 설정하는지 읽지 않았다).
-2. 앱이 `POST /studio/devices/pair` 로 `{code, name, platform, fcm_token}` 을 보낸다. 토큰이 없어도 받지만 §6.2 의 1(네트워크 검사)은 거친다.
-3. 서버가 코드를 확인하고 지운다(1회용). 기기 토큰을 만들어 해시만 `devices` 에 넣고, 원문은 이 응답에서 한 번만 준다.
-4. 틀린 코드 · 만료된 코드 · 이미 쓴 코드는 `pairing_invalid` 다. 서버가 재시작하면 남은 코드는 모두 무효다.
-5. 폐기(`revoke`)하면 `revoked_at` 을 채운다. 그 토큰은 다음 요청부터 401 이고, 그 기기의 WS 연결을 끊는다 (§7.1).
+1. owner 가 대시보드에서 `POST /studio/devices/pairing` 을 부른다. 이 경로는 owner 토큰이 필요하다 — 헤더 없는 요청은 루프백이어도 401 `unauthorized` 다 (§6.2 의 4). 토큰 없이 받는 것은 2 의 `/pair` 하나다. 서버가 코드(`secrets.token_urlsafe(16)`)를 만들어 메모리에 해시와 만료 시각(5분)을 둔다 (§3.14). 응답은 `{code, expires_at, qr}` 이고 `qr` 은 `{v: 1, url, code, name}` 이다 — `expires_at` 은 이 컴퓨터의 지역 시각(§6.1), `name` 은 컴퓨터 이름(`machine` 의 `name`)이다. 대시보드('📱 폰 연결')는 QR 라이브러리를 들이지 않아 지금은 주소 · 코드 · `qr` 의 JSON 을 글자로 보여 준다 (QR 로 그리는 것은 뒤 작업이고, 앱은 직접 입력이나 붙여넣기를 받는다 — A-3). `url` 은 폰이 닿을 서버 주소다. `Config` 에는 그 주소를 담은 값이 없다 — `relay remote on --tailscale` 은 `serve_host`(`0.0.0.0`) · `auth_token` · `remote_networks`(tailnet 대역)만 쓰고 주소는 저장하지 않는다 (`cli.py` 의 `remote_command`). 그래서 코드를 낼 때마다 `studio/devices.py` 의 `reach_url` 이 `relay remote status` 가 주소를 적는 순서로 고른다 (M-2 가 확정했다): (가) `serve_host` 가 루프백이면 요청이 온 주소(요청의 base URL) — 원격 접속이 꺼져 있어 폰에 알려 줄 주소가 없다. (나) Tailscale 이 연결돼 있으면 `http://<MagicDNS 이름>:<포트>`, 이름이 없으면 첫 IPv4 (`cli.py` 의 `tailscale_info`). (다) `remote_networks` 가 tailnet 전용이 아니면 이 컴퓨터의 첫 LAN IPv4 (`lan_urls`. `100.` 으로 시작하는 주소는 뺀다). (라) 그 밖에는 요청이 온 주소. 포트는 `server_url` 의 포트다 (없으면 8020). 캐시는 없다 — (나)를 보려고 코드를 낼 때마다 `tailscale status --json` 을 한 번 돌린다 (최대 10초). `relay serve --host` 로만 바깥에 연 서버는 `serve_host` 가 루프백으로 남아 (가)가 된다. MagicDNS 를 끈 tailnet 에서 폰이 그 이름을 풀지 못하는지는 실제 폰으로만 볼 수 있다 (`VERIFICATION.md`).
+2. 앱이 `POST /studio/devices/pair` 로 `{code, name, platform, fcm_token}` 을 보낸다. 토큰이 없어도 받지만 §6.2 의 1(네트워크 검사)은 거친다. `name` 은 앞뒤 공백을 뺀 1–80자, `platform` 은 없으면 `android`(20자까지), `fcm_token` 은 없어도 된다 (`null` · 빈 문자열은 없는 것). 본문이 검증에 걸리면(422) 코드는 쓰이지 않고 남는다.
+3. 서버가 코드를 확인하고 지운다(1회용). 기기 토큰(`sdt_` + `secrets.token_urlsafe(32)`)을 만들어 해시만 `devices` 에 넣고, 원문은 이 응답에서 한 번만 준다. 응답 `{device, token, machine}` 의 `device` 는 `token_hash` 를 뺀 기기 행이고, `machine` 은 `hello` 의 `machine` 과 같은 네 값이다 (§7.1) — 전체 진단(`GET /studio/machine`)은 몇 초 걸려 토큰 없는 경로에서 돌리지 않는다. 코드를 확인한 뒤 행을 쓰다 실패하면 그 코드는 다시 쓸 수 없다 (새 코드를 받는다).
+4. 틀린 코드 · 만료된 코드 · 이미 쓴 코드는 `pairing_invalid` 다. 틀린 코드를 보내도 다른 코드는 그대로 남는다. 서버가 재시작하면 남은 코드는 모두 무효다.
+5. 폐기(`revoke`)하면 `revoked_at` 을 채운다. 그 토큰은 다음 요청부터 401 이고, 그 기기의 WS 연결을 끊는다 (§7.1). 이미 폐기한 기기를 다시 폐기해도 같은 행이 온다 (`revoked_at` 은 처음 값 그대로). `GET /studio/devices` 는 `{items: [기기 행]}` 이고 폐기된 기기는 뺀다. 대시보드에는 기기 목록 · 폐기 화면이 없어 폐기는 지금 API 로만 한다 — 화면은 뒤 작업이다 (CAMPAIGN.md 의 '컴퓨터 관리(기기 폐기 포함)' 명세).
 
 ### 6.6 글 쓰기와 첨부
 
@@ -1514,14 +1527,14 @@ owner 가 `POST /studio/rooms/{id}/messages` 로 글을 쓰면 글을 저장하�
 - 첨부는 기존 `/attachments`(`server.py` 151–165)와 같은 base64 JSON 방식이다. `POST /studio/attachments` 가 돌려준 `id` 를 글의 `attachments[]` 에 넣으면, 서버가 파일을 `runs/studio/attachments/<글 id>/` 로 옮긴다 (§2.2). 그 `id` 는 `att_<hex12>` 이고 한 번만 쓸 수 있다. 글에 붙기 전의 파일은 `runs/studio/attachments/_staged/<id>/` 에 있고 `GET /studio/attachments/...` 로는 받을 수 없다. 없는 `id` 는 `precondition_failed` 다. 한 글에 같은 이름이 둘이면 뒤의 것에 `-2` 를 붙인다 (S-3).
 - `messages.attachments_json` 의 모양을 확정한다: `[{name, path, mime, size}]`. `path` 는 `runs/studio/attachments/` 기준 상대 경로 `<글 id>/<name>` 이고(결재에 딸린 파일은 `<결재 id>/<name>`, 아래), 받는 주소는 `GET /studio/attachments/<path>` 다.
 
-**직원의 첨부** (잠정, S-6). 직원은 `POST /studio/attachments` 를 부를 수 없고(owner 경로, §6.2) 파일을 올리는 MCP 도구도 따로 두지 않는다 — S-6 의 도구 12개를 유지한다. 파일을 받는 도구 인자(§8.4: `room_post` 의 `attachments[]` · `ask_owner` 의 `options[].figure` · `task_request_review` 의 `evidence[].ref`)에 파일 경로를 넘기면 서버가 검사한 뒤 복사한다. CAMPAIGN.md 는 직원이 파일을 붙이는 방법을 적지 않는다. `[§12]`
+**직원의 첨부** (`room_post` 의 `attachments[]` 는 S-6 확정 — `studio/files.py`. 런의 작업 폴더는 `api.install` 의 `workdir` 콜백 = `studio/runs.py` 의 `workdir(engine, run_id)` 로 얻는다. `figure` · `evidence[].ref` 의 복사는 잠정, S-11). 직원은 `POST /studio/attachments` 를 부를 수 없고(owner 경로, §6.2) 파일을 올리는 MCP 도구도 따로 두지 않는다 — S-6 의 도구 12개를 유지한다. 파일을 받는 도구 인자(§8.4: `room_post` 의 `attachments[]` · `ask_owner` 의 `options[].figure` · `task_request_review` 의 `evidence[].ref`)에 파일 경로를 넘기면 서버가 검사한 뒤 복사한다. CAMPAIGN.md 는 직원이 파일을 붙이는 방법을 적지 않는다. `[§12]`
 
 - 입력은 `{path, name=""}` 다 (`evidence[].ref` 는 경로 문자열 하나). `path` 는 절대 경로이거나 그 런의 작업 폴더 기준 상대 경로다. `name` 을 비우면 파일 이름을 쓴다.
 - 검사는 서버가 한다. MCP 서버는 파일을 읽지 않고 경로만 넘긴다 — 검사가 런 쪽 프로세스에 놓이면 폴더 밖 파일을 막을 수 없다. 서버는 토큰의 `run` 으로 그 런의 작업 폴더(단계가 도는 폴더. 워크스페이스가 있으면 그 경로, 없으면 `RunState.workdir`, `pipeline.py` 1551)를 찾아 `path` 를 `resolve()` 하고, 결과가 허용 폴더 안의 파일인지 본다. `_attachment_paths`(`server.py` 168–176)의 `root not in p.parents` 와 같은 방식이다.
-- 허용 폴더는 둘이다: 그 런의 작업 폴더, 그리고 프로젝트 폴더(`projects.path` — 지금 작업의 프로젝트, 작업이 없으면 호출자가 배치된 프로젝트). `copy` 런은 작업 폴더가 복사본이라, 에디터가 원본 프로젝트에 남긴 파일을 붙이려면 둘째가 필요하다. 작업도 배치된 프로젝트도 없으면(인사 · 미배치 직원, `employees.project_id` 가 NULL — §3.5) 둘째 폴더는 없고 그 런의 작업 폴더 하나만 허용한다. `task_propose` 가 인사에게 `project_id` 를 요구하는 것(§8.4)과 같은 결이다. 작업 없는 채팅 턴 런의 작업 폴더는 §9.5 의 덧붙임이 정한다 — 직원이 배치된 프로젝트의 폴더이고, 미배치 직원과 인사는 그 직원 폴더다 (잠정, S-7).
+- 허용 폴더는 둘이다: 그 런의 작업 폴더, 그리고 프로젝트 폴더(`projects.path` — 지금 작업의 프로젝트, 작업이 없으면 호출자가 배치된 프로젝트). `copy` 런은 작업 폴더가 복사본이라, 에디터가 원본 프로젝트에 남긴 파일을 붙이려면 둘째가 필요하다. 작업도 배치된 프로젝트도 없으면(인사 · 미배치 직원, `employees.project_id` 가 NULL — §3.5) 둘째 폴더는 없고 그 런의 작업 폴더 하나만 허용한다. `task_propose` 가 인사에게 `project_id` 를 요구하는 것(§8.4)과 같은 결이다. 작업 없는 채팅 턴 런의 작업 폴더는 §9.5 의 덧붙임이 정한다 — 직원이 배치된 프로젝트의 폴더이고, 미배치 직원과 인사는 그 직원 폴더다 (S-7 확정 — `studio/chat.py` 의 `_folder`. 프로젝트의 폴더는 그 프로젝트 `repo` 의 폴더다, §9.5).
 - 한도(파일당 25MB)와 이름 정리(`server.py` 161)는 owner 의 첨부와 같다. 서버가 파일을 `runs/studio/attachments/<글 id 또는 결재 id>/<name>` 으로 복사하고 — 원본은 그대로 둔다 — owner 의 첨부와 같은 `{name, path, mime, size}` 로 적는다.
 - 결재에 딸린 파일(`figure` · `evidence[].ref`)은 `attachments/<결재 id>/` 에 둔다. 결재에는 글 id 가 없기 때문이다. 글 id 는 정수이고(§3.8) 결재 id 는 `inb_<hex8>` 이라(§3.1 · §3.13) 폴더 이름이 겹치지 않는다. 받는 주소는 글의 첨부와 같다.
-- 실패는 `precondition_failed` 이고 `failed[]` 에 걸린 것을 적는다(모양은 §6.3): `attachment_not_found`(파일이 없거나 파일이 아니다) · `attachment_outside_workspace`(허용 폴더 밖이다) · `attachment_too_large`(25MB 를 넘는다). 검사는 글 · 결재를 만들기 전에 모두 끝낸다 — 하나라도 실패하면 글 · 결재 · 전이를 만들지 않는다.
+- 실패는 `precondition_failed` 이고 `failed[]` 에 걸린 것을 적는다(모양은 §6.3): `attachment_not_found`(파일이 없거나 파일이 아니다) · `attachment_outside_workspace`(허용 폴더 밖이다) · `attachment_too_large`(25MB 를 넘는다). 검사는 글 · 결재를 만들기 전에 모두 끝낸다 — 하나라도 실패하면 글 · 결재 · 전이를 만들지 않는다. 한 파일의 검사 순서는 허용 폴더 안인지 → 파일인지 → 크기다 — 폴더 밖 경로는 파일이 있든 없든 `attachment_outside_workspace` 라 다른 폴더의 사정을 알리지 않는다. 작업 폴더를 얻지 못한 런의 상대 경로도 같은 코드다 (S-6).
 - 확인 필요 (M-7): 에디터 스크린샷이 허용 폴더 안에 생기는지. 밖에 생기면 M-7 이 허용 폴더를 넓히거나 서버가 직접 방에 올리는 길을 정한다.
 
 ## 7. WS
@@ -1535,7 +1548,7 @@ owner 가 `POST /studio/rooms/{id}/messages` 로 글을 쓰면 글을 저장하�
 - 토큰은 `Authorization: Bearer` 헤더로 받는다(앱). 헤더를 붙일 수 없는 브라우저는 연결 뒤 첫 메시지로 `{type: "auth", token}` 을 보낸다. 주소의 쿼리에는 싣지 않는다 (로그에 남는다). 루프백도 토큰을 요구한다 — 헤더도 `auth` 메시지도 없으면 4401 이다 (§6.2 의 4). 대시보드는 studio 화면에서 받은 공용 토큰을 `auth` 로 보낸다 (§6.2).
 - owner 만 받는다. 행위자 토큰은 거부한다.
 - 거부할 때의 종료 코드: 토큰이 없거나 틀리면 4401, 출처 · 네트워크 · 주체가 맞지 않으면 4403. 연결 뒤 10초 안에 인증이 끝나지 않으면 4401 (잠정, S-4).
-- 기기를 폐기하면 그 기기의 연결을 4401 로 끊는다 (§6.5). 폐기 라우트(M-2)가 폐기를 커밋한 뒤 `ws.hub.drop_device(device_id)` 를 부른다 — 부르지 않으면 이미 열린 연결은 남는다 (S-4).
+- 기기를 폐기하면 그 기기의 연결을 4401 로 끊는다 (§6.5). 폐기 라우트(M-2)가 폐기를 커밋한 뒤 `ws.hub.drop_device(device_id)` 를 부른다 — 부르지 않으면 이미 열린 연결은 남는다 (S-4). 라우트는 `ws` 를 import 하지 않는다: `ws.install` 이 `api.on_revoke(hub.drop_device)` 로 등록해 둔 것을 부른다 (`api.on_commit` 과 같은 방식, M-2). `drop_device` 는 부른 순간 등록돼 있는 연결만 본다. 그래서 토큰 확인과 연결 등록 사이에 폐기가 끝난 기기 연결은, 서버가 연결을 등록한 직후 그 기기의 `revoked_at` 을 다시 읽어 `hello` 없이 4401 로 끊는다 (읽지 못하면 1013). 공용 토큰 연결은 읽지 않는다 (M-2).
 
 연결 뒤의 순서:
 
@@ -1544,7 +1557,7 @@ owner 가 `POST /studio/rooms/{id}/messages` 로 글을 쓰면 글을 저장하�
 3. 그 뒤로 새 이벤트를 id 순으로 보낸다.
 
 - `after_id` 가 보관 범위(§7.2)보다 오래됐으면 `{type: "resync", oldest_id}` 를 보내고 3부터 한다. 앱은 REST 로 전부 다시 읽는다.
-- `after_id` 가 `last_id` 보다 크거나 정수가 아니어도 `resync` 다 — 이 DB 의 순번이 아니다 (DB 를 새로 만들었거나 다른 컴퓨터의 커서다). `oldest_id` 는 남아 있는 가장 작은 id 이고, 남은 행이 없으면 `last_id + 1` 이다. `last_id` 는 보관 정리로 행이 지워져도 줄지 않는다. `hello` 의 `machine` 은 `{name}`(컴퓨터 이름)이다 (잠정, S-4 — M-1 이 `GET /studio/machine` 을 정하면 맞춘다).
+- `after_id` 가 `last_id` 보다 크거나 정수가 아니어도 `resync` 다 — 이 DB 의 순번이 아니다 (DB 를 새로 만들었거나 다른 컴퓨터의 커서다). `oldest_id` 는 남아 있는 가장 작은 id 이고, 남은 행이 없으면 `last_id + 1` 이다. `last_id` 는 보관 정리로 행이 지워져도 줄지 않는다. `hello` 의 `machine` 은 `{name, server_version, schema_version, utc_offset_minutes}` 다 — `GET /studio/machine` 의 같은 이름 값이고, 연결마다 나가므로 읽는 데 시간이 드는 칸(`doctor` · `editors` 등)은 싣지 않는다 (M-1 확정).
 - 서버는 30초마다 `{type: "ping"}` 을 보낸다. 클라이언트가 보내는 메시지는 `auth` 와 `pong` 뿐이다. 그 밖의 것은 무시한다.
 - `hello` · `ping` · `resync` 는 제어 메시지라 `id` 가 없다.
 
@@ -1680,7 +1693,7 @@ CREATE TABLE stream_events (
 | 서명 | `HMAC-SHA256(서버 비밀, claims)` 의 hex |
 | 서버 비밀 | 서버가 시작할 때 `secrets.token_bytes(32)` 로 만든다. 메모리에만 둔다 |
 
-**주입.** 엔진이 단계를 시작할 때 MCP 서버의 `env` 를 조립하는 `_stage_mcp`(`pipeline.py` 1406–1414)를 넓힌다. 지금은 `digest` 서버에만 값을 넣는다. 엔진은 직원을 모르므로, studio 가 서버 시작 때 "런 id 와 단계를 주면 `studio` 서버의 `env` 를 돌려주는" 콜백을 엔진에 등록하고 `_stage_mcp` 가 그것을 부른다 (이름과 자리 잠정, S-6). 콜백은 런이 작업 런이면 `tasks.run_id` 로, 채팅 · 읽기 턴이면 `chat.py` 가 가진 런 장부로 직원 · 방 · 작업을 찾아 토큰을 만든다. 장부에 없는 런(대시보드 · CLI 런)에는 `studio` 서버를 붙이지 않는다.
+**주입.** 엔진이 단계를 시작할 때 MCP 서버의 `env` 를 조립하는 `_stage_mcp`(`pipeline.py` 1406–1414)를 넓힌다. 지금은 `digest` 서버에만 값을 넣는다. 엔진은 직원을 모르므로, studio 가 서버 시작 때 "런 id 와 단계를 주면 `studio` 서버의 `env` 를 돌려주는" 콜백을 엔진에 등록하고 `_stage_mcp` 옆의 `_env_mcp` 가 그것을 부른다 (S-6 확정: `RelayEngine.mcp_env` — 서버 이름 → `(run_id, stage)` 를 받아 `env` 나 `None` 을 주는 콜백의 dict. studio 는 `server.py` 에서 `engine.mcp_env["studio"] = api.mcp_env` 로 등록하고, `env` 는 `STUDIO_URL` · `STUDIO_ACTOR_TOKEN` 이다. `None` 이면 단계의 `mcp` 에 적혀 있어도 붙이지 않고, `env` 를 주면 단계의 도구 유무와 무관하게 붙인다. 콜백이 예외를 내면 이벤트 `mcp_env_failed` 를 남기고 붙이지 않는다. 등록된 콜백이 없으면 앞의 동작 그대로다). 콜백은 런이 작업 런이면 `tasks.run_id` 로, 채팅 · 읽기 턴이면 `chat.py` 가 가진 런 장부로 직원 · 방 · 작업을 찾아 토큰을 만든다. 장부에 없는 런(대시보드 · CLI 런)에는 `studio` 서버를 붙이지 않는다.
 
 - 토큰은 단계마다 새로 만든다. 서버가 재시작하면 비밀이 바뀌어 앞의 토큰은 모두 무효다.
 - 러너는 MCP 설정을 임시 폴더의 `mcp.json` 에 쓴다 (`runners.py` 664–674). 그래서 단계가 도는 동안 토큰이 그 파일에 있다. 다른 런의 설정 파일을 읽는 것은 §10.3 의 `secret_access` 가 막는다.
@@ -1711,10 +1724,10 @@ CREATE TABLE stream_events (
 | 성공 | `{ok: true, end_turn, message, …도구별 필드}` |
 | 실패 | `{ok: false, code, message, end_turn, …코드별 덧붙는 필드}` |
 
-- 업무 오류는 예외가 아니라 결과다. 서버는 `/studio/mcp/*` 에 HTTP 200 과 `{ok: false, …}` 로 답한다. 모델이 `code` 와 "턴을 끝내라"를 함께 읽어야 하기 때문이다. HTTP 오류로 답하는 것은 인증 단계뿐이다 — 401 `actor_invalid`(§8.2 의 검사 1–3), 403 `actor_not_allowed`(맞는 owner 토큰이 올 때만, §6.2), 503 `unavailable`(§6.3). MCP 서버는 401 을 `actor_invalid` 로, 그 밖의 HTTP 오류와 연결 실패를 `server_unreachable` 로 바꿔 아래 모양으로 돌려준다.
+- 업무 오류는 예외가 아니라 결과다. 서버는 `/studio/mcp/*` 에 HTTP 200 과 `{ok: false, …}` 로 답한다. 모델이 `code` 와 "턴을 끝내라"를 함께 읽어야 하기 때문이다. HTTP 오류로 답하는 것은 인증 단계와 요청 검증뿐이다 — 401 `actor_invalid`(§8.2 의 검사 1–3), 403 `actor_not_allowed`(맞는 owner 토큰이 올 때만, §6.2), 503 `unavailable`(§6.3), 그리고 요청 검증 오류인 422(§6.3 의 기본 형식. 타입이 틀리거나 도구에 없는 인자다). MCP 서버는 401 을 `actor_invalid` 로, 422 를 `invalid_arguments` 로, 그 밖의 HTTP 오류(401 · 422 가 아닌 것)와 연결 실패를 `server_unreachable` 로 바꿔 아래 모양으로 돌려준다. `invalid_arguments` 는 `end_turn: false` 이고 `message` 에 어긋난 인자를 적는다 — 직원이 인자를 고쳐 다시 부른다 (S-6 확정).
 - `message` 는 직원이 읽는 한국어 문장이다. 실패면 무엇이 빠졌고 다음에 무엇을 하면 되는지를 적는다.
 - **"이제 턴을 끝내라"** 는 `end_turn: true` 다. 그때 `message` 는 이 문장으로 끝난다: "이제 턴을 끝내라. 도구를 더 부르지 말고, 지금까지 한 일과 기다리는 것을 한 문단으로 적고 멈춰라." 같은 약속을 도구 설명(docstring)에도 적는다.
-- 실패에 덧붙는 필드는 §6.3 과 이름 · 모양이 같다: `precondition_failed` 는 `failed[]`, `missing_fields` 는 `fields[]`, `illegal_transition` 은 `from` · `to` 다. 아래 오류 코드 표의 그 밖의 코드에는 덧붙는 필드가 없다. MCP 서버는 서버가 준 필드를 빼지 않고 그대로 넘긴다. MCP 서버가 스스로 만드는 `actor_invalid` · `server_unreachable` 에는 덧붙는 필드가 없다. REST 의 `detail` 자리는 여기서 `message` 다.
+- 실패에 덧붙는 필드는 §6.3 과 이름 · 모양이 같다: `precondition_failed` 는 `failed[]`, `missing_fields` 는 `fields[]`, `illegal_transition` 은 `from` · `to` 다. 아래 오류 코드 표의 그 밖의 코드에는 덧붙는 필드가 없다. MCP 서버는 서버가 준 필드를 빼지 않고 그대로 넘긴다. MCP 서버가 스스로 만드는 `actor_invalid` · `invalid_arguments` · `server_unreachable` 에는 덧붙는 필드가 없다. REST 의 `detail` 자리는 여기서 `message` 다.
 
 `end_turn` 이 `true` 인 경우:
 
@@ -1727,7 +1740,7 @@ CREATE TABLE stream_events (
 | 토큰이 무효다 | `false` | `actor_invalid` |
 | 서버에 닿지 못했다 | `false` | `server_unreachable` |
 
-- 서버의 뒤처리: T4 를 만든 응답을 보낸 뒤 60초(잠정, S-6)가 지나도 그 런이 `running` 이면 `RelayEngine.cancel` 로 끊는다 (§4.3 T4). T6 뒤에는 끊지 않는다 — 런이 남은 단계를 마저 돈다 (§4.3 T6). 담당이 아닌 구성원이 부른 `ask_owner` 는 작업 런을 기다리지 않고 끊는다 (§5.7).
+- 서버의 뒤처리: T4 를 만든 응답을 보낸 뒤 60초가 지나도 그 런이 `running` 이면 `RelayEngine.cancel` 로 끊는다 (§4.3 T4). 이 타이머는 아직 없다 — `relay_agent/studio` 에서 `RelayEngine.cancel` 을 부르는 곳은 owner 의 `stop`(`queue.py`), 승인을 기다리는 런을 끊는 `runs.py` 의 `cancel_run`, T3 의 트랜잭션이 실패했을 때 그 런을 닫는 `work.py` 의 `cancel_run`(§4.5) 셋뿐이고, 60초도 확정한 값이 아니다 (미구현, 받을 작업 미정). T6 뒤에는 끊지 않는다 — 런이 남은 단계를 마저 돈다 (§4.3 T6). 담당이 아닌 구성원이 부른 `ask_owner` 는 작업 런을 기다리지 않고 끊는다 (§5.7).
 
 오류 코드 (§4.5 의 다섯에 더한 것 포함):
 
@@ -1738,8 +1751,9 @@ CREATE TABLE stream_events (
 | `no_task_context` | 작업이 없는 턴에서 작업이 필요한 도구를 불렀다 | `false` |
 | `exchange_limit` | 직원 간 왕복 한도 (§4.5 가 §8 로 미룬 코드) | `true` |
 | `invalid_format` | 인계 형식이 맞지 않는다 (H-5) | `false` |
+| `invalid_arguments` | 타입이 틀리거나 도구에 없는 인자다 (서버의 422. S-6 확정) | `false` |
 | `actor_invalid` | 토큰이 무효다 | `true` |
-| `server_unreachable` | 서버가 꺼졌거나 답하지 않는다. 401 이 아닌 HTTP 오류(403 · 503 등)도 여기에 든다 | `true` |
+| `server_unreachable` | 서버가 꺼졌거나 답하지 않는다. 401 · 422 가 아닌 HTTP 오류(403 · 503 등)도 여기에 든다 | `true` |
 
 ### 8.4 도구
 
@@ -1760,10 +1774,10 @@ CREATE TABLE stream_events (
 | `employee_list` | `project_id=""` · `department_id=""` | 읽기. 퇴사한 직원은 뺀다 | `{items[]}` — 각 `{id, name, department_id, project_id, status}` | |
 
 - `ask_owner` 의 kind 별 인자: `question` 은 `body`(필수) · `options=[]`. `choice` 는 `body`(= `payload.question`) · `options`(2개 이상, 각 `{id, label, detail, figure=""}`. `figure` 는 아래) · `recommended=""` · `fix_points=""`. `approval` 은 `what` · `why` · `if_not`(셋 다 필수) · `policy_ref=""`. 결재 종류로의 대응은 §1.5 다.
-- 파일을 받는 인자는 셋이다 (잠정, S-6). `room_post` 의 `attachments[]` 는 `{path, name=""}`. `ask_owner(kind = choice)` 의 `options[].figure` 는 `""`(없음) · `{path, name=""}`(그림 파일) · `{mermaid}`(Mermaid 원문) 중 하나. `task_request_review` 의 `evidence[].ref` 는 문자열이고 `kind` 가 `screenshot` · `log` · `file` 이면 파일 경로, `url` 이면 URL 이다. 파일 경로는 모두 §6.6 '직원의 첨부'의 검사를 거쳐 서버가 복사한다. 걸리면 `precondition_failed` 와 `failed[]`(`attachment_not_found` · `attachment_outside_workspace` · `attachment_too_large`)이고 글 · 결재 · 전이는 만들어지지 않는다. 저장되는 모양은 §5.3 · §5.4 · §6.6 이다.
+- 파일을 받는 인자는 셋이다 (`room_post` 의 `attachments[]` 는 S-6 확정. `options[].figure` 의 파일과 `evidence[].ref` 의 파일은 잠정, S-11 — 결재 id 가 전이 안에서 정해져 그때 복사한다. 그때까지 서버는 이 둘에 파일을 넘긴 호출을 `precondition_failed` 로 거부한다). `room_post` 의 `attachments[]` 는 `{path, name=""}`. `ask_owner(kind = choice)` 의 `options[].figure` 는 `""`(없음) · `{path, name=""}`(그림 파일) · `{mermaid}`(Mermaid 원문) 중 하나. `task_request_review` 의 `evidence[].ref` 는 문자열이고 `kind` 가 `screenshot` · `log` · `file` 이면 파일 경로, `url` 이면 URL 이다. 파일 경로는 모두 §6.6 '직원의 첨부'의 검사를 거쳐 서버가 복사한다. 걸리면 `precondition_failed` 와 `failed[]`(`attachment_not_found` · `attachment_outside_workspace` · `attachment_too_large`)이고 글 · 결재 · 전이는 만들어지지 않는다. 저장되는 모양은 §5.3 · §5.4 · §6.6 이다.
 - `task_request_review` 의 `precondition_failed` 는 하네스 게이트(§4.3 T6, S-11)와 줄 서 있는 작업, 그리고 위의 첨부 검사다. 결과의 `failed[]` 에 걸린 항목을 적는다 — 예: `checklist_incomplete`(완료 기준마다 표기가 없다) · `structure_choice_missing`.
 - `room_post` 의 `mentions` 는 그 방의 구성원인 직원이어야 한다. 작업방에서 직원을 멘션하면 `exchange_count` 를 올리고(§4.6), 한도에 닿으면 §4.5 의 표대로 한다. 자기 자신은 멘션할 수 없다.
-- `room_post` 의 `handoff` 는 H-5 의 인계 형식이다. 형식 이름과 검사는 H-5 가 정하고, 맞지 않으면 `invalid_format` 과 이유를 돌려준다 (잠정).
+- `room_post` 의 `handoff` 는 H-5 의 인계 형식이다. 형식 이름과 검사는 H-5 가 정하고, 맞지 않으면 `invalid_format` 과 이유를 돌려준다 (잠정). S-6 은 받은 값을 `messages.meta.handoff` 에 그대로 저장하기만 한다. 멘션한 직원의 턴 넣기와 `exchange_count` 는 S-9 가 하고, 그때까지 `queued` 는 빈 배열이다.
 - `task_progress` 는 작업이 `working` · `blocked` · `review` 일 때 받는다 (T4 · T6 뒤에도 런이 돈다).
 
 **인사 전용** (호출자의 `department_id` 가 `hr` 이 아니면 `actor_not_allowed`)
@@ -1775,7 +1789,9 @@ CREATE TABLE stream_events (
 | `policy_draft` | `project_id` · `policy_md` · `reason` · `submit=False` · `source_inbox_id=""` | 정책 초안을 저장하고 지금 파일과의 차이를 돌려준다. `submit=True` 면 `hire` 결재(`action = policy`)를 만든다 | `{draft_id, diff, inbox_id}` | `not_found` · `missing_fields` |
 
 - 초안은 `runs/studio/drafts/<draft_id>.json` 에 둔다. id 는 `drf_<hex8>` 이다 (잠정, H-2). 제출하면 초안의 본문을 결재의 payload 에 복사하므로, 그 뒤에 초안을 고쳐도 올라간 결재는 바뀌지 않는다.
-- `employee_draft` 의 `problems[]` 는 서버가 찾은 문제다 (이름 중복, 없는 파트, `employee.yaml` 검사 실패 — §9). 문제가 있어도 초안은 저장되고, `employee_submit` 이 `precondition_failed` 로 막는다.
+- `employee_draft` 의 `problems[]` 는 서버가 찾은 문제다 (이름 중복, 없는 파트, `employee.yaml` 검사 실패 — §9). 문제가 있어도 초안은 저장되고, `employee_submit` 이 `precondition_failed` 로 막는다. 원소는 `{code, message}` 이고 코드는 `name_taken` · `department_not_found` · `hr_exists` · `hr_has_project` · `project_not_found`, 그리고 `employee.yaml` 검사의 열한 코드(§9.4)다 (S-6 의 `employee_yaml_invalid` 는 S-7 이 `yaml_invalid` 로 바꿨다. `drafts.yaml_problems` 가 `employees.check` 를 부른다). `employee_submit` 은 지금의 DB 와 파일로 다시 검사하고 걸린 코드를 `failed[]` 에 넣는다 — 수정안이면 `target_not_found` · `file_changed`(초안 뒤에 그 파일이 바뀌었다)가 더 있다.
+- `draft_id` 를 주고 `employee_draft` 를 부르면 빈 인자는 저장된 값을 유지한다 — 한 항목만 고쳐 다시 낼 수 있다. 채용 초안을 수정안으로(또는 다른 직원의 수정안으로) 바꾸는 호출은 `precondition_failed` 다. 수정안의 `base_sha256` · `diff` 는 초안을 저장할 때의 파일로 적는다 (S-6).
+- 정책 초안은 프로젝트마다 하나다. id 가 프로젝트 id 에서 정해져(`drafts.policy_id`), 다시 올리면 앞의 `pending` 결재가 대체된다 (§5.5. S-6).
 - S-6 은 정책 도구를 `policy_draft` 하나만 적는다. 제출 도구가 따로 없어 `submit` 인자로 받는다. `[§12]`
 - 세 도구는 `end_turn` 이 `false` 다. 인사의 채팅 턴은 답을 방에 남기고 스스로 끝난다.
 
@@ -1807,10 +1823,10 @@ CREATE TABLE stream_events (
 | `MEMORY.md` | 배운 점. 검수 결과에서 서버가 뽑아 쌓는다 (H-4). 채용 때는 빈 파일이다 (§5.5) | 들어간다 | 서버(H-4) · `PUT …/files/MEMORY.md`(owner) · `revert`. `guide_amend` 의 대상이 아니다 (§5.3) |
 | `employee.yaml` | 설정 — 파트 · 릴레이 · MCP · 모델 · 노력치 · 상한 | 들어가지 않는다 | `PERSONA.md` 와 같다. 쓸 때마다 §9.4 의 검사를 거친다 |
 
-- 프롬프트에 얹는 순서는 S-7 의 문장 그대로다: `PERSONA.md` → `GUIDE.md` → `MEMORY.md` → 프로젝트 정책(`POLICY.md`, §2.2) → 방의 최근 글 요약. 작업 런은 여기에 작업의 제목 · 사유 · 명세 · 완료 기준이 붙는다 (§11.2 의 `goal`. 조립 방식은 S-8).
+- 프롬프트에 얹는 순서는 S-7 의 문장 그대로다: `PERSONA.md` → `GUIDE.md` → `MEMORY.md` → 프로젝트 정책(`POLICY.md`, §2.2) → 방의 최근 글 요약. 작업 런은 여기에 작업의 제목 · 사유 · 명세 · 완료 기준이 붙는다 (§11.2 의 `goal`. 조립 방식은 S-8). 빈 절은 뺀다. 방의 최근 글 요약은 최근 20개를 `작성자: 본문`(글당 200자) 줄로 나열한 것이고 모델을 부르지 않는다 (S-7 확정).
 - `employee.yaml` 은 서버만 읽는다. 값은 런을 만들 때 인자로 들어가고(§9.5) 직원에게 글로 보이지 않는다.
-- `MEMORY.md` 의 상한은 UTF-8 로 4096바이트다 (H-4 의 "4KB"). 서버가 쌓다가 넘게 되면 쓰기 전에 합친다 — 합치는 방법은 H-4 가 정한다. `PUT` 으로 넘는 본문이 오면 `precondition_failed` 이고 `failed[]` 에 `memory_too_large` 를 넣는다. 그래도 파일이 넘어 있으면(손으로 고친 경우) 프롬프트에는 뒤에서부터 줄 단위로 4096바이트까지만 얹는다 (잠정, H-4).
-- 네 파일은 턴을 시작할 때마다 읽는다. 고친 값은 다음 턴 · 다음 런부터 들고, 도는 런은 바뀌지 않는다 (잠정, S-7).
+- `MEMORY.md` 의 상한은 UTF-8 로 4096바이트다 (H-4 의 "4KB"). 서버가 쌓다가 넘게 되면 쓰기 전에 합친다 — 합치는 방법은 H-4 가 정한다. `PUT` 으로 넘는 본문이 오면 `precondition_failed` 이고 `failed[]` 에 `memory_too_large` 를 넣는다. 그래도 파일이 넘어 있으면(손으로 고친 경우) 프롬프트에는 뒤에서부터 줄 단위로 4096바이트까지만 얹는다 (잠정, H-4). 마지막 줄 하나가 4096바이트를 넘으면 그 줄의 뒤쪽 4096바이트만 얹는다 (S-7).
+- 네 파일은 턴을 시작할 때마다 읽는다. 고친 값은 다음 턴 · 다음 런부터 들고, 도는 런은 바뀌지 않는다 (S-7 확정).
 
 ### 9.2 키
 
@@ -1830,7 +1846,7 @@ CREATE TABLE stream_events (
 - 키는 이 여덟뿐이다. 이름 · 배치 · 상태는 `employees` 테이블이 가진다 (§2.3, §3.5).
 - `departments.default_models_json`(§3.4)은 `{chat, work, cap}` 이고 모양이 위와 같다. 없는 키를 채우는 것은 읽을 때이고 파일에 되쓰지 않는다 — 파트 기본값을 고치면 그 키를 적지 않은 직원이 따라 바뀐다.
 - `mcp` 와 `chat_mcp` 를 나눈 이유: S-7 의 "unreal MCP 는 기본 끔"을 키로 드러낸다. `chat_mcp` 의 기본이 빈 목록이라 `mcp: [unreal]` 인 직원도 채팅에서는 unreal 이 붙지 않는다. `departments.default_mcp_json` 의 평평한 목록은 그대로 둔다. CAMPAIGN.md 는 MCP 목록을 하나로만 적는다. `[§12]`
-- "직원이 필요하다고 하면 그 턴만 켠다"(S-7)의 방법 — 누가 요청하고 다음 턴에 어떻게 붙이는가 — 은 여기서 정하지 않는다 (잠정, S-7). 켤 수 있는 범위는 `mcp` 안이다.
+- "직원이 필요하다고 하면 그 턴만 켠다"(S-7)의 방법 — 누가 요청하고 다음 턴에 어떻게 붙이는가 — 은 정하지 않았고 구현도 없다 (미구현, 받을 작업 미정). S-7 의 채팅 턴은 `chat_mcp` 와 `studio` 만 붙인다 (`studio/chat.py`, §11.2 의 `mcp_only`). 켤 수 있는 범위는 `mcp` 안이다.
 - 읽기 전용 턴(`mode = read`, §7.4)은 `chat` 칸과 `chat_mcp` 를 쓴다 (잠정, S-9).
 - `cap` 은 CAMPAIGN.md 에 없는 키다. S-8 은 상한을 `model_cap` / `effort_cap` 이라고만 적고 어디서 오는지 적지 않는다. 직원마다 맡는 일이 달라 채용 면담(H-2)에서 정할 값으로 봤다. `[§12]`
 
@@ -1861,7 +1877,7 @@ cap:
 
 ### 9.4 검사
 
-`employee.yaml` 을 쓰는 모든 길(§9.6)과 `employee_draft` 의 `problems[]`(§8.4)가 같은 검사를 쓴다. 걸리면 REST 는 `precondition_failed` 이고 걸린 코드를 모두 `failed[]` 에 넣는다 (§6.3). 코드 이름은 잠정이고 S-7 이 확정한다.
+`employee.yaml` 을 쓰는 모든 길(§9.6)과 `employee_draft` 의 `problems[]`(§8.4)가 같은 검사를 쓴다. 걸리면 REST 는 `precondition_failed` 이고 걸린 코드를 모두 `failed[]` 에 넣는다 (§6.3). 코드 이름은 S-7 이 아래 열하나로 확정했다 (`studio/employees.py` 의 `CODES`). 1 에 걸리면 `yaml_invalid` 하나만 낸다. 아니면 걸린 검사를 모두, 코드당 한 번, 표의 번호순으로 낸다. 형이 틀린 값은 그 키의 검사에 걸린 것으로 본다 (`relay: 3` → `relay_unknown`). `chat` · `work` · 칸이 매핑이 아니거나 칸의 `model` 이 문자열이 아니면 `yaml_invalid` 다. 값 없이 적은 키(`mcp:`)는 적지 않은 키와 같다.
 
 | # | 검사 | `failed[]` |
 |---|---|---|
@@ -1887,7 +1903,7 @@ cap:
 
 | # | 걸음 | 내용 |
 |---|---|---|
-| 1 | 릴레이 | `tasks.relay` → 없으면 `employee.yaml` 의 `relay` → 없으면 `departments.default_relay`. 셋 다 없으면 런을 만들지 못한다 (§4.3 T3 의 실패 처리). 정해진 릴레이가 `auto` 면 런을 만드는 순간에 엔진의 공개 라우팅 메서드로 릴레이 하나를 고르고, 2–7 은 고른 릴레이로 한다 (덧붙임의 `auto` 릴레이. 잠정, S-8) |
+| 1 | 릴레이 | `tasks.relay` → 없으면 `employee.yaml` 의 `relay` → 없으면 `departments.default_relay`. 셋 다 없으면 런을 만들지 못한다 (§4.3 T3 의 실패 처리). 정해진 릴레이가 `auto` 면 런을 만드는 순간에 엔진의 공개 라우팅 메서드로 릴레이 하나를 고르고, 2–7 은 고른 릴레이로 한다 (덧붙임의 `auto` 릴레이. S-8 확정) |
 | 2 | 기본 칸 | `work` 를 그 릴레이의 단계에 펼친다. 단계 이름 키가 있으면 그 칸, 없으면 `*` 의 칸, 둘 다 없으면 칸 없음(릴레이 파일의 값) |
 | 3 | 이번만 덮어쓰기 | `tasks.stage_models_json`(`start` 의 `stage_models`, §6.4)의 단계별 칸이 2 의 칸을 칸째 바꾼다. 키 단위로 섞지 않는다 |
 | 4 | 단계 이름 | 릴레이에 없는 단계의 칸은, 덮어쓴 것이면 `start` 를 거부하고(`unknown_stage`) `employee.yaml` 것이면 버린다. 버리지 않고 넘기면 엔진이 `ValueError` 로 거부한다 (`pipeline.py` 564–565). `auto` 를 그대로 `create` 에 넘기면 엔진은 고른 릴레이에 없는 키를 오류 없이 버린다 (550–551). studio 는 먼저 고른 뒤 그 릴레이의 경로로 `create` 를 부르므로 564–565 의 검사가 그대로 선다 |
@@ -1899,7 +1915,7 @@ cap:
 
 **상한 (6).**
 
-- 어디서 오는가: `employee.yaml` 의 `cap` → 없으면 `departments.default_models_json` 의 `cap` → 없으면 `Config.studio_model_cap` · `studio_effort_cap`(필드 추가. 이름 잠정, S-8) → 없으면 상한 없음. `model` 과 `effort` 를 따로 찾는다.
+- 어디서 오는가: `employee.yaml` 의 `cap` → 없으면 `departments.default_models_json` 의 `cap` → 없으면 `Config.studio_model_cap` · `studio_effort_cap`(S-8 확정. `employees.config_cap` 이 읽어 작업 런과 채팅 턴에 같이 넘긴다) → 없으면 상한 없음. `model` 과 `effort` 를 따로 찾는다.
 - 비교: 모델은 `ProviderRegistry.tier(model)` 을 `MODEL_ORDER` 순서로, 노력치는 `EFFORT_ORDER` 순서로 본다. 엔진의 `cap_model` · `cap_effort`(`pipeline.py` 64–76)와 같은 규칙이다 — `mythos` 는 `fable` 로 보고, 순서에 없는 모델(다른 AI 의 모델)은 상한에 걸리지 않는다.
 - 이번만 덮어쓴 칸이 넘으면 `start` 를 `precondition_failed` 로 거부한다 (`model_over_cap` · `effort_over_cap`. §6.4). 낮춰서 받지 않는다 — owner 가 고른 값이 말없이 바뀌면 안 된다.
 - `employee.yaml` 의 칸(파트 기본값에서 채운 칸 포함)이 넘으면 상한 값으로 낮춘다. 파일은 고치지 않는다. 파일 자신의 `cap` 은 저장 때 §9.4 의 11 이 봤으므로, 여기서 낮아지는 것은 상한이 파트 기본값이나 설정에서 온 경우다.
@@ -1908,23 +1924,24 @@ cap:
 
 **덧붙임.**
 
-- 이번만 덮어쓰기는 그 작업에 남는다. `tasks.stage_models_json` 에 있으므로 재작업(T8)과 `done` 뒤의 새 런에도 같은 값이 들어간다. `employee.yaml` 에는 되쓰지 않는다. `start` 를 `stage_models` 없이 부르면 저장된 값을 그대로 두고, `{}` 를 주면 지운다 (잠정, S-8).
-- 두 번 본다. `start` 요청 때 덮어쓴 칸을 3–6 으로 검사해 거부할 것을 거부하고, 슬롯을 얻어 런을 만드는 순간에 1–7 을 다시 한다 — 그 사이에 `employee.yaml` 이나 상한이 바뀔 수 있다. 그때 덮어쓴 칸이 걸리거나 5 의 (가)에 걸리면, 낮추거나 그대로 넘기지 않고 런을 만들지 않는다 (§4.3 T3 의 실패 처리. 잠정, S-8). 릴레이가 `auto` 면 `start` 요청 때는 릴레이를 고르지 않는다. 그때 덮어쓴 칸은 칸 자신의 `provider`(5 의 가) · 5 의 (나) · 6 만 본다. 4 와 릴레이 단계의 5 (가)는 런을 만드는 순간에 보고, 걸리면 같은 방식으로 런을 만들지 않는다.
-- `auto` 릴레이 (잠정, S-8). 단계 이름을 `create` 전에 알 수 없으므로, studio 가 먼저 고른 뒤 고른 릴레이로 `create` 를 부른다.
+- 이번만 덮어쓰기는 그 작업에 남는다. `tasks.stage_models_json` 에 있으므로 재작업(T8)과 `done` 뒤의 새 런에도 같은 값이 들어간다. `employee.yaml` 에는 되쓰지 않는다. `start` 를 `stage_models` 없이 부르면 저장된 값을 그대로 두고, `{}` 를 주면 지운다 (S-8 확정).
+- 두 번 본다. `start` 요청 때 덮어쓴 칸을 3–6 으로 검사해 거부할 것을 거부하고, 슬롯을 얻어 런을 만드는 순간에 1–7 을 다시 한다 — 그 사이에 `employee.yaml` 이나 상한이 바뀔 수 있다. 그때 덮어쓴 칸이 걸리거나 5 의 (가)에 걸리면, 낮추거나 그대로 넘기지 않고 런을 만들지 않는다 (§4.3 T3 의 실패 처리. S-8 확정). 릴레이가 `auto` 면 `start` 요청 때는 릴레이를 고르지 않는다. 그때 덮어쓴 칸은 칸 자신의 `provider`(5 의 가) · 5 의 (나) · 6 만 본다. 4 와 릴레이 단계의 5 (가)는 런을 만드는 순간에 보고, 걸리면 같은 방식으로 런을 만들지 않는다.
+- `auto` 릴레이 (S-8 확정). 단계 이름을 `create` 전에 알 수 없으므로, studio 가 먼저 고른 뒤 고른 릴레이로 `create` 를 부른다.
   - 확인한 것 (읽음). `relays/auto.yaml` 은 단계 없이 `router`(`model` · `candidates` · `exclude` · `fallback`, 6–10행)만 가진다. 릴레이를 고르는 일은 `create` 안에서 일어난다 (`pipeline.py` 543–551). 고르는 `_route`(634–654)는 비공개이고 `create` 만 부른다. 모델 호출이라 두 번 부르면 답이 다를 수 있다.
-  - 엔진에 공개 라우팅 메서드를 둔다 (이름 잠정. §11.2). studio 는 슬롯을 얻어 런을 만드는 순간에 한 번 부르고, 돌려받은 릴레이로 2–7 을 한 뒤 그 경로로 `create` 를 부른다. `create` 는 라우터가 없는 릴레이를 받으므로 다시 고르지 않는다. 2 · 4 · 5 를 `create` 안의 콜백으로 하는 길은 쓰지 않는다 — 엔진이 studio 의 검사를 알아야 한다.
+  - 엔진에 공개 라우팅 메서드를 둔다 (`RelayEngine.route`, S-8 확정. §11.2). studio 는 슬롯을 얻어 런을 만드는 순간에 한 번 부르고, 돌려받은 릴레이로 2–7 을 한 뒤 그 경로로 `create` 를 부른다. `create` 는 라우터가 없는 릴레이를 받으므로 다시 고르지 않는다. 2 · 4 · 5 를 `create` 안의 콜백으로 하는 길은 쓰지 않는다 — 엔진이 studio 의 검사를 알아야 한다.
   - 후보에서 미리 뺀다. 릴레이 파일이 Claude Code 가 아닌 provider 를 적은 단계를 하나라도 가진 릴레이는 제외 목록에 넣어 넘긴다 (`router.candidates` 의 `exclude`, `router.py` 41). 고른 뒤에도 5 의 (가)를 다시 본다 — 칸이 덮은 값까지 보는 것은 그때다.
   - 고를 수 없을 때 (`router.py` 104–122). 후보가 하나면 모델을 부르지 않고 그것을 고른다(110–111). 라우터 AI 가 없거나, 호출이 실패하거나, 답에서 후보 이름을 찾지 못하면 `fallback`(`quick`)을 고르고 예외는 올리지 않는다(112–121). `fallback` 이 후보에 없으면 — 제외됐거나 `needs_writes` 로 걸러졌으면 — 파일 이름순 첫 후보가 대신한다(108–109 · 40). 후보가 하나도 없으면 `ValueError` 다 (`pipeline.py` 641–642) — §4.3 T3 의 실패 처리를 따른다.
   - 새 런마다 다시 고른다. 재작업(T8)과 `done` 뒤의 새 런(§4.7)은 릴레이가 달라질 수 있다. 같은 런을 잇는 때에는 고르지 않는다 — 런이 고른 릴레이의 경로를 가진다 (`RunState.relay`, 548 · 592).
-  - 기록. `create` 안에서 고르면 라우터 사용량을 `-:router` 로 적고 이벤트 `relay_routed`(`relay` · `reason` · `by` · `router` · `cost_usd`)를 남긴다 (620–625). 밖에서 고르면 둘 다 빠지므로, 공개 메서드가 돌려준 값을 `create` 에 넘겨 같은 기록을 남긴다 (인자 이름 잠정. §11.2).
+  - 기록. `create` 안에서 고르면 라우터 사용량을 `-:router` 로 적고 이벤트 `relay_routed`(`relay` · `reason` · `by` · `router` · `cost_usd`)를 남긴다 (620–625). 밖에서 고르면 둘 다 빠지므로, 공개 메서드가 돌려준 값을 `create` 에 넘겨 같은 기록을 남긴다 (`create` 의 `routed`, S-8 확정. §11.2).
 - `mcp` 는 더하는 목록이지 거르는 목록이 아니다 (읽음: `pipeline.py` 442–451 · 466–491 · 581–586 · 1653). 런에 붙는 MCP 는 셋의 합이다 — 릴레이 단계가 적은 `mcp`, `create` 의 `mcp` 인자(`None` 이면 저장소 설정의 `mcp`), 프로젝트 폴더에서 찾은 MCP. 셋째는 `mcp` 인자와 무관하게 붙는다 (`_attached_mcp` 482). 빠지는 것은 저장소 설정의 `project_context` 가 꺼져 있거나(444–445 · 470–471) 그 단계에 도구가 없을 때(1653)뿐이다. 그래서 `mcp=[]` 로는 프로젝트의 MCP 가 빠지지 않고, `chat_mcp` 가 비어도 프로젝트에 unreal 이 있으면 채팅 턴에 붙는다.
-- 거르는 자리는 `create` 의 MCP 한정 인자다 (이름 잠정, S-7. §11.2). 준 이름만 남기고, 단계에 붙이는 목록(`_attached_mcp`)과 런을 만들기 전의 목록(`_run_mcp_names`)이 같은 값으로 거른다. 채팅 · 읽기 턴은 `chat_mcp` + `studio` 로 한정한다. 릴레이 단계가 적은 `mcp` 는 릴레이 파일의 것이라 거르지 않는다. 작업 런에도 줄지는 S-8 이 정한다 — 주지 않으면 `employee.yaml` 의 `mcp` 에 없는 프로젝트 MCP 도 지금처럼 붙는다. 어느 쪽으로 정하든 서버 코드를 품은 프로젝트는 T3 의 규칙이 받는다 — 한정 인자는 릴레이 단계의 `mcp` 와 직원 자신의 `mcp` 를 거르지 못한다 (§4.3 T3).
+- 거르는 자리는 `create` 의 MCP 한정 인자 `mcp_only` 다 (S-7 확정. §11.2). 런에 `RunState.mcp_only` 로 남고 `None` 이면 거르지 않는다. 준 이름만 남기고, 단계에 붙이는 목록(`_attached_mcp`)과 런을 만들기 전의 목록(`_run_mcp_names`)이 같은 값으로 거른다. 채팅 · 읽기 턴은 `chat_mcp` + `studio` 로 한정한다. 릴레이 단계가 적은 `mcp` 는 릴레이 파일의 것이라 거르지 않는다. 작업 런에는 주지 않는다 (S-8 확정. 프로젝트의 MCP — 에디터 등 — 는 작업의 일부라, 거르면 그 MCP 로 고치는 릴레이가 말없이 깨진다) — `employee.yaml` 의 `mcp` 에 없는 프로젝트 MCP 도 지금처럼 붙는다. 어느 쪽으로 정하든 서버 코드를 품은 프로젝트는 T3 의 규칙이 받는다 — 한정 인자는 릴레이 단계의 `mcp` 와 직원 자신의 `mcp` 를 거르지 못한다 (§4.3 T3).
 - 채팅 턴 · 읽기 전용 턴: 릴레이는 `relays/employee-chat.yaml`(S-7), 칸은 `chat` 하나, MCP 는 `chat_mcp` + `studio` 다 (위의 한정 인자로 건다). 덮어쓰기는 없다. `start` 요청이 없으므로 값은 턴을 넣는 순간에 한 번만 본다. 6 은 같다 — 상한을 넘으면 낮춘다. 5 도 같다 — (가)는 studio 가 보고 (나)는 엔진의 검사에 맡긴다.
-- 채팅 · 읽기 턴을 넣지 못할 때 (잠정, S-7). 5 의 (가)에 걸리거나 엔진이 `create` 를 거부하면 턴을 넣지 않는다. 거부할 `start` 가 없는 길이라 §4.5 의 왕복 한도 행과 같은 꼴로 한다 — 결재를 만들지 않고, `exchange_count` 도 올리지 않는다.
-  - owner 의 글(§6.6)이 계기면: 글은 저장된 그대로 두고 REST 응답도 성공이다. 그 방에 `system` 글로 이유를 남긴다. `meta.event` 는 `run_error` 다 (§7.6. 종류를 새로 더하지 않는다).
+- 채팅 · 읽기 턴을 넣지 못할 때 (채팅 턴은 S-7 확정 — `studio/chat.py`. 읽기 턴은 잠정, S-9). `employee.yaml` 을 읽지 못하거나(§9.6) 5 의 (가)에 걸리거나 엔진이 `create` 를 거부하면 턴을 넣지 않는다. 거부할 `start` 가 없는 길이라 §4.5 의 왕복 한도 행과 같은 꼴로 한다 — 결재를 만들지 않고, `exchange_count` 도 올리지 않는다.
+  - owner 의 글(§6.6)이 계기면: 글은 저장된 그대로 두고 REST 응답도 성공이다. 그 방에 `system` 글로 이유를 남긴다. `meta.event` 는 `run_error` 다 (§7.6. 종류를 새로 더하지 않는다). 런을 만들었는데 `done` 으로 끝나지 않은 턴도 같은 글을 남긴다(`meta.run_id` 가 그 런). 어느 쪽이든 `fed_message_id` 는 올리지 않아 다음 턴이 그 글을 다시 읽는다 (S-7). `done` 으로 끝났는데 답(`output`)이 비어 있고 그 런이 방에 쓴 글(`room_post`. `messages.run_id` 가 그 런)도 없으면 같은 `run_error` 글을 남긴다(`meta.run_id` 가 그 런). 이때는 `fed_message_id` 를 올린다 (§3.7) — 그 글은 이어 갈 대화에 이미 들어 있어, 올리지 않으면 다음 턴에 두 번 들어간다. 답이 비어도 그 런이 방에 글을 썼으면 그 글이 답이고 `run_error` 글은 남기지 않는다 (`ChatTurns.turn`).
   - 직원의 멘션(`room_post`, §8.4)이 계기면: (가)는 글을 만들기 전에 본다. 걸리면 글도 턴도 만들지 않고 `precondition_failed` 와 `failed[]`(`provider_unguarded`)를 돌려준다. 엔진의 거부는 글을 만든 뒤에 나므로 owner 의 글과 같이 `system` 글을 남기고, 도구 결과의 `queued[]` 에서 그 직원이 빠진다.
-- 채팅 · 읽기 턴의 릴레이와 작업 폴더 (잠정, S-7). `employee-chat.yaml` 의 단계는 provider 를 Claude Code 로 적고 `mcp` 는 적지 않는다. `hidden` 으로 둬 `auto` 의 후보에서 빠지게 한다 (`router.py` 47). `create` 는 `workdir` 나 `repo`, 아니면 세션의 작업 폴더가 있어야 한다 (`pipeline.py` 539–542). 작업방의 읽기 턴은 그 작업의 프로젝트, 그 밖의 방은 직원이 배치된 프로젝트의 `repo` 로 만든다 — 프로젝트의 지침이 함께 실리고 프로젝트의 MCP 는 한정 인자가 거른다. 프로젝트 밖의 폴더를 주면 MCP 는 빠지지만 지침도 빠진다. 미배치 직원과 인사는 `workdir` 를 그 직원 폴더로 준다 (§6.6 의 허용 폴더가 이 값을 쓴다).
-- `failed[]` 의 `unknown_stage` · `provider_unguarded` · `model_unavailable` · `effort_unsupported` · `model_over_cap` · `effort_over_cap` 은 잠정이고 S-8 이 확정한다. `provider_unguarded` 는 §9.4 의 8 과 같은 코드다.
+- 채팅 · 읽기 턴의 릴레이와 작업 폴더 (채팅 턴은 S-7 확정. 읽기 턴은 잠정, S-9). `employee-chat.yaml` 의 단계는 provider 를 Claude Code 로 적고 `mcp` 는 적지 않는다. `hidden` 으로 둬 `auto` 의 후보에서 빠지게 한다 (`router.py` 47). `create` 는 `workdir` 나 `repo`, 아니면 세션의 작업 폴더가 있어야 한다 (`pipeline.py` 539–542). 작업방의 읽기 턴은 그 작업의 프로젝트, 그 밖의 방은 직원이 배치된 프로젝트의 `repo` 로 만든다 — 프로젝트의 지침이 함께 실리고 프로젝트의 MCP 는 한정 인자가 거른다. 프로젝트 밖의 폴더를 주면 MCP 는 빠지지만 지침도 빠진다. 미배치 직원과 인사는 `workdir` 를 그 직원 폴더로 준다 (§6.6 의 허용 폴더가 이 값을 쓴다).
+  - 알려진 제한 (읽음 S-7. S-8 은 고치지 않았다 — `pipeline.py` `_attached_mcp` 는 그대로다. 고칠지와 받을 작업 미정). 프로젝트 맥락이 없으면 `RelayEngine._attached_mcp` 가 레지스트리의 MCP(`studio` 포함)도 붙이지 않는다. 맥락이 없는 때는 둘이다 — 저장소 설정의 `project_context` 가 꺼져 있을 때와, 그 폴더와 위 폴더들에 표식 파일(CLAUDE.md · `.claude/` · `.mcp.json`)도 사용자 MCP 도 없어 `projctx.discover` 가 `None` 을 돌려줄 때다. 그 턴은 답은 하지만 studio 도구를 쓰지 못한다. 미배치 직원의 폴더가 둘째 경우에 걸릴 수 있고, 걸리는지는 PC 마다 다르다. `RelayEngine._run_mcp_names` 는 같은 이름을 붙는 것으로 세므로 `RunState.mcp` 와 실제로 붙은 목록이 어긋난다. 실서버 확인은 `VERIFICATION.md` 에 있다.
+- `failed[]` 의 `unknown_stage` · `provider_unguarded` · `model_unavailable` · `effort_unsupported` · `model_over_cap` · `effort_over_cap` 은 S-8 확정이다 (`studio/work.py` 의 `CODES`. 걸음 4 · 5 · 6 의 순서). 문제 하나는 `{code, stage, message}` 다. `provider_unguarded` 는 §9.4 의 8 과 같은 코드다.
 
 ### 9.6 쓰는 길과 파트 값
 
@@ -1935,10 +1952,10 @@ cap:
 | 인사의 수정안 | `hire` 결재의 `approve`, `action = guide_amend`, `file = employee.yaml` (§5.5) | owner 의 결정 |
 | 되돌리기 | `POST /studio/employees/{id}/revert` (§6.4) | owner |
 
-- 넷 모두 §9.4 검사 → 파일 쓰기 → 직원 폴더 커밋(H-3) → `employee.updated`(`change = file`, §7.4) 순서다. 검사에 걸리면 쓰지 않는다. `revert` 는 되돌린 뒤의 `employee.yaml` 을 검사한다 — 그 버전이 지금은 없는 릴레이나 MCP 를 가리키면 `precondition_failed` 다.
+- 넷 모두 §9.4 검사 → 파일 쓰기 → 직원 폴더 커밋(H-3) → `employee.updated`(`change = file`, §7.4) 순서다. 검사에 걸리면 쓰지 않는다. `revert` 는 되돌린 뒤의 `employee.yaml` 을 검사한다 — 그 버전이 지금은 없는 릴레이나 MCP 를 가리키면 `precondition_failed` 다. 채용과 인사의 수정안은 S-7 이 검사를 이었다 (`Inbox._check_yaml`). 직접 수정과 되돌리기는 그 경로를 만드는 H-3 이 같은 `employees.check` 를 부른다.
 - 직원은 쓰지 못한다. studio MCP 에 이 파일을 쓰는 도구가 없고(인사의 `employee_draft` 는 초안만 만든다, §8.4), 셸과 편집 도구로 직원 폴더에 쓰는 것은 가드가 막는다 (§10.3 의 `protected_write`). 그래서 직원이 자기 상한을 올릴 수 없다.
 - **파트는 채용 뒤 바뀌지 않는다.** 파트를 바꾸는 REST 경로가 없다 (§6.4). `department` 는 `employees.department_id` 의 사본이고, 다르게 쓰려는 요청은 `department_mismatch` 로 거부한다. 읽을 때 둘이 다르면(파일을 손으로 고친 경우) DB 를 따른다 (§2.3). 파트를 옮기려면 퇴사시키고 새로 채용한다.
-- 읽지 못할 때: 파일이 없거나 §9.4 의 1–3 에 걸리면 그 직원의 턴과 작업 런을 만들지 않는다. 작업이면 §4.3 T3 의 실패 처리를 따르고, 채팅이면 방에 시스템 글을 남긴다 (잠정, S-7).
+- 읽지 못할 때: 파일이 없거나 §9.4 의 1–3 에 걸리면 그 직원의 턴과 작업 런을 만들지 않는다. 작업이면 §4.3 T3 의 실패 처리를 따르고, 채팅이면 방에 시스템 글을 남긴다 (S-7 확정).
 
 ---
 
@@ -2064,7 +2081,7 @@ CAMPAIGN.md §7 의 차단 글머리 다섯 줄을 `rule_id` 일곱으로 나눴
 **물어보기일 때 — 런 정지와 결재.** 서버의 분기는 §6.4 의 표 넷이고 여기서 바꾸지 않는다.
 
 - 작업 런이고 작업이 `working` 이면(분기 2) system 의 T4 다 (§4.3). `risky_command` 결재가 생기고 작업은 `blocked` 가 된다. payload 의 `command` · `tool` · `rule_id` 는 요청에서 오고, `reason` 은 서버가 `rule_id` 로 고른 문장, `stage` 는 런의 지금 단계다 (§5.3). `cwd` 는 요청에 없어 비운다 — 넣으려면 §6.4 의 요청에 선택 필드를 더한다 (잠정, S-10).
-- 응답은 `deny` · `inbox_id` · `end_turn: true` 다. 훅은 `message` 를 거부 이유로 돌려주고(§10.6) 직원은 턴을 끝낸다. 60초가 지나도 돌면 서버가 `RelayEngine.cancel` 로 끊는다 (§6.4, §8.3). 기다림 = 런 종료다 (전제 3).
+- 응답은 `deny` · `inbox_id` · `end_turn: true` 다. 훅은 `message` 를 거부 이유로 돌려주고(§10.6) 직원은 턴을 끝낸다. 60초가 지나도 돌면 서버가 `RelayEngine.cancel` 로 끊는다 (§6.4, §8.3. 미구현, 받을 작업 미정). 기다림 = 런 종료다 (전제 3).
 - owner 가 결정하면 T5 다. 결정문(§5.6)이 그 런에 들어가고(§4.7), `approve` 면 1회 허용이 남는다. 직원이 같은 명령을 다시 시도하면 훅이 다시 묻고 서버가 분기 1 로 `allow` 를 준다.
 - 작업 런이 아닌 턴(분기 4)과 작업이 `blocked` · `review` 인 구간(분기 3)에서는 결재가 생기지 않고 거부만 된다 (§4.5, §6.4).
 
@@ -2167,7 +2184,7 @@ S-10: "가드 파일 자체와 서버 설정은 직원이 못 고친다." `prote
 | 5 | 행위자 토큰이 직원의 셸에서 보인다 (`STUDIO_ACTOR_TOKEN`) | 자기 토큰이라 권한이 늘지 않는다. 그 토큰으로 서버를 직접 부르는 것은 `server_control` 이 막고, 닿아도 서버의 검사는 같다 (§8.2) |
 | 6 | 상위 폴더를 재귀로 읽어 파일 하나짜리 비밀(`relay.config.local.yaml`, 자격 증명 파일)이 결과에 섞이는 것 | 비밀 폴더의 상위만 막는다 (§10.3 의 3) |
 | 7 | 프로젝트 폴더의 Claude Code 설정(`.claude/settings*.json`)이 `--settings` 로 넘긴 훅을 끌 수 있는지 | 확인 필요 (S-10) |
-| 8 | 가드를 거는 코드(`pipeline.py` · `runners.py` 의 연결 지점)와 검사를 하는 `relay_agent/studio/` 가 서버 저장소 안에 있고, 그 저장소가 직원의 작업 대상이 될 수 있다 | 세 겹으로 받는다. (가) 서버 루트의 `relay_agent/` 전체를 `protected[]` 에 넣는다 (위 표. 잠정, S-10) — 어느 프로젝트의 런이든, 원본 작업이든 훅이 쓰기를 막는다. (나) 서버 코드를 품은 프로젝트의 작업 런은 T3 가 원본 작업으로 만들지 않는다 (§4.3 T3 의 `copy` 고정 인자. 잠정, S-8) — `inplace` 는 거부하고, `none` 은 파일을 고치는 단계가 하나도 없을 때만 통과시키며, 고치는 단계가 있는데 `none` 이면 `inplace` 와 똑같이 거부한다. studio-server 저장소를 `copy` 로 둔다는 P-4 는 저장소 설정만으로 유지되지 않는다 — 읽기 전용이 아닌 MCP 가 하나라도 붙으면 엔진이 `copy` 를 원본 작업으로 바꾼다 (`pipeline.py` 581–586, 이벤트 `workspace_forced` 629–630). (나)는 그때 런을 만들지 않는다. (다) `studio` 를 `READ_ONLY_MCP` 에 더한다 (§11.2. 잠정, S-6) — 더하지 않으면 (나)가 이 저장소의 작업을 모두 거부한다. 더한 뒤에도 릴레이 단계의 `mcp`, 직원의 `employee.yaml` 의 `mcp`, studio-server 폴더에서 찾은 프로젝트 MCP 에 읽기 전용이 아닌 것이 있으면 그 작업은 원본에서 도는 대신 (나)에 걸려 시작되지 않는다. 남는 것은 셋이다. 스크립트 안의 쓰기(1 의 구멍)는 `relay_agent/` 에도 닿는다 — 고친 코드는 서버를 다시 띄울 때 읽히고, 훅이 호출마다 새 프로세스로 띄우는 `studio_guard.py` 는 바로 읽힌다. `relay_agent/` 밖의 서버 루트 파일(`relays/` 등)은 위 표에 든 것 말고는 막지 않는다. 훅이 없는 대시보드 · CLI 런은 어느 겹에도 걸리지 않는다. 런의 실제 방식은 `RunState.workspace_mode` 에 남는다 (§4.3 T3) |
+| 8 | 가드를 거는 코드(`pipeline.py` · `runners.py` 의 연결 지점)와 검사를 하는 `relay_agent/studio/` 가 서버 저장소 안에 있고, 그 저장소가 직원의 작업 대상이 될 수 있다 | 세 겹으로 받는다. (가) 서버 루트의 `relay_agent/` 전체를 `protected[]` 에 넣는다 (위 표. 잠정, S-10) — 어느 프로젝트의 런이든, 원본 작업이든 훅이 쓰기를 막는다. (나) 서버 코드를 품은 프로젝트의 작업 런은 T3 가 원본 작업으로 만들지 않는다 (§4.3 T3 의 `copy` 고정 인자. S-8 확정) — `inplace` 는 거부하고, `none` 은 파일을 고치는 단계가 하나도 없을 때만 통과시키며, 고치는 단계가 있는데 `none` 이면 `inplace` 와 똑같이 거부한다. studio-server 저장소를 `copy` 로 둔다는 P-4 는 저장소 설정만으로 유지되지 않는다 — 읽기 전용이 아닌 MCP 가 하나라도 붙으면 엔진이 `copy` 를 원본 작업으로 바꾼다 (`pipeline.py` 581–586, 이벤트 `workspace_forced` 629–630). (나)는 그때 런을 만들지 않는다. (다) `studio` 를 `READ_ONLY_MCP` 에 더한다 (§11.2. S-6 확정) — 더하지 않으면 (나)가 이 저장소의 작업을 모두 거부한다. 더한 뒤에도 릴레이 단계의 `mcp`, 직원의 `employee.yaml` 의 `mcp`, studio-server 폴더에서 찾은 프로젝트 MCP 에 읽기 전용이 아닌 것이 있으면 그 작업은 원본에서 도는 대신 (나)에 걸려 시작되지 않는다. 남는 것은 셋이다. 스크립트 안의 쓰기(1 의 구멍)는 `relay_agent/` 에도 닿는다 — 고친 코드는 서버를 다시 띄울 때 읽히고, 훅이 호출마다 새 프로세스로 띄우는 `studio_guard.py` 는 바로 읽힌다. `relay_agent/` 밖의 서버 루트 파일(`relays/` 등)은 위 표에 든 것 말고는 막지 않는다. 훅이 없는 대시보드 · CLI 런은 어느 겹에도 걸리지 않는다. 런의 실제 방식은 `RunState.workspace_mode` 에 남는다 (§4.3 T3) |
 | 9 | Claude Code 가 아닌 러너에는 PreToolUse 훅이 없다. `settings_path` 는 Claude Code 의 `--settings` 다 (`runners.py` 62 의 주석). 릴레이의 `alternates`(`pipeline.py` 93)나 `Config.fallback_chain`(`config.py` 29)이 단계를 다른 AI 로 넘기면 가드 없이 돈다 | 단계에 쓰일 provider 를 세 길에서 Claude Code 로 묶는다 — `employee.yaml` 의 칸(§9.4 의 8), 이번만 덮어쓴 칸, 릴레이 파일이 단계에 적은 provider. 뒤의 둘은 §9.5 의 5 가 보고, 걸리면 `start` 를 `provider_unguarded` 로 거부한다. `/studio/models` 도 Claude Code 의 항목만 내준다 (§6.4). 남는 것은 실행 중의 대체다. 길은 셋이고 모두 `_run_stage`(`pipeline.py` 1421–1434)를 지난다 — 단계의 `alternates`(1424), 칸이 provider 를 바꿨을 때 첫 대체가 되는 릴레이 자신의 AI(1425–1426), `ProviderRegistry.candidates`(`providers.py` 184–200)가 모든 단계에 덧붙이는 `fallback_chain`(186). `candidates` 에는 덧붙이기를 끄는 인자가 없다. studio 런이면 `_run_stage` 가 `candidates` 가 돌려준 후보에서 `kind` 가 `claude_cli` 가 아닌 것을 뺀다 (잠정, S-10. §11.4 의 연결 지점 6). 남는 후보가 없으면 그 단계는 `RunnerError`(`unavailable`)다(1433–1434). 단계 실행 자리의 `except`(1705)가 받는다. 취소(1706–1707) · 단계 예산(1708–1732) 갈래에 들지 않는다. 단계가 `optional` 이면 이벤트 `stage_skipped` 를 남기고 다음 단계로 넘어가고(1733–1737), 아니면 `_fail` 로 런을 끝낸다(1738). `_fail`(1361–1367, 읽음)은 런의 `status`(기본 `failed`. 취소 갈래만 `cancelled` 를 넘긴다)와 `error`(`[단계] 메시지`)를 적고, 이벤트 `run_failed`(취소면 `run_cancelled`)를 남기고, `_write_stop` → `_settle_workspace` → `save` 를 한 뒤 런을 돌려준다 (§11.2). 그래서 §4.7 표의 `failed` · `working` 행이 받아 T4 를 한다. `optional` 단계는 런이 실패하지 않은 채 빠지므로, 건너뛴 것을 작업 기록에 남긴다 (§4.7). 엔진의 `is_claude`(1442–1443)는 `anthropic_api` · `mock` · `kind` 가 `api` 인 것도 참이라 이 판정에 쓰지 않는다. 테스트의 `mock` 을 통과시키는 방법은 S-10 이 정한다. 다른 러너가 설정 파일을 무시하는지는 주석으로만 봤다 — 확인 필요 (S-10) |
 | 10 | `--safe-mode`. `isolate` 이고 `project` 가 아닌 단계는 MCP 도 설정 파일도 없으면 `--safe-mode` 가 붙어 훅이 꺼진다 (`runners.py` 591–593) | studio 런은 항상 `studio` MCP 와 훅 설정 파일을 가지므로 해당하지 않는다. S-10 이 테스트로 지킨다 |
 
@@ -2216,11 +2233,11 @@ S-10: "가드 파일 자체와 서버 설정은 직원이 못 고친다." `prote
 |---|---|---|---|
 | `RelayEngine.create` | `pipeline.py` 501–506 | T3 의 런 생성. 인자 대응은 아래 표. `auto_apply` 인자(502)는 `None` 일 때만 `RepoSpec.auto_apply` → `RelaySpec.auto_apply`(157) 순으로 정해진다(587–588). studio 는 `False` 를 명시한다 (§4.3 T3) | 일부 (시그니처 · 설명 · 587–588행) |
 | `stage_models` 검사 | `pipeline.py` 562–580 | 단계별 값에 `provider` · `model` · `effort` 를 받는다. `effort` 는 `providers.efforts_for` 로 검사하고 틀리면 `ValueError` | 일부 |
-| `create` 의 `auto` 갈래 · `_route` | `pipeline.py` 543–551 · 634–654, `router.py` 35–53 · 104–122 | 릴레이에 `router` 가 있으면 `create` 안에서 릴레이를 고르고(546–549), 고른 릴레이에 없는 `stage_models` 키를 버린다(550–551). `_route` 는 비공개다. studio 는 이 갈래를 타지 않는다 — 공개 라우팅 메서드(이름 잠정, S-8)를 더해 런을 만드는 순간에 먼저 고르고, 고른 경로로 `create` 를 부른다 (§9.5). 공개 메서드는 `_route` 가 받는 것에 제외 목록을 더 받아 `spec.router.exclude`(640)에 합치고, `_route` 와 같은 `{path, relay, reason, by, usage, from}` 을 돌려준다 | 읽음 |
-| `_run_mcp_names` · `_attached_mcp` | `pipeline.py` 466–476 · 478–491, 쓰는 줄 581–586 · 1653 | 앞은 런을 만들기 전에 붙을 MCP 를 미리 세는 목록이다 — 읽기 전용(`READ_ONLY_MCP`)이 아닌 것이 하나라도 있으면 `copy` 를 원본 작업으로 바꾼다(584–586). 뒤는 단계에 실제로 붙이는 목록이다(1653). 둘 다 프로젝트에서 찾은 MCP 를 `mcp` 인자와 무관하게 넣는다(476 · 482). `create` 에 MCP 한정 인자(이름 잠정, S-7)를 더해 둘이 같은 값으로 거르게 한다. 채팅 · 읽기 턴이 쓴다 (§9.5). `studio` 는 `READ_ONLY_MCP`(44행: `docs_read` · `handoff` · `digest`)에 없다 — 그대로면 `mcp` 에 `studio` 를 넣은 작업 런이 모두 `copy` 에서 원본 작업으로 바뀌어, P-4 의 `copy`(§10.8 의 8)와 T7 의 `copy` 갈래(§4.3)가 서지 않는다. `studio` 를 `READ_ONLY_MCP` 에 더한다 (잠정, S-6). 이 목록은 두 곳에서 더 쓰인다 — `_check_mcp_ready` 가 준비 검사(`mcp_probe`)의 대상에서 빼고(1041), `_check_mcp_saved` 가 '바꾸는 MCP 도구를 불렀는데 파일은 바뀌지 않았다'는 경고의 대상에서 뺀다(1073). `studio` 를 더하면 두 곳에서도 빠진다 — 단계를 시작하기 전에 studio MCP 가 응답하는지 엔진은 확인하지 않는다. `create` 에 `copy` 고정 인자(이름 잠정, S-8)도 더한다 — 준 런은 584–586 의 갈래에서 원본 작업으로 바꾸는 대신 `ValueError` 로 거부하고, 방식이 처음부터 `inplace` 여도 거부한다. `none` 은 파일을 고치는 단계가 하나도 없을 때만 통과하고, 고치는 단계가 있는데 `none` 이면 `inplace` 와 똑같이 거부한다 — `none` 런은 `Workspace` 없이 원본 폴더에서 돈다(382–384 · 1551). 서버 코드를 품은 프로젝트의 작업 런이 쓴다 (§4.3 T3) | 읽음 |
+| `create` 의 `auto` 갈래 · `_route` | `pipeline.py` 543–551 · 634–654, `router.py` 35–53 · 104–122 | 릴레이에 `router` 가 있으면 `create` 안에서 릴레이를 고르고(546–549), 고른 릴레이에 없는 `stage_models` 키를 버린다(550–551). `_route` 는 비공개다. studio 는 이 갈래를 타지 않는다 — 공개 라우팅 메서드 `RelayEngine.route`(S-8 확정)를 더해 런을 만드는 순간에 먼저 고르고, 고른 경로로 `create` 를 부른다 (§9.5). 공개 메서드는 `_route` 가 받는 것에 제외 목록을 더 받아 `spec.router.exclude`(640)에 합치고, `_route` 와 같은 `{path, relay, reason, by, usage, from}` 을 돌려준다 | 읽음 |
+| `_run_mcp_names` · `_attached_mcp` | `pipeline.py` 466–476 · 478–491, 쓰는 줄 581–586 · 1653 | 앞은 런을 만들기 전에 붙을 MCP 를 미리 세는 목록이다 — 읽기 전용(`READ_ONLY_MCP`)이 아닌 것이 하나라도 있으면 `copy` 를 원본 작업으로 바꾼다(584–586). 뒤는 단계에 실제로 붙이는 목록이다(1653). 둘 다 프로젝트에서 찾은 MCP 를 `mcp` 인자와 무관하게 넣는다(476 · 482). `create` 에 MCP 한정 인자 `mcp_only`(S-7 확정)를 더해 둘이 같은 값으로 거르게 한다. 채팅 · 읽기 턴이 쓴다 (§9.5). `studio` 는 `READ_ONLY_MCP`(44행: `docs_read` · `handoff` · `digest`)에 없다 — 그대로면 `mcp` 에 `studio` 를 넣은 작업 런이 모두 `copy` 에서 원본 작업으로 바뀌어, P-4 의 `copy`(§10.8 의 8)와 T7 의 `copy` 갈래(§4.3)가 서지 않는다. `studio` 를 `READ_ONLY_MCP` 에 더했다 (S-6 확정 — 지금 44행은 넷이다). 이 목록은 두 곳에서 더 쓰인다 — `_check_mcp_ready` 가 준비 검사(`mcp_probe`)의 대상에서 빼고(1041), `_check_mcp_saved` 가 '바꾸는 MCP 도구를 불렀는데 파일은 바뀌지 않았다'는 경고의 대상에서 뺀다(1073). `studio` 를 더하면 두 곳에서도 빠진다 — 단계를 시작하기 전에 studio MCP 가 응답하는지 엔진은 확인하지 않는다. `create` 에 `copy` 고정 인자 `pin_copy`(S-8 확정. `RunState` 에는 남기지 않는다)도 더한다 — 준 런은 584–586 의 갈래에서 원본 작업으로 바꾸는 대신 `ValueError` 로 거부하고, 방식이 처음부터 `inplace` 여도 거부한다. `none` 은 파일을 고치는 단계가 하나도 없을 때만 통과하고, 고치는 단계가 있는데 `none` 이면 `inplace` 와 똑같이 거부한다 — `none` 런은 `Workspace` 없이 원본 폴더에서 돈다(382–384 · 1551). 서버 코드를 품은 프로젝트의 작업 런이 쓴다 (§4.3 T3) | 읽음 |
 | `workdir` 필수 | `pipeline.py` 539–542 | `workdir` 도 `repo` 도 세션의 작업 폴더도 없으면 `ValueError` 다. 채팅 턴의 작업 폴더를 §9.5 가 정한 이유다 | 읽음 (536–542행) |
-| `cap_effort` 와 상한 적용 지점 | `pipeline.py` 73–76, 1613–1629 | `model_cap` · `effort_cap` 은 릴레이 기본값과 재시도에만 걸리고 `stage_models` 로 고른 값에는 걸리지 않는다(1623–1627 의 주석과 코드). S-8 은 덮어쓴 값의 상한이 `model_cap` / `effort_cap` 이라고 적는다. studio 가 `create` 를 부르기 전에 칸을 상한과 비교한다 — 이번만 덮어쓴 칸이 넘으면 `start` 를 거부하고 `employee.yaml` 의 칸은 낮춘다 (§9.5. 잠정, S-8) `[§12]` | 읽음 (1606–1631행) |
-| `RelayEngine.advance` | `pipeline.py` 1488–1509 | `advance(run_id, resume=False) -> RunState`. 끝(1509)에서 `_let_go`(클래스 끝)가 런 잠금을 놓고 `after_advance(run_id)` 를 부른다 — studio 가 런의 정지를 결재로 올리는 자리다 (§5.8 나, S-5 가 더했다). 런이 끝나거나 멈출 때까지 돌고 그때의 런을 돌려준다. 이미 진행 중이면 `ValueError`. 예상 못 한 예외가 나면 런을 `failed` 로 끝낸다. 돌아올 때 폴더 락을 놓는다. studio 의 슬롯은 이 호출 구간과 같다 (§4.6) | 읽음 |
+| `cap_effort` 와 상한 적용 지점 | `pipeline.py` 73–76, 1613–1629 | `model_cap` · `effort_cap` 은 릴레이 기본값과 재시도에만 걸리고 `stage_models` 로 고른 값에는 걸리지 않는다(1623–1627 의 주석과 코드). S-8 은 덮어쓴 값의 상한이 `model_cap` / `effort_cap` 이라고 적는다. studio 가 `create` 를 부르기 전에 칸을 상한과 비교한다 — 이번만 덮어쓴 칸이 넘으면 `start` 를 거부하고 `employee.yaml` 의 칸은 낮춘다 (§9.5. S-8 확정) `[§12]` | 읽음 (1606–1631행) |
+| `RelayEngine.advance` | `pipeline.py` 1488–1509 | `advance(run_id, resume=False, cancel=None) -> RunState`. `cancel` 은 이 런의 취소 이벤트다 — 부르는 쪽이 준 이벤트가 진입 전에 켜져 있으면 단계를 돌리지 않고 런을 `cancelled` 로 남긴다 (studio 의 슬롯이 준다, §4.6). 끝(1509)에서 `_let_go`(클래스 끝)가 런 잠금을 놓고 `after_advance(run_id)` 를 부른다 — studio 가 런의 정지를 결재로 올리는 자리다 (§5.8 나, S-5 가 더했다). 런이 끝나거나 멈출 때까지 돌고 그때의 런을 돌려준다. 이미 진행 중이면 `ValueError`. 예상 못 한 예외가 나면 런을 `failed` 로 끝낸다. 돌아올 때 폴더 락을 놓는다. studio 의 슬롯은 이 호출 구간과 같다 (§4.6) | 읽음 |
 | `_advance_bg` | `server.py` 187–194 | 데몬 스레드로 `engine.advance` 를 부르는 기존 형태. studio 는 런이 멈춘 뒤의 처리(§4.7)가 필요해 자기 스레드에서 부른다. 동시 실행 한도는 없다 | 읽음 |
 | `RelayEngine._advance` | `pipeline.py` 1510–1565 | `resume` 이면 `RESUMABLE` 상태에서, 아니면 `pending` 에서만 진행한다. `inplace` 면 폴더 락을 잡고, 못 잡으면 런을 `failed` 로 끝낸다(1516–1523). 워크스페이스가 준비돼 있지 않으면(`prepared` 가 False) `prepare` 한다(1538–1550) — 처음 시작할 때와, 정리된 뒤 재개할 때다. 단계를 시작하기 전에 `_check_mcp_ready` 를 부른다(1563–1565, 아래 행) | 읽음 |
 | `RelayEngine._check_mcp_ready` | `pipeline.py` 1031–1061, 호출 1563–1565 | 남은 단계가 쓰는 MCP(읽기 전용 제외)를 `mcp_probe` 로 확인하고 실패 사유를 돌려준다. `mcp_probe` 가 없으면 검사하지 않는다(1046–1047). 실패하면 호출부가 단계를 시작하지 않은 채 런을 `failed` 로 끝낸다. studio 의 에디터 검사(§4.3 T3) 뒤에 한 번 더 걸리는 검사다 | 읽음 |
@@ -2264,20 +2281,20 @@ T3 에서 `RelayEngine.create` 에 넘기는 값:
 |---|---|
 | `relay_path` | `tasks.relay` → 없으면 `employee.yaml` 의 릴레이 → 없으면 `departments.default_relay` 의 파일 경로 (§9.5 의 1). 그 릴레이가 `auto` 면 공개 라우팅 메서드가 고른 릴레이의 경로를 넘긴다 — `auto.yaml` 의 경로는 넘기지 않는다 (§9.5) |
 | `goal` | 작업의 제목 · 사유 · 명세 · 완료 기준 + 직원 지침 · 기억 + 프로젝트 정책 (조립 방식은 S-8) |
-| `session_id` | 작업방의 그 직원 행 `room_members.session_id` (잠정, S-8) |
+| `session_id` | 작업방의 그 직원 행 `room_members.session_id` (S-8 확정). 그 세션이 history 에 있고 같은 저장소의 것일 때만 넘기고, 아니면 엔진이 새 세션을 연다. T3 를 커밋한 뒤 그 런의 세션을 이 행에 적는다 (`WorkEffects.after` — 행은 T3 의 트랜잭션이 만든다) |
 | `repo` | `projects.repo`. 경로는 저장소 설정을 따른다. 워크스페이스 방식은 저장소 설정에서 출발하지만(556) 엔진이 바꿀 수 있어 — 파일을 고치는 단계가 없으면 `none`(554–555), 읽기 전용이 아닌 MCP 가 붙으면 `copy` 가 `inplace`(584–586) — studio 는 만들어진 런의 `RunState.workspace_mode` 를 읽어 쓴다 (§4.3 T3 · T7). `auto_apply` 는 저장소 설정을 따르지 않는다 (아래 행) |
-| `auto_apply` | `False` 고정. 저장소 · 릴레이 설정을 따르지 않는다 (§4.3 T3. 잠정, S-8) `[§12]` |
+| `auto_apply` | `False` 고정. 저장소 · 릴레이 설정을 따르지 않는다 (§4.3 T3. S-8 확정) `[§12]` |
 | `stage_models` | `employee.yaml` 의 `work` 값에 `tasks.stage_models_json` 을 덮어쓴 것. 단계에 펼치고 상한을 건 뒤의 칸이다 (§9.5 의 2–6) |
 | `approval` | `ai` (§4.7) |
 | `mcp` | `employee.yaml` 의 `mcp` 에 `studio` 를 더한 것 (§9.2, §9.5 의 7). `studio` 때문에 `copy` 가 원본 작업으로 바뀌지 않게 하는 자리는 위 `_run_mcp_names` 행이다 |
-| `copy` 고정 (인자 이름 잠정, S-8) | 서버 코드를 품은 프로젝트의 작업 런에만 준다 (§4.3 T3). 방식이 `inplace` 로 정해졌거나(556) 584–586 에서 바뀔 참이면 엔진이 런을 만들지 않고 `ValueError` 를 낸다. `none` 은 파일을 고치는 단계가 하나도 없을 때만 통과한다(554–555). 고치는 단계가 있는데 `none` 이면 `inplace` 와 똑같이 `ValueError` 로 거부한다 — `none` 런은 `Workspace` 없이 원본 폴더에서 돈다(382–384 · 1551). 그 밖의 프로젝트에는 주지 않는다 — 지금처럼 엔진이 바꾸고 `workspace_forced` 를 남긴다 |
+| `pin_copy` — `copy` 고정 (S-8 확정) | 서버 코드를 품은 프로젝트의 작업 런에만 준다 (§4.3 T3). 방식이 `inplace` 로 정해졌거나(556) 584–586 에서 바뀔 참이면 엔진이 런을 만들지 않고 `ValueError` 를 낸다. `none` 은 파일을 고치는 단계가 하나도 없을 때만 통과한다(554–555). 고치는 단계가 있는데 `none` 이면 `inplace` 와 똑같이 `ValueError` 로 거부한다 — `none` 런은 `Workspace` 없이 원본 폴더에서 돈다(382–384 · 1551). 그 밖의 프로젝트에는 주지 않는다 — 지금처럼 엔진이 바꾸고 `workspace_forced` 를 남긴다 |
 | `model_cap` · `effort_cap` | 상한. `employee.yaml` 의 `cap` → 파트 기본값 → 설정 순으로 찾는다 (§9.5 의 6). `stage_models` 로 넘긴 값에는 엔진이 상한을 걸지 않으므로 studio 가 먼저 검사한다 |
 | `needs_writes` | `True`. 릴레이가 `auto` 일 때 공개 라우팅 메서드에 넘기는 값이다 — 파일을 고치는 단계가 없는 릴레이를 후보에서 뺀다 (`router.py` 49–50). `create` 는 읽은 범위(536–654행)에서 이 값을 `_route` 에만 넘기므로(546–547), 고른 경로로 부를 때는 영향이 없다 |
-| 라우팅 결과 (인자 이름 잠정, S-8) | 릴레이가 `auto` 였을 때 공개 라우팅 메서드가 돌려준 `{relay, reason, by, usage, from}`. `create` 가 이벤트 `relay_routed` 와 라우터 사용량(`-:router`)을 남긴다 (620–625 와 같은 기록). `auto` 가 아니면 주지 않는다 |
+| `routed` — 라우팅 결과 (S-8 확정) | 릴레이가 `auto` 였을 때 공개 라우팅 메서드가 돌려준 `{relay, reason, by, usage, from}`. `create` 가 이벤트 `relay_routed` 와 라우터 사용량(`-:router`)을 남긴다 (620–625 와 같은 기록). `auto` 가 아니면 주지 않는다 |
 
-채팅 · 읽기 턴의 `create` 는 `relay_path` 가 `relays/employee-chat.yaml`, `stage_models` 가 `chat` 칸 하나, `mcp` 가 `chat_mcp` + `studio` 이고, 여기에 MCP 한정 인자(이름 잠정, S-7)와 작업 폴더(`repo` 또는 `workdir`)를 더한다 (§9.5 의 덧붙임).
+채팅 · 읽기 턴의 `create` 는 `relay_path` 가 `relays/employee-chat.yaml`, `stage_models` 가 `chat` 칸 하나, `mcp` 가 `chat_mcp` + `studio` 이고, 여기에 MCP 한정 인자 `mcp_only`(값은 `mcp` 와 같다. S-7 확정)와 작업 폴더(`repo` 또는 `workdir`), `approval` `ai`, 그 방의 `room_members.session_id` 를 더한다. 대화를 잇는 턴은 `create` 뒤에 `RunState.stage_sessions['chat']` 에 `room_members.conversation_id` 를 넣고 새 글을 `interject` 로 전한다 — 엔진이 그 대화를 `--resume` 하고 새 글만 보낸다 (`studio/chat.py`) (§9.5 의 덧붙임).
 
-런에 직원 ID 를 주입하는 방법(studio MCP 가 호출자를 식별하는 근거)은 §8.2 다. 기존 코드에서 찾은 자리는 `_stage_mcp`(`pipeline.py` 1406–1414, 읽음)다. `digest` 서버의 `env` 에만 `KATAE_WORKDIR` · `KATAE_RUN_ID` · `KATAE_STAGE` · `KATAE_EXTRA_DIRS` · `KATAE_USAGE_DB` 를 넣고, 레지스트리에 `digest` 가 없으면 아무것도 하지 않는다. studio MCP 서버에 직원 ID 를 넣으려면 이 함수를 넓혀야 한다.
+런에 직원 ID 를 주입하는 방법(studio MCP 가 호출자를 식별하는 근거)은 §8.2 다. 기존 코드에서 찾은 자리는 `_stage_mcp`(`pipeline.py` 1406–1414, 읽음)다. `digest` 서버의 `env` 에만 `KATAE_WORKDIR` · `KATAE_RUN_ID` · `KATAE_STAGE` · `KATAE_EXTRA_DIRS` · `KATAE_USAGE_DB` 를 넣고, 레지스트리에 `digest` 가 없으면 아무것도 하지 않는다. studio MCP 서버에 직원 ID 를 넣으려면 이 함수를 넓혀야 한다. S-6 이 그 옆에 `_env_mcp` 와 `RelayEngine.mcp_env` 를 더했다 (§8.2) — `_stage_mcp` 자신과 `digest` 의 값은 그대로다.
 
 ### 11.3 API · 스트림
 
@@ -2291,7 +2308,7 @@ T3 에서 `RelayEngine.create` 에 넘기는 값:
 | `POST /attachments` · `_attachment_paths` | `server.py` 151–165 · 168–176 | base64 JSON 업로드, 파일당 25MB(144), 이름 정리(161), 폴더 밖 경로 거부(172–174). `/studio/attachments` 가 같은 방식을 따른다 (§6.6) | 읽음 |
 | `POST /runs/{id}/interject` | `server.py` 293–296 | owner 가 작업방에 쓴 글의 끼어들기와 같은 호출 (§6.6). 작업 런에도 그대로 받는다 (§5.8 다) | 읽음 |
 | `GET /models` · `ProviderRegistry.catalog` | `server.py` 299–302, `providers.py` 276–295 | `/studio/models` 가 Claude Code 의 항목만 골라 돌려준다 (§6.4, §10.8 의 9). mock 과 쓸 수 없는 AI 는 빠지고(280–284), 모델마다 `tier` · `exhausted_until` · `efforts` 가 있다 | 읽음 |
-| `GET /providers` | `server.py` 272 | `GET /studio/machine` 의 `providers` (M-1). 응답에서 본 필드는 `katae.py` 47–52 가 읽는 `name` · `available` · `reason` · `limits[{window, utilization}]` · `usage_24h.cost_usd` 뿐이다 | 일부 |
+| `GET /providers` | `server.py` 274–275 | `GET /studio/machine` 의 `providers` (M-1). 응답에서 본 필드는 `katae.py` 47–52 가 읽는 `name` · `available` · `reason` · `limits[{window, utilization}]` · `usage_24h.cost_usd` 뿐이다 | 일부 |
 | `GET /runs/{id}/live` · `RelayEngine.liveness` | `server.py` 727–730, `pipeline.py` 743–778 | `run.live` 와 `/studio/runs/{id}/live` 의 내용 (§7.4). 다른 프로세스가 쥔 런은 디스크의 `pulse.json` 을 읽는다(752–756) | 읽음 |
 | `GET /notifications` | `server.py` 733–745 | `after` 커서로 `NOTIFY_KINDS` 이벤트를 읽는 기존 폴링. `after=-1` 은 지금의 커서만 돌려준다. studio 는 쓰지 않는다 — 이어 받기는 `stream_events` 다 (§7.2). `after_id` 생략 = 지금부터(§7.1)가 같은 관례다 | 읽음 |
 | `/runs/{id}/approve` · `resume` · `cancel` | `server.py` 814–836 | 작업 런이면 `approve` · `resume` 은 409, `cancel` 은 받는다. 작업 없는 런이면 그 런의 `pending` 결재를 닫는 연결 지점을 `approve` · `cancel` 에 둔다 (§5.8) | 읽음 |
@@ -2312,7 +2329,7 @@ studio MCP 서버(§8)와 가드 훅(§10)이 기대는 자리다. "studio 런"�
 | 기존 코드 | 위치 | studio 가 쓰는 방식 | 확인 |
 |---|---|---|---|
 | `mcp_servers/` | `katae.py` · `handoff.py` · `digest.py` · `docs_read.py` | `studio.py` 를 같은 폴더에 둔다. 형태는 `katae.py` 를 따른다 (§8.1, §11.3) | 일부 (파일 목록만. `katae.py` 는 §11.3) |
-| MCP 레지스트리 | `config.py` 24–25 · 80–84 | 이름 → Claude Code `mcpServers` 항목이다. 내장 항목(`docs_read` · `handoff` · `digest`, 각 `{command, args}`)에 `Config.mcp_servers` 를 합친다(84). `studio` 를 내장 항목에 더한다. `env` 는 단계마다 `_stage_mcp` 의 콜백이 채운다 (§8.2). `employee.yaml` 의 `mcp` 검사(§9.4 의 6)가 이 목록을 본다. 러너가 이것을 `mcp_registry` 로 받는 줄은 읽지 않았다 | 일부 (해당 줄만) |
+| MCP 레지스트리 | `config.py` 24–25 · 80–84 | 이름 → Claude Code `mcpServers` 항목이다. 내장 항목(`docs_read` · `handoff` · `digest`, 각 `{command, args}`)에 `Config.mcp_servers` 를 합친다(84). `studio` 를 내장 항목에 더했다 (S-6: `{command, args: [mcp_servers/studio.py]}`, `env` 없음). `env` 는 단계마다 `RelayEngine.mcp_env` 의 콜백이 채운다 (§8.2) — 콜백이 `None` 을 주는 런(대시보드 · CLI 런)에는 고르거나 단계에 적어도 붙지 않는다. `employee.yaml` 의 `mcp` 검사(§9.4 의 6)가 이 목록을 본다. 러너가 이것을 `mcp_registry` 로 받는 줄은 읽지 않았다 | 일부 (해당 줄만) |
 | `backup_hook.py` | 1–60 | PreToolUse 훅의 기존 형태다. argv 로 `<run_dir> <project_root>` 를, stdin 으로 도구 호출 JSON 을 받고 `tool_input.file_path` · `notebook_path` 를 읽는다(47–53). 어떤 실패에도 exit 0 이다(10 · 54–56). 가드는 같은 방식으로 입력을 받되 거부한다 (§10.6) | 읽음 |
 | `JournalWorkspace.hook_settings` | `journal.py` 285–292 | 훅 설정 파일을 쓴다. `hooks.PreToolUse` 에 항목 하나 — `matcher` 는 편집 도구 넷, `hooks` 는 `{type: "command", command}` 이고 명령 줄은 파이썬 · `backup_hook.py` · 런 폴더 · 원본 폴더다. 명령 줄에는 argv 만 있다 | 읽음 |
 | 설정 파일이 단계로 가는 줄 | `pipeline.py` 1552 · 1664, `runners.py` 594–595 | 워크스페이스가 `JournalWorkspace` 이고 설정 파일이 있을 때만 `StageCall.settings_path` 가 차고(1552) 러너가 `--settings` 로 넘긴다. studio 런이면 워크스페이스 종류와 무관하게 넘기도록 넓힌다 | 읽음 |
@@ -2356,7 +2373,7 @@ studio MCP 서버(§8)와 가드 훅(§10)이 기대는 자리다. "studio 런"�
 | 10 | §3.10 | 담당을 언제 바꿀 수 있는지 적지 않는다 | `backlog` 에서만 바꾼다 |
 | 11 | §3.13 | 작업 하나가 결재를 몇 개 가질 수 있는지 적지 않는다 | `pending` 결재는 작업에 하나뿐이다 |
 | 12 | §3.13 | `inbox` 의 컬럼을 적지 않는다 | `delivery` · `delivered_at` 을 더했다. 결정문을 런에 넣었는지 기억한다 |
-| 13 | §3.14 | M-2: 1회용 페어링 코드 (5분 만료) | 테이블에 두지 않고 서버 메모리에 둔다. 재시작하면 코드는 무효다 (잠정, M-2) |
+| 13 | §3.14 | M-2: 1회용 페어링 코드 (5분 만료) | 테이블에 두지 않고 서버 메모리에 둔다. 재시작하면 코드는 무효다 (M-2 가 확정했다) |
 | 14 | §3.16 · §7.2 (두 곳) | S-1: 테이블 12개. S-4: `after_id` 로 이어 받기 | 13번째 테이블 `stream_events` 를 마이그레이션 버전 2 로 둔다. 오래된 행을 지우므로 "행을 지우는 테이블은 `task_deps` 뿐"에 예외가 하나 생긴다 |
 
 ### 12.2 상태 전이 · 큐 (§4)
@@ -2365,11 +2382,11 @@ studio MCP 서버(§8)와 가드 훅(§10)이 기대는 자리다. "studio 런"�
 |---|---|---|---|
 | 15 | §4.2 | §2 의 그림에 되돌리기 뒤의 상태가 없다. S-12 는 되돌리기를 결정의 한 종류로만 적는다 | T9 `review` → `backlog` 를 더했다 |
 | 16 | §4.3 T3 | M-7: MCP 작업 시작 전 에디터 확인, 무응답이면 결재 | 에디터 검사는 전이 조건이 아니라 전이 뒤의 걸음이다. 무응답이면 `working` 이 된 직후 `blocked` 가 된다 (잠정, M-7) |
-| 17 | §4.3 T3 · §11.2 | 저장소 · 릴레이 설정의 `auto_apply` 를 다루지 않는다 | 작업 런은 항상 `auto_apply = False` 로 만든다. 검수 전에 변경이 원본에 반영되지 않게 한다 (잠정, S-8) |
+| 17 | §4.3 T3 · §11.2 | 저장소 · 릴레이 설정의 `auto_apply` 를 다루지 않는다 | 작업 런은 항상 `auto_apply = False` 로 만든다. 검수 전에 변경이 원본에 반영되지 않게 한다 (S-8 확정) |
 | 18 | §4.3 T3 | 상태는 일곱이고 "줄 선 중"이 없다 | 시작 요청과 전이를 나눴다. 전이는 슬롯을 얻은 때 일어나고 그 사이는 `queued_at` 컬럼이다 |
 | 19 | §4.3 T4 | `blocked` 로 가는 계기는 질문 · 구조 선택 · 사전 승인 · 위험 명령 넷 | 여섯을 더했다 — 예산 한도, 설계 게이트, 런의 실패 · 취소, 검수 요청 없는 종료, 왕복 한도, 에디터 무응답 (§4.3 T4 의 표). 런이 실패한 작업을 `working` 에 두면 아무도 알림을 받지 못한다 |
 | 20 | §4.5 · §6.4 | 작업의 취소 · 중지를 적지 않는다 | 종결 상태 `cancelled` 와 취소 전이 T10 · T11 을 더했다 — owner 만, `backlog` · `blocked` 에서만 (owner 확정, §12.6 의 13). `rejected` 는 제안 거절 전용이고, `stop` 은 전이가 아니며 그 끝은 `blocked` 다 |
-| 21 | §4.6 | S-8: 읽기 전용 턴은 큐를 타지 않는다 | 채팅 턴도 큐를 타지 않고, 둘 다 두 한도에 세지 않는다 (잠정, S-8) |
+| 21 | §4.6 | S-8: 읽기 전용 턴은 큐를 타지 않는다 | 채팅 턴도 큐를 타지 않고, 둘 다 두 한도에 세지 않는다 (S-8 확정) |
 | 22 | §4.6 | 진행 방식은 캠페인이 가진다 | 캠페인 없는 작업은 `each` 와 같게 다룬다 (잠정, S-14) |
 
 ### 12.3 결재 (§5)
@@ -2402,11 +2419,11 @@ studio MCP 서버(§8)와 가드 훅(§10)이 기대는 자리다. "studio 런"�
 |---|---|---|---|
 | 37 | §9.2 | 전제 1 · S-7: MCP 목록은 하나이고 unreal 은 채팅에서 기본 끔 | 키를 둘로 나눴다 — `mcp`(작업 런)와 `chat_mcp`(채팅 · 읽기 턴, 기본 빈 목록) |
 | 38 | §9.2 | S-8: 상한은 `model_cap` / `effort_cap`. 어디서 오는지 적지 않는다 | `employee.yaml` 에 `cap` 키를 더했다. 없으면 파트 기본값, 그다음 설정이다 |
-| 39 | §11.2 | S-8: 덮어쓴 값의 상한은 `model_cap` / `effort_cap` | 엔진은 `stage_models` 로 고른 값에 상한을 걸지 않는다. studio 가 `create` 전에 본다 — 덮어쓴 칸이 넘으면 거부하고 `employee.yaml` 의 칸은 낮춘다 (잠정, S-8) |
+| 39 | §11.2 | S-8: 덮어쓴 값의 상한은 `model_cap` / `effort_cap` | 엔진은 `stage_models` 로 고른 값에 상한을 걸지 않는다. studio 가 `create` 전에 본다 — 덮어쓴 칸이 넘으면 거부하고 `employee.yaml` 의 칸은 낮춘다 (S-8 확정) |
 | 40 | §10.2 | §7 의 판정은 차단과 물어보기 둘 | 해석하지 못한 명령을 거부하는 `unparsed` 를 더했다 |
 | 41 | §10.3 | §7 의 비밀: `.ssh` · 브라우저 프로필 · Claude 자격 증명 · `.katae/` · `relay.config.local.yaml` | 러너 임시 폴더의 `mcp.json`(다른 런의 행위자 토큰)을 더했다 |
 | 42 | §10.3 | §7: 릴레이 서버 종료 | 서버 주소로 가는 셸의 요청을 모두 막는다. `/studio` 가 아닌 기존 경로는 루프백을 그대로 믿고, 공용 토큰을 얻은 셸은 `/studio/*` 에서 owner 로 통하기 때문이다 |
-| 43 | §10.3 · §10.8 | §7: 서버 설정 · 가드 파일 수정 | `runs/studio/` 전체와 서버 루트의 `relay_agent/` 전체의 쓰기를 더했다. 서버 코드를 품은 프로젝트의 작업 런은 원본 작업으로 만들지 않는다 (§4.3 T3. 잠정, S-8 · S-10) |
+| 43 | §10.3 · §10.8 | §7: 서버 설정 · 가드 파일 수정 | `runs/studio/` 전체와 서버 루트의 `relay_agent/` 전체의 쓰기를 더했다. 서버 코드를 품은 프로젝트의 작업 런은 원본 작업으로 만들지 않는다 (§4.3 T3. 작업 런 쪽은 S-8 확정 — `pin_copy`. 훅의 쓰기 막기는 잠정, S-10) |
 | 44 | §10.4 | §7: 등록된 프로젝트 폴더 밖의 삭제 · 이동 | 이 런의 작업 폴더와 임시 폴더도 묻지 않는 루트로 본다 |
 | 45 | §10.4 | §7: 1GB 넘는 다운로드 | 크기를 알 수 없으면 통과시킨다 |
 | 46 | §11.1 | S-14: 기존 `campaign.py` 를 확장한다 | 기존 작업 상태 `skipped` 에 맞는 studio 상태가 없다 (잠정, S-14) |
@@ -2451,7 +2468,7 @@ CAMPAIGN.md 의 서버 쪽 작업 31개(S-1–S-14, M-1–M-8, H-1–H-6, N-1–
 | S-5 결재함 | §5 (5.1–5.10), §3.13 | §4.3 (T1 · T2 · T4 · T5 · T11), §4.7, §6.4 (결재 경로), §11.3 |
 | S-6 studio MCP 서버 | §8 (8.1–8.5) | §5.7, §6.6 (직원의 첨부), §11.2 (`READ_ONLY_MCP`), §11.3, §11.4 |
 | S-7 직원 실행기 — 채팅 | §9.1–9.4, §9.6 | §2.2, §3.7, §3.15 (시드), §4.9, §6.6, §7.4 (`run.live`), §8.2, §9.5 (채팅 · 읽기 턴), §11.1, §11.2 (MCP 한정 인자 · 작업 폴더) |
-| S-8 작업 실행 · 큐 · 폴더 락 | §4.3 T3, §4.6–4.8, §9.5 | §6.4 (`start` · `stop` · `/studio/models`), §10.8 의 8 · 9, §11.2 (공개 라우팅 메서드 · `copy` 고정 인자) |
+| S-8 작업 실행 · 큐 · 폴더 락 | §4.3 T3, §4.6–4.8, §9.5 | §6.4 (`start` · `stop` · `/studio/models`), §8.3 (`end_turn` 뒤 `RelayEngine.cancel` 로 끊는 대기 시간), §10.8 의 8 · 9, §11.2 (공개 라우팅 메서드 · `copy` 고정 인자) |
 | S-9 직원 간 소통 | §4.6 (왕복 한도), §8.4 (`room_post`), §8.5 | §3.7, §4.5, §5.3 (`exchange_limit`), §5.7, §6.6, §11.2 (`interject`) |
 | S-10 권한 프로파일과 치명 가드 | §10 (10.1–10.8), §6.4 (가드) | §4.3 T3 (서버 코드를 품은 프로젝트), §4.5, §5.3 · §5.5 · §5.6 (`risky_command`), §8.2, §9.5 의 5 (가), §11.4 (연결 지점 6) |
 | S-11 하네스 준수 게이트 | §4.3 T6, §5.4 (`checklist` · `harness_checks`) | §5.3 (`structure_choice`), §8.4 (`task_request_review` · `ask_owner`) |

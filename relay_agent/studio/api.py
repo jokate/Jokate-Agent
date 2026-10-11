@@ -12,8 +12,17 @@ The live stream (S-4, studio/ws.py) hangs on three things here: `on_commit` — 
 every commit, which is also when the retention of §7.2 is looked at —, the `liveness` handed to `install`,
 and `live_runs` · `live_data`: the content of `run.live` and of `GET /studio/runs/{run_id}/live`.
 
-Not here yet, on purpose: actor tokens (`sat1.`, §8.2) are verified by S-6, so until then they establish
-nobody and get 401 everywhere. An owner's message is stored and announced; the turns it starts belong to
+Employees (S-6): an actor token (`sat1.`, studio/sat.py) is checked by `actor_subject` — §8.2 의 검사 1–3 —
+and establishes an employee on the actor paths only. `POST /studio/mcp/<tool>` hands the caller and the
+arguments to studio/tools.py and answers 200 with the result of §8.3; `actor_token(run_id)` makes the token
+a run is given, and `mcp_env` is the engine's env callback for the `studio` MCP server — None for a run
+that is not in studio's ledger, so no studio server is attached to it.
+
+Bringing in a project that is already there (M-6): `POST /studio/projects` has studio/importer.py read the
+folder — nothing is written in it — and registers it; the `repos` handed to `install` says which registered
+repository the folder lies in (§3.3).
+
+Not here yet, on purpose: an owner's message is stored and announced; the turns it starts belong to
 S-7 · S-9. Tasks are not started or stopped here (S-8), campaigns not created or driven (S-14).
 """
 
@@ -21,11 +30,11 @@ from __future__ import annotations
 
 import base64
 import binascii
+import dataclasses
 import hashlib
 import hmac
 import json
 import logging
-import mimetypes
 import re
 import shutil
 import sqlite3
@@ -34,14 +43,15 @@ import time
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Callable, Literal
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 from starlette.concurrency import run_in_threadpool
 from starlette.requests import HTTPConnection
 
+from . import devices, employees, files, importer, machine as machine_info, sat, tools, work
 from .inbox import Hooks, Inbox, InboxError
 from .store import StudioStore, StudioStoreError, Tx, now
 from .tasks import OWNER, STATES, TERMINAL, TEXT_FIELDS, Effects, TaskMachine, TaskNotFound, TransitionError
@@ -115,22 +125,33 @@ _lock = threading.Lock()
 _store: StudioStore | None = None
 _failure: str | None = None  # why the store could not start; kept so the start is not retried per request
 _effects: Effects | None = None  # what a task change does outside the DB (runs, gates, apply); None = nothing
+_queue: Any = None  # queue.TaskQueue: the line and its slots (§4.6); None = nothing starts or stops a run
 _hooks: Hooks | None = None  # what a decision asks of the engine and the turns (interject, commit, chat turn)
+_models: Callable[[], list[dict]] | None = None  # the engine's ProviderRegistry.catalog; None = the config's own
 _run_view: Callable[[str], dict | None] | None = None  # run id -> {id, status, changes_status}; S-8 sets it
 _liveness: Callable[[str], dict] | None = None  # run id -> RelayEngine.liveness(run id); None = no engine connected
+_workdir: Callable[[str], Path | None] | None = None  # run id -> the folder that run's stages work in (§6.6)
+_repos: Callable[[], Any] | None = None  # -> the server's RepoRegistry as it is now (§3.3); None = no registry
 _commit_listeners: list[Callable[[tuple[int, ...]], None]] = []  # see on_commit
+_revoke_listeners: list[Callable[[str], Any]] = []  # see on_revoke
 _pruned_at = 0.0  # time.monotonic() of the last look at the retention of stream_events
 PRUNE_EVERY = 24 * 3600.0  # §7.2: at the start and once a day
 
 
 def install(app: FastAPI, cfg: Config, effects: Effects | None = None, *,
-            liveness: Callable[[str], dict] | None = None, hooks: Hooks | None = None) -> None:
+            liveness: Callable[[str], dict] | None = None, hooks: Hooks | None = None,
+            workdir: Callable[[str], Path | None] | None = None,
+            repos: Callable[[], Any] | None = None) -> None:
     """Connect the studio layer to the server: remember its config (and the effects of task changes, once
     S-8 has them), add the router and the error bodies. `liveness` is the engine's — what `run.live` and
     `GET /studio/runs/{run_id}/live` report (§7.4). `hooks` is what an inbox decision asks of the engine and
-    the turns (studio/inbox.py); without it a decision is stored and its text waits to be delivered."""
-    global _cfg, _effects, _liveness, _hooks
-    _cfg, _effects, _liveness, _hooks = cfg, effects, liveness, hooks
+    the turns (studio/inbox.py); without it a decision is stored and its text waits to be delivered.
+    `workdir` gives the folder a run's stages work in (studio/runs.py `workdir`): what a relative path of an
+    employee's attachment is taken from (§6.6); without it only absolute paths in the project folder pass.
+    `repos` gives the server's RepoRegistry — a function, because the server replaces the object when its
+    repositories are reloaded; without it no project can be brought in (`POST /studio/projects`, §3.3)."""
+    global _cfg, _effects, _liveness, _hooks, _workdir, _repos
+    _cfg, _effects, _liveness, _hooks, _workdir, _repos = cfg, effects, liveness, hooks, workdir, repos
     app.include_router(router)
     add_error_handlers(app)
 
@@ -146,6 +167,13 @@ def on_commit(listener: Callable[[tuple[int, ...]], None]) -> None:
     of §4.5. On the committing thread, outside the store lock. It stays through `close_store()`."""
     if listener not in _commit_listeners:
         _commit_listeners.append(listener)
+
+
+def on_revoke(listener: Callable[[str], Any]) -> None:
+    """Have `listener(device_id)` called after a device was revoked and that is committed (§6.5 의 5): ws.py
+    closes the device's connections with it (§7.1). On the revoking thread. It stays through `close_store()`."""
+    if listener not in _revoke_listeners:
+        _revoke_listeners.append(listener)
 
 
 def _prune(store: StudioStore) -> None:
@@ -202,6 +230,22 @@ def open_store() -> bool:
     return True
 
 
+def seed_employee() -> dict | None:
+    """Make the seed employee when the studio DB has no employee at all (§3.15; studio/employees.py `seed`).
+    Called once at the server's start, after `open_store()` — not from `get_store()`, which every request
+    passes. Returns the row, or None: nothing was made, the store is not open, or it failed (logged — the
+    server starts without it)."""
+    with _lock:
+        store = _store
+    if store is None or _cfg is None:
+        return None
+    try:
+        return employees.seed(store, _cfg.studio_dir)
+    except Exception:  # noqa: BLE001 - a start must not depend on the seed
+        log.exception("studio: 시드 직원을 만들지 못했다")
+        return None
+
+
 def close_store() -> None:
     """Close and forget the store and a remembered failure (tests, and a retry after the cause is fixed)."""
     global _store, _failure
@@ -253,7 +297,7 @@ def openapi_is_current(path: Path | None = None) -> bool:
 # --- authentication (§6.2) --------------------------------------------------------------------------------
 ACTOR_PATHS = ("/studio/mcp/", "/studio/guard/")   # employees' paths; every other /studio path is the owner's
 TOKENLESS = {("POST", "/studio/devices/pair")}      # a phone has no token before the exchange (§6.2 의 2)
-DEVICE_PREFIX = "sdt_"
+DEVICE_PREFIX = devices.TOKEN_PREFIX                # "sdt_": what the exchange of §6.5 hands out
 SEEN_EVERY = timedelta(seconds=60)                  # devices.last_seen_at is refreshed once a minute at most
 NO_SHARED_TOKEN = (" 이 서버에는 공용 토큰이 없습니다 — relay.config.local.yaml 의 auth_token 또는 환경 변수 "
                    "KATAE_TOKEN 을 설정하고 서버를 다시 시작하세요.")
@@ -295,11 +339,84 @@ def owner_device(token: str) -> dict | None:
     return device
 
 
+def run_is_running(run_id: str) -> bool:
+    """§8.2 의 검사 2: is that run `running` now? Read from `_run_view` once S-8 has set it, until then from
+    the engine's liveness. A run the engine does not know is not running. StudioError `unavailable` when
+    neither is connected — "cannot say" is not "ended"."""
+    if _run_view is not None:
+        view = _run_view(run_id)
+        return view is not None and view.get("status") == "running"
+    if _liveness is None:
+        raise StudioError("unavailable", "런 상태를 읽을 엔진이 연결되지 않았습니다 (install 의 liveness)")
+    try:
+        return _liveness(run_id).get("status") == "running"
+    except FileNotFoundError:  # RelayEngine.load: no run.json under that id
+        return False
+
+
+def actor_subject(token: str) -> dict | None:
+    """§8.2 의 검사 1–3 for an actor token: `{"kind": "employee", employee_id, run_id, room_id, task_id,
+    mode}`, or None when it establishes nobody — the signature is wrong (1), the run is not in studio's
+    ledger or no longer running (2), the employee is gone or retired (3).
+
+    The ledger is `run_head`: tasks.run_id for a task run, the tracked runs for chat · read turns. Raises
+    StudioError `unavailable` when the DB or the engine cannot answer: that is not a wrong token (401)."""
+    claims = sat.verify(token)
+    if claims is None:
+        return None
+    store = get_store()
+    try:
+        head = run_head(store, claims["run"])
+        employee = store.get_employee(claims["emp"])
+    except (StudioStoreError, sqlite3.Error) as e:
+        raise StudioError("unavailable", f"행위자 토큰을 확인하지 못했습니다 — {type(e).__name__}: {e}") from e
+    if head is None or employee is None or employee["retired_at"] is not None:
+        return None
+    if not run_is_running(claims["run"]):
+        return None
+    return {"kind": "employee", "employee_id": employee["id"], "run_id": claims["run"],
+            "room_id": claims["room"], "task_id": claims["task"], "mode": claims["mode"]}
+
+
+def actor_token(run_id: str) -> str | None:
+    """A new actor token for a run of studio's ledger (§8.2 '주입': one per stage), from whose run it is —
+    the employee, the room, the task and the mode of `run_head`. None for a run studio did not start (a
+    dashboard or CLI run: no studio MCP server is attached to it) and while the store is not open.
+    Called from outside a request: the engine's env callback (S-6 2/2)."""
+    with _lock:
+        store = _store
+    if store is None:
+        return None
+    head = run_head(store, run_id)
+    if head is None or not head.get("employee_id") or not head.get("room_id"):
+        return None
+    return sat.issue(run=run_id, emp=head["employee_id"], room=head["room_id"], task=head.get("task_id"),
+                     mode=head["mode"])
+
+
+def mcp_env(run_id: str, stage: str = "") -> dict[str, str] | None:
+    """The engine's env callback for the `studio` MCP server (§8.2 '주입'; server.py registers it as
+    `engine.mcp_env["studio"]`): the server's address and a new actor token for this stage of a run of
+    studio's ledger. None for any other run — the engine then attaches no studio server to it (§11.4)."""
+    token = actor_token(run_id)
+    if token is None or _cfg is None:
+        return None
+    return {"STUDIO_URL": _cfg.server_url, "STUDIO_ACTOR_TOKEN": token}
+
+
+def run_workdir(run_id: str) -> Path | None:
+    """The folder that run's stages work in (§6.6 '직원의 첨부'), from the callback `install` was given. None
+    when no callback is connected or the engine has no such run."""
+    found = _workdir(run_id) if _workdir is not None else None
+    return Path(found) if found else None
+
+
 def identify(token: str, cfg: Config) -> dict | None:
-    """Who a token is: `{"kind": "owner", "device_id": id | None}`, or None when it establishes nobody.
+    """Who a token is: `{"kind": "owner", "device_id": id | None}`, `{"kind": "employee", …}` for an actor
+    token that passes §8.2 의 검사 1–3 (`actor_subject`), or None when it establishes nobody.
 
     The shared token is checked first and needs no DB. A device token is accepted with or without a shared
-    token configured. Raises StudioError `unavailable` when a device token cannot be looked up."""
+    token configured. Raises StudioError `unavailable` when a device or actor token cannot be looked up."""
     if not token:
         return None
     if cfg.auth_token and hmac.compare_digest(token.encode(), cfg.auth_token.encode()):
@@ -308,6 +425,8 @@ def identify(token: str, cfg: Config) -> dict | None:
         device = owner_device(token)
         if device is not None:
             return {"kind": "owner", "device_id": device["id"]}
+    if token.startswith(sat.PREFIX):
+        return actor_subject(token)
     return None
 
 
@@ -332,10 +451,13 @@ async def authenticate(request: Request, cfg: Config) -> JSONResponse | None:
     except StudioError as e:
         return e.response()
     if who is None:
+        if actor_path:
+            return error_response(code, "행위자 토큰이 무효입니다 (서명이 맞지 않거나, 런이 끝났거나, 직원이 없습니다).")
         return error_response(code, "토큰이 맞지 않습니다 (대소문자 구분)." + hint)
-    if actor_path:
-        return error_response("actor_not_allowed", "이 경로는 직원(행위자) 토큰만 받습니다")
-    request.state.studio_subject = who  # `devices/me` (A-11) reads the device id from here
+    if (who["kind"] == "employee") != actor_path:  # a subject, but not this path's (§6.2)
+        return error_response("actor_not_allowed", "이 경로는 직원(행위자) 토큰만 받습니다" if actor_path else
+                              "이 경로는 owner 토큰만 받습니다 (행위자 토큰은 /studio/mcp/ · /studio/guard/ 에서만 씁니다)")
+    request.state.studio_subject = who  # `devices/me` (A-11) reads the device id, `get_caller` the employee
     return None
 
 
@@ -355,31 +477,16 @@ def _with_dm_room(store: StudioStore, employees: list[dict]) -> list[dict]:
     return [{**e, "dm_room_id": rooms.get(e["id"])} for e in employees]
 
 
-EMPLOYEE_FILES = {"persona_md": "PERSONA.md", "guide_md": "GUIDE.md", "memory_md": "MEMORY.md",
-                  "employee_yaml": "employee.yaml"}
+EMPLOYEE_FILES = employees.FILE_KEYS
 
 
 def _employee_files(employee_id: str) -> dict:
     """The four files of runs/studio/employees/<id>/ (§2.2) as text; None for a file that is not there."""
-    folder = _config().studio_dir / "employees" / employee_id
-    out: dict[str, str | None] = {}
-    for key, name in EMPLOYEE_FILES.items():
-        try:
-            out[key] = (folder / name).read_text(encoding="utf-8") if (folder / name).is_file() else None
-        except (OSError, UnicodeDecodeError):
-            out[key] = None
-    return out
+    texts = employees.read_files(_config().studio_dir, employee_id)
+    return {key: texts[name] for key, name in EMPLOYEE_FILES.items()}
 
 
-def _room_project(store: StudioStore, room: dict, tx: Tx) -> str | None:
-    """The project a room's events are filed under: the task's for a task room, the employee's for a DM."""
-    if room["task_id"]:
-        task = store.get_task(room["task_id"], tx=tx)
-        return task["project_id"] if task else None
-    if room["employee_id"]:
-        employee = store.get_employee(room["employee_id"], tx=tx)
-        return employee["project_id"] if employee else None
-    return None
+_room_project = files.room_project  # the project a room's events are filed under; tools.room_post uses it too
 
 
 # --- projects ---------------------------------------------------------------------------------------------
@@ -395,6 +502,96 @@ class ProjectPatch(BaseModel):
 def list_projects(archived: int = Query(0, ge=0, le=1), store: StudioStore = Depends(get_store)) -> dict:
     """`archived=1` adds the archived projects to the list."""
     return {"items": store.list_projects(include_archived=bool(archived))}
+
+
+class ProjectImport(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    path: str                # the folder the .uproject is in, absolute
+    name: str | None = None  # default: the .uproject's name
+    repo: str | None = None  # default: the registered repository the folder lies in
+
+
+def _import_repo(folder: Path, repo: str | None) -> Any:
+    """The RepoSpec a project in `folder` is registered under (§3.3): the registered repository the folder lies
+    in (`RepoRegistry.match`) — which `repo`, when it is given, has to name (`RepoRegistry.get`)."""
+    registry = _repos() if _repos is not None else None
+    if repo is not None:
+        try:
+            if registry is None:
+                raise KeyError(f"등록되지 않은 저장소: {repo} (등록: relay repo add {repo} <경로>)")
+            registry.get(repo)
+        except KeyError as e:
+            raise StudioError("precondition_failed", str(e.args[0] if e.args else e)) from e
+    home = registry.match(folder) if registry is not None else None
+    if home is None:
+        raise StudioError("precondition_failed",
+                          f"등록된 저장소 안의 폴더가 아닙니다: {folder} (등록: relay repo add <이름> <경로>)")
+    if repo is not None and home.name != repo:
+        raise StudioError("precondition_failed",
+                          f"이 폴더는 저장소 '{home.name}' 안에 있습니다. repo 를 빼거나 '{home.name}' 으로 보내세요.")
+    return home
+
+
+# §6.4 (M-6): bring in a UE project that is already on this computer. The folder is only read (studio/importer.py):
+# what is missing — the MCP port, the harness — is told in `detected`, and filling it in is M-4 · M-5's. The
+# repository is asked before the folder is looked at, so a path outside every registered repository gets one answer
+# whether it is there or not. No docstring: the saved contract would carry it as the description.
+@router.post("/projects", status_code=201)
+def import_project(body: ProjectImport, store: StudioStore = Depends(get_store)) -> dict:
+    path = body.path.strip()
+    name = body.name.strip() if body.name is not None else None
+    repo = body.repo.strip() if body.repo is not None else None
+    blank = [key for key, value in (("path", path), ("name", name), ("repo", repo)) if value == ""]
+    if blank:
+        raise StudioError("missing_fields", f"{' · '.join(blank)} 은(는) 비울 수 없습니다", fields=blank)
+    try:
+        folder = Path(path).resolve() if Path(path).is_absolute() else None
+    except (OSError, ValueError):  # a text no path can be made of
+        folder = None
+    if folder is None:
+        raise StudioError("precondition_failed", f"path 는 프로젝트 폴더의 절대 경로여야 합니다: {path}")
+    spec = _import_repo(folder, repo)
+    if not folder.is_dir():
+        if folder.is_file():  # the .uproject itself, most often: the same refusal, told apart
+            raise StudioError("precondition_failed",
+                              f"path 가 파일입니다 — .uproject 가 있는 폴더의 경로를 주세요: {folder}")
+        raise StudioError("precondition_failed", f"폴더가 없습니다: {folder}")
+    if importer.find_uproject(folder) is None:
+        raise StudioError("precondition_failed", f"이 폴더에 .uproject 파일이 없습니다: {folder}")
+    try:
+        engines = machine_info.engines(_machine.engines)
+    except Exception:  # noqa: BLE001 — a registry that cannot be read does not stop an import
+        log.exception("studio: 설치된 엔진 목록을 읽지 못했다")
+        engines = []
+    found = importer.detect(folder, engines, top=spec.resolved)
+    name = name or Path(found["uproject"] or folder.name).stem
+    same = machine_info._same  # paths as two of them are compared: slashes, case, the slash at the end
+    with store.transaction() as tx:
+        others = store.list_projects(include_archived=True, tx=tx)  # an archived one keeps its name and repo
+        for field, taken, detail in (
+                ("path", lambda p: same(p["path"]) == same(folder),
+                 f"이 폴더는 이미 프로젝트로 등록돼 있습니다: {folder}"),
+                ("name", lambda p: p["name"] == name, f"이름 '{name}' 은(는) 다른 프로젝트가 쓰고 있습니다"),
+                ("repo", lambda p: p["repo"] == spec.name,
+                 f"저장소 '{spec.name}' 은(는) 다른 프로젝트가 쓰고 있습니다")):
+            held = [p for p in others if taken(p)]
+            if held:  # the list does not show an archived project (`archived=1` does): the refusal says it is one
+                note = " (보관된 프로젝트입니다)" if all(p["archived_at"] is not None for p in held) else ""
+                raise StudioError("conflict", detail + note, field=field)
+        port = found["mcp"]["port"]
+        holder = next((p["id"] for p in others
+                       if port is not None and p["mcp_port"] == port and p["archived_at"] is None), None)
+        if holder is not None:  # not refused: the row goes in without a port, and the answer says who has it
+            found["mcp"]["in_use_by"], port = holder, None
+        try:
+            row = store.create_project(name, str(folder), spec.name, tx=tx, mcp_port=port,
+                                       engine_version=importer.engine_version_of(found["engine"]["association"]))
+        except sqlite3.IntegrityError as e:
+            raise StudioError("conflict", "이름 · 저장소 · 포트가 다른 프로젝트와 겹칩니다",
+                              field=_unique_field(str(e))) from e
+        store.emit(tx, "project.updated", {"project": row}, project_id=row["id"])
+    return {**row, "detected": found}
 
 
 @router.get("/projects/{id}")
@@ -460,6 +657,15 @@ def archive_project(id: str, store: StudioStore = Depends(get_store)) -> dict:
 @router.get("/departments")
 def list_departments(store: StudioStore = Depends(get_store)) -> dict:
     return {"items": store.list_departments()}
+
+
+# §6.4: the alias of `GET /models`, narrowed to the providers a guard hook can be put on — Claude Code. The
+# values an `employee.yaml` slot and a `start` override may name (§9.4 의 8, §9.5 의 5). No docstring: the
+# saved contract (openapi.json) would carry it as the path's description.
+@router.get("/models")
+def list_models() -> list[dict]:
+    checks = employees.context(_config())
+    return work.models((_models or checks.providers.catalog)(), checks)
 
 
 @router.get("/employees")
@@ -537,6 +743,14 @@ class Cancel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     reason: str | None = None
+
+
+class Start(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # the override of this start (§9.5 의 3): {stage: {provider, model, effort}}. {} clears the one the task
+    # keeps; null or no key leaves it as it is
+    stage_models: dict[str, Any] | None = None
 
 
 def get_machine(store: StudioStore = Depends(get_store)) -> TaskMachine:
@@ -641,6 +855,23 @@ def put_task_deps(id: str, body: Deps, machine: TaskMachine = Depends(get_machin
     return {**row, "depends_on": [dep["depends_on_id"] for dep in machine.store.list_task_deps(task_id=id)]}
 
 
+@router.post("/tasks/{id}/start")
+def start_task(id: str, body: Start | None = None, machine: TaskMachine = Depends(get_machine)) -> dict:
+    """The trigger of T3 (§4.3): the task joins the line and is still in backlog here — the queue does T3 when
+    it has a slot. `stage_models` is kept as the task's override; one that cannot run is `precondition_failed`."""
+    return machine.request_start(id, OWNER, stage_models=body.stage_models if body else None, vet=True).task
+
+
+@router.post("/tasks/{id}/stop")
+def stop_task(id: str, machine: TaskMachine = Depends(get_machine)) -> dict:
+    """Take the task out of the line, or end its run: a working task goes to blocked with a `question` (T4) —
+    at once when its run has stopped, else when it stops (§6.4). Nothing to stop is `precondition_failed`."""
+    _need(machine.store.get_task(id), "작업", id)
+    if _queue is None:  # nothing gives slots here: only the line can be left
+        return machine.unqueue(id, OWNER).task
+    return _queue.stop(id, get_inbox(machine))  # the request's inbox: get_inbox is defined further down
+
+
 @router.post("/tasks/{id}/cancel")
 def cancel_task(id: str, body: Cancel | None = None, machine: TaskMachine = Depends(get_machine)) -> dict:
     """The one transition the owner calls by path (§4.2): T10 from backlog, T11 from blocked. Any other state
@@ -686,7 +917,8 @@ class Decide(BaseModel):
 def get_inbox(machine: TaskMachine = Depends(get_machine)) -> Inbox:
     """The inbox of a request: the request's machine, and the hooks the server gave (install() · use_hooks() —
     studio/runs.py for the runs that are no task's; the turns come with S-7 · S-8)."""
-    return Inbox(machine.store, machine, _hooks, studio_dir=_config().studio_dir)
+    cfg = _config()
+    return Inbox(machine.store, machine, _hooks, studio_dir=cfg.studio_dir, checks=employees.context(cfg))
 
 
 # --- the engine's side of the inbox (§5.8) ----------------------------------------------------------------
@@ -700,6 +932,21 @@ def use_hooks(hooks: Hooks | None) -> None:
     _hooks = hooks
 
 
+def use_effects(effects: Effects | None, *, models: Callable[[], list[dict]] | None = None) -> None:
+    """Set what a task change does outside the DB, after install(): server.py builds it on its engine
+    (studio/work.py `WorkEffects`). `models` is the catalog `GET /studio/models` reads — the engine's registry,
+    which knows the models that are benched; without it the config's own registry is asked."""
+    global _effects, _models
+    _effects, _models = effects, models
+
+
+def use_queue(queue: Any) -> None:
+    """Set the line `stop` asks (studio/queue.py `TaskQueue`), after install(): server.py builds it on its
+    engine. `start` needs none — the effects reach the queue themselves (`WorkEffects.kick`)."""
+    global _queue
+    _queue = queue
+
+
 def run_inbox() -> Inbox | None:
     """An inbox outside a request, with the effects and hooks the server gave. None while the store is not
     open (it could not start, or nothing has opened it yet): then nothing is filed or closed."""
@@ -707,7 +954,8 @@ def run_inbox() -> Inbox | None:
         store = _store
     if store is None or _cfg is None:
         return None
-    return Inbox(store, TaskMachine(store, _effects), _hooks, studio_dir=_cfg.studio_dir)
+    return Inbox(store, TaskMachine(store, _effects), _hooks, studio_dir=_cfg.studio_dir,
+                 checks=employees.context(_cfg))
 
 
 def is_task_run(run_id: str) -> bool:
@@ -885,7 +1133,21 @@ def post_message(id: str, body: NewMessage, store: StudioStore = Depends(get_sto
         raise
     for file in taken:  # committed: the originals are no longer needed (a folder left behind stays claimed)
         shutil.rmtree(file.parent, ignore_errors=True)
+    if room["kind"] == "dm" and room["employee_id"]:  # §6.6: the employee of a 1:1 room answers (S-7)
+        _ask_turn(room["employee_id"], id)
     return message
+
+
+def _ask_turn(employee_id: str, room_id: str) -> None:
+    """§6.6: ask for that employee's chat turn in that room (`Hooks.chat_turn`; studio/chat.py behind it). The
+    message is stored by now and the answer of the POST does not depend on the turn: what the turn cannot do
+    it says in the room itself (§9.5), and a hook that raises is logged here."""
+    if _hooks is None:
+        return
+    try:
+        _hooks.chat_turn(employee_id, room_id)
+    except Exception:  # noqa: BLE001
+        log.exception("studio: 직원 %s 의 채팅 턴(방 %s)을 넣지 못했다", employee_id, room_id)
 
 
 # --- runs: liveness (§6.4 의 별칭, §7.4 `run.live`) ---------------------------------------------------------
@@ -949,13 +1211,243 @@ def get_run_live(run_id: str, store: StudioStore = Depends(get_store)) -> dict:
     return _need(live_data(head), "런", run_id)
 
 
+# --- studio MCP (§8): the employees' tools ------------------------------------------------------------------
+# One path per tool (§8.1). The body is the tool's arguments, the answer is HTTP 200 with the dict of §8.3 —
+# a business error is `{ok: false, code, …}`, not an HTTP error. What answers with an HTTP error is the
+# authentication alone: 401 · 403 (`authenticate`) and 503. The tools are studio/tools.py; a refusal of the
+# machine or the inbox is turned into a result there, so the error handlers above never see one from here.
+class McpTaskPropose(BaseModel):
+    """§8.4. Every argument has a default: a missing one is the result `missing_fields`, not a 422."""
+    model_config = ConfigDict(extra="forbid")
+
+    title: str = ""
+    reason: str = ""
+    spec: str = ""
+    done_criteria: str = ""
+    type: str = ""                      # feature · fix · chore · doc · data
+    suggested_assignee_id: str = ""
+    depends_on: list[str] = Field(default_factory=list)
+    campaign_id: str = ""
+    project_id: str = ""                # default: this turn's task's, then the caller's (HR must give it)
+
+
+class McpFollowupPropose(McpTaskPropose):
+    parent_task_id: str = ""            # default: the task of this turn
+
+
+class McpTaskGet(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    task_id: str = ""                   # default: the task of this turn
+
+
+class McpTaskList(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: str = ""
+    assignee: str = ""                  # `me` or an employee id
+    campaign_id: str = ""
+    limit: int = 50
+
+
+class McpTaskProgress(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    note: str = ""
+    percent: float | None = None        # 0–100
+
+
+class McpTaskRequestReview(BaseModel):
+    """The shapes are §5.4: checklist `{criterion, status, note}`, evidence `{kind, ref, caption}`,
+    judgment_calls `{text, why}`."""
+    model_config = ConfigDict(extra="forbid")
+
+    summary: str = ""
+    checklist: list[dict[str, Any]] = Field(default_factory=list)
+    evidence: list[dict[str, Any]] = Field(default_factory=list)
+    judgment_calls: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class McpAskOwner(BaseModel):
+    """`kind` is question · choice · approval (§1.5). question: body, options `{id, label}`. choice: body,
+    options `{id, label, detail, figure}` (two or more), recommended, fix_points. approval: what, why, if_not,
+    policy_ref."""
+    model_config = ConfigDict(extra="forbid")
+
+    kind: str = ""
+    title: str = ""
+    body: str = ""
+    options: list[dict[str, Any]] = Field(default_factory=list)
+    recommended: str = ""
+    fix_points: str = ""
+    what: str = ""
+    why: str = ""
+    if_not: str = ""
+    policy_ref: str = ""
+
+
+class McpRoomPost(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    text: str = ""
+    mentions: list[str] = Field(default_factory=list)
+    room: str = ""                      # default: the room of this turn
+    attachments: list[dict[str, Any]] = Field(default_factory=list)  # each {path, name=""} (§6.6)
+    handoff: dict[str, Any] | None = None  # H-5; stored in meta.handoff as it is
+
+
+class McpEmployeeList(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    project_id: str = ""
+    department_id: str = ""
+
+
+class McpEmployeeDraft(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    draft_id: str = ""                  # given: change that draft, an empty argument keeps what it has
+    name: str = ""
+    department_id: str = ""
+    project_id: str = ""
+    persona_md: str = ""
+    guide_md: str = ""
+    employee_yaml: str = ""
+    first_message: str = ""
+    target_employee_id: str = ""        # given: an amendment of `file` of that employee
+    file: str = ""                      # PERSONA.md · GUIDE.md · employee.yaml
+
+
+class McpEmployeeSubmit(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    draft_id: str = ""
+    reason: str = ""
+    source_inbox_id: str = ""
+
+
+class McpPolicyDraft(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    project_id: str = ""
+    policy_md: str = ""
+    reason: str = ""
+    submit: bool = False
+    source_inbox_id: str = ""
+
+
+def get_caller(request: Request, store: StudioStore = Depends(get_store)) -> tools.Caller:
+    """The employee behind a request on `/studio/mcp/*`: the subject `authenticate` established, with the
+    employees row of now (§8.5 looks at the DB, not at the token). Reached without the guard — this router on
+    an app of its own — the token is checked here; 401 `actor_invalid` when it establishes no employee."""
+    who = getattr(request.state, "studio_subject", None)
+    if who is None:
+        who = identify(_bearer(request) or "", _config())
+    employee = store.get_employee(who["employee_id"]) if who and who.get("kind") == "employee" else None
+    if employee is None or employee["retired_at"] is not None:
+        raise StudioError("actor_invalid", "행위자 토큰으로 호출자를 정하지 못했습니다")
+    return tools.Caller(employee=employee, run_id=who["run_id"], room_id=who["room_id"],
+                        task_id=who["task_id"], mode=who["mode"])
+
+
+def _tool(name: str, body: BaseModel, caller: tools.Caller, machine: TaskMachine, inbox: Inbox) -> dict:
+    return tools.call(name, caller, body.model_dump(), machine=machine, inbox=inbox)
+
+
+@router.post("/mcp/task_propose")
+def mcp_task_propose(body: McpTaskPropose, caller: tools.Caller = Depends(get_caller),
+                     machine: TaskMachine = Depends(get_machine), inbox: Inbox = Depends(get_inbox)) -> dict:
+    """C1: propose a task. `{task_id, inbox_id}`."""
+    return _tool("task_propose", body, caller, machine, inbox)
+
+
+@router.post("/mcp/followup_propose")
+def mcp_followup_propose(body: McpFollowupPropose, caller: tools.Caller = Depends(get_caller),
+                         machine: TaskMachine = Depends(get_machine), inbox: Inbox = Depends(get_inbox)) -> dict:
+    """C1 with a parent (default: the task of this turn). `{task_id, inbox_id, parent_id}`."""
+    return _tool("followup_propose", body, caller, machine, inbox)
+
+
+@router.post("/mcp/task_get")
+def mcp_task_get(body: McpTaskGet, caller: tools.Caller = Depends(get_caller),
+                 machine: TaskMachine = Depends(get_machine), inbox: Inbox = Depends(get_inbox)) -> dict:
+    """Read a task. `{task, depends_on[], dependents[], pending_inbox, recent_events[]}`."""
+    return _tool("task_get", body, caller, machine, inbox)
+
+
+@router.post("/mcp/task_list")
+def mcp_task_list(body: McpTaskList, caller: tools.Caller = Depends(get_caller),
+                  machine: TaskMachine = Depends(get_machine), inbox: Inbox = Depends(get_inbox)) -> dict:
+    """The tasks of the caller's project (HR: all). `{items[]}`."""
+    return _tool("task_list", body, caller, machine, inbox)
+
+
+@router.post("/mcp/task_progress")
+def mcp_task_progress(body: McpTaskProgress, caller: tools.Caller = Depends(get_caller),
+                      machine: TaskMachine = Depends(get_machine), inbox: Inbox = Depends(get_inbox)) -> dict:
+    """Leave a `progress` event on the task of this turn. `{event_id}`."""
+    return _tool("task_progress", body, caller, machine, inbox)
+
+
+@router.post("/mcp/task_request_review")
+def mcp_task_request_review(body: McpTaskRequestReview, caller: tools.Caller = Depends(get_caller),
+                            machine: TaskMachine = Depends(get_machine),
+                            inbox: Inbox = Depends(get_inbox)) -> dict:
+    """T6: file the final review. `{inbox_id}` and `end_turn: true`."""
+    return _tool("task_request_review", body, caller, machine, inbox)
+
+
+@router.post("/mcp/ask_owner")
+def mcp_ask_owner(body: McpAskOwner, caller: tools.Caller = Depends(get_caller),
+                  machine: TaskMachine = Depends(get_machine), inbox: Inbox = Depends(get_inbox)) -> dict:
+    """T4: file a blocking item (§5.7). `{inbox_id}` and `end_turn: true`."""
+    return _tool("ask_owner", body, caller, machine, inbox)
+
+
+@router.post("/mcp/room_post")
+def mcp_room_post(body: McpRoomPost, caller: tools.Caller = Depends(get_caller),
+                  machine: TaskMachine = Depends(get_machine), inbox: Inbox = Depends(get_inbox)) -> dict:
+    """Write in a room (default: the room of this turn). `{message_id, queued[]}`."""
+    if body.attachments:  # §6.6: a path is checked against the folder this run works in — asked only then
+        caller = dataclasses.replace(caller, workdir=run_workdir(caller.run_id))
+    return _tool("room_post", body, caller, machine, inbox)
+
+
+@router.post("/mcp/employee_list")
+def mcp_employee_list(body: McpEmployeeList, caller: tools.Caller = Depends(get_caller),
+                      machine: TaskMachine = Depends(get_machine), inbox: Inbox = Depends(get_inbox)) -> dict:
+    """The employees of the caller's project (HR: all), the retired left out. `{items[]}`."""
+    return _tool("employee_list", body, caller, machine, inbox)
+
+
+@router.post("/mcp/employee_draft")
+def mcp_employee_draft(body: McpEmployeeDraft, caller: tools.Caller = Depends(get_caller),
+                       machine: TaskMachine = Depends(get_machine), inbox: Inbox = Depends(get_inbox)) -> dict:
+    """HR only: make or change a draft of a hire or of an amendment. `{draft_id, action, problems[]}`."""
+    return _tool("employee_draft", body, caller, machine, inbox)
+
+
+@router.post("/mcp/employee_submit")
+def mcp_employee_submit(body: McpEmployeeSubmit, caller: tools.Caller = Depends(get_caller),
+                        machine: TaskMachine = Depends(get_machine), inbox: Inbox = Depends(get_inbox)) -> dict:
+    """HR only: file the `hire` item of a draft. `{inbox_id}`."""
+    return _tool("employee_submit", body, caller, machine, inbox)
+
+
+@router.post("/mcp/policy_draft")
+def mcp_policy_draft(body: McpPolicyDraft, caller: tools.Caller = Depends(get_caller),
+                     machine: TaskMachine = Depends(get_machine), inbox: Inbox = Depends(get_inbox)) -> dict:
+    """HR only: save a policy draft and, with `submit`, file its `hire` item. `{draft_id, diff, inbox_id}`."""
+    return _tool("policy_draft", body, caller, machine, inbox)
+
+
 # --- attachments (§6.6) -----------------------------------------------------------------------------------
-MAX_ATTACHMENT_MB = 25                              # the limit of POST /attachments (server.py)
+MAX_ATTACHMENT_MB = files.MAX_ATTACHMENT_MB                              # the limit of POST /attachments (server.py)
 STAGED = "_staged"                                  # uploads not attached to a message yet
 STAGED_ID = re.compile(r"att_[0-9a-f]{12}")
 TAKEN = ".taken"                                    # suffix of a staged folder that a message has claimed
 ATTACHED_ID = re.compile(r"\d+|inb_[0-9a-f]{8}")    # a folder is a message id or an inbox id
-UNSAFE_NAME = re.compile(r'[\\/:*?"<>|\x00-\x1f]')  # the cleaning of POST /attachments (server.py)
+UNSAFE_NAME = files.UNSAFE_NAME  # the cleaning of POST /attachments (server.py)
 
 
 class AttachmentUpload(BaseModel):
@@ -967,8 +1459,7 @@ def _attachment_root() -> Path:
     return _config().studio_dir / "attachments"
 
 
-def _mime(name: str) -> str:
-    return mimetypes.guess_type(name)[0] or "application/octet-stream"
+_mime = files.mime
 
 
 def _staged_file(attachment_id: str) -> Path:
@@ -1005,19 +1496,7 @@ def _copy_in(folder: Path, staged: list[Path]) -> list[dict]:
     """Copy claimed files into a message's folder; the `[{name, path, mime, size}]` of attachments_json.
 
     Copied, not moved: when the transaction rolls back the originals are still there to be released."""
-    folder.mkdir(parents=True, exist_ok=True)
-    refs: list[dict] = []
-    used: set[str] = set()
-    for src in staged:
-        name, n = src.name, 1
-        while name.lower() in used:  # two uploads with one name in the same message
-            n += 1
-            name = f"{src.stem}-{n}{src.suffix}"
-        used.add(name.lower())
-        shutil.copy2(src, folder / name)
-        refs.append({"name": name, "path": f"{folder.name}/{name}", "mime": _mime(name),
-                     "size": (folder / name).stat().st_size})
-    return refs
+    return files.copy([(src, src.name) for src in staged], folder)  # two uploads with one name: `-2`
 
 
 @router.post("/attachments", status_code=201, dependencies=[Depends(get_store)])
@@ -1049,3 +1528,104 @@ def download_attachment(id: str, name: str):
     if path.parent != folder or not path.is_file():
         raise missing
     return FileResponse(path, media_type=_mime(name), headers={"X-Content-Type-Options": "nosniff"})
+
+
+# --- this computer (§6.4, M-1) ----------------------------------------------------------------------------
+_machine = machine_info.Sources()  # where the diagnosis reads from; server.py adds what only it knows
+
+
+def use_machine(**parts: Any) -> None:
+    """Set where `GET /studio/machine` reads from (studio/machine.py `Sources`), after install(): server.py
+    gives `doctor` (cli.py `doctor_checks`), `providers` (its `GET /providers`) and `version` (the hash of the
+    code it loaded). Only the parts that are named change."""
+    global _machine
+    _machine = dataclasses.replace(_machine, **parts)
+
+
+def machine_brief() -> dict:
+    """What the stream's `hello` says of this computer (§7.1): `{name, server_version, schema_version,
+    utc_offset_minutes}` — the values of `GET /studio/machine` that cost nothing to read."""
+    return machine_info.brief(_machine)
+
+
+# §6.4: is this computer fit to work? The checks of `relay doctor`, the installed engines (registry), the disk of
+# the runs folder, the AIs (`GET /providers`), the running editors and the limits. A source that fails empties
+# its own field and the answer stays 200. No docstring: the saved contract would carry it as the description.
+# No cache (provisional, M-1): every call runs `claude --version` once and one PowerShell query (up to 8 s), so
+# the app asks only when it opens or refreshes the screen; the four cheap values ride on `hello` (machine_brief).
+@router.get("/machine")
+def read_machine(store: StudioStore = Depends(get_store)) -> dict:
+    return machine_info.report(_config(), store.list_projects(), _machine)
+
+
+# --- devices: pairing · list · revoke (§6.5, M-2) ---------------------------------------------------------
+_pairings = devices.Pairings()  # the one-time codes: this process's memory only, so a restart forgets them (§3.14)
+DeviceName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=80)]
+DevicePlatform = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=20)]
+
+
+class Pair(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    code: str = Field(max_length=200)
+    name: DeviceName
+    platform: DevicePlatform = "android"
+    fcm_token: str | None = Field(default=None, max_length=4096)  # null or '' = none yet
+
+
+# §6.5 의 1: a code for one phone. The owner's (the guard has checked the token); nothing is written to the DB.
+# `qr.url` is worked out per call (devices.reach_url) — with remote access on it asks the Tailscale CLI once.
+# No docstrings in this section: the saved contract would carry them as descriptions.
+@router.post("/devices/pairing")
+def new_pairing(request: Request) -> dict:
+    code, expires_at = _pairings.issue()
+    url = devices.reach_url(_config(), str(request.base_url).rstrip("/"))
+    return {"code": code, "expires_at": expires_at,
+            "qr": {"v": 1, "url": url, "code": code, "name": machine_brief()["name"]}}
+
+
+# §6.5 의 2–4: the one path without a token (TOKENLESS) — the code is what is checked, after the guard's origin
+# and network checks. A body that fails validation (422) and a DB that is not open (503) leave the code unused;
+# from `redeem` on it is spent. Only the token's hash is stored; its text is in this answer and nowhere else.
+# A push token belongs to one device: an unrevoked row that holds the same one gives it up (it is not revoked).
+@router.post("/devices/pair", status_code=201)
+def pair_device(body: Pair, store: StudioStore = Depends(get_store)) -> dict:
+    if not _pairings.redeem(body.code):
+        raise StudioError("pairing_invalid", "페어링 코드가 틀렸거나 만료됐거나 이미 썼습니다. "
+                                             "대시보드에서 새 코드를 받으세요 (코드는 5분 동안, 한 번만 통합니다).")
+    token, token_hash = devices.new_token()
+    fcm = (body.fcm_token or "").strip() or None
+    with store.transaction() as tx:
+        fields: dict[str, Any] = {"platform": body.platform}
+        if fcm:
+            for other in store.list_devices(tx=tx):
+                if other["fcm_token"] == fcm:
+                    store.update_device(other["id"], fcm_token=None, tx=tx)
+            fields["fcm_token"] = fcm
+        row = store.create_device(body.name, token_hash, tx=tx, **fields)
+    log.info("기기를 페어링했습니다: %s (%s)", row["id"], row["name"])
+    return {"device": devices.public(row), "token": token, "machine": machine_brief()}
+
+
+# The devices that can still come in (a revoked one is left out), without `token_hash`.
+@router.get("/devices")
+def list_devices(store: StudioStore = Depends(get_store)) -> dict:
+    return {"items": [devices.public(row) for row in store.list_devices()]}
+
+
+# §6.5 의 5: the token is 401 from the next request (owner_device reads revoked_at), and the listeners of
+# on_revoke are told after the commit — ws.py closes the device's connections with 4401. A connection that was
+# between its token check and the hub at that moment is closed by ws.py itself: it reads revoked_at again once
+# it is attached (§7.1). Revoking twice is the same answer; telling the listeners again does no harm.
+@router.post("/devices/{id}/revoke")
+def revoke_device(id: str, store: StudioStore = Depends(get_store)) -> dict:
+    row = _need(store.get_device(id), "기기", id)
+    if row["revoked_at"] is None:
+        row = store.update_device(id, revoked_at=now()) or row
+        log.info("기기를 폐기했습니다: %s (%s)", row["id"], row["name"])
+    for listener in list(_revoke_listeners):
+        try:
+            listener(id)
+        except Exception:  # the revoke is committed either way; a listener must not turn it into a 500
+            log.exception("기기 폐기를 알리지 못했습니다: %s", id)
+    return devices.public(row)

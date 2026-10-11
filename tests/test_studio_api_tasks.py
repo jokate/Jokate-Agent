@@ -162,15 +162,18 @@ def cancel(world, task_id, **body):
 
 # --- the contract (§6.4) ----------------------------------------------------------------------------------
 def test_routes_are_the_s3_rows_of_the_campaign_and_task_table():
-    doc = set()
+    doc, later = set(), set()
     for line in doc_section("**캠페인 · 작업**", "**결재 · 집계**").splitlines():
         cells = [c.strip() for c in line.strip().strip("|").split("|")]
         row = re.fullmatch(r"`(GET|POST|PATCH|PUT|DELETE) (/studio/[^`]+)`", cells[0]) if len(cells) == 5 else None
         if row and "S-3" in cells[4]:
             doc.add((row.group(1), row.group(2)))
+        elif row and "S-8" in cells[4]:
+            later.add((row.group(1), row.group(2)))
+    started = {("POST", "/studio/tasks/{id}/start"), ("POST", "/studio/tasks/{id}/stop")}  # S-8 (studio/queue.py)
     built = {(method, r.path) for r in api.router.routes for method in r.methods
              if r.path.startswith(("/studio/campaigns", "/studio/tasks"))}
-    assert len(doc) == 9 and built == doc  # no start · stop (S-8), no campaign creation or action (S-14)
+    assert len(doc) == 9 and started <= later and built == doc | started  # no campaign creation or action (S-14)
 
 
 def test_enumerations_are_the_machines():
@@ -600,6 +603,10 @@ def test_openapi_json_in_the_repository_is_current():
         pytest.fail("design/studio/openapi.json 이 없어서 새로 썼다. 다시 돌려 통과하면 그 파일을 저장소에 넣는다")
     assert json.loads(OPENAPI.read_text(encoding="utf-8")) == json.loads(api.openapi_text()), (
         "design/studio/openapi.json 이 지금 코드와 다르다. uv run relay studio openapi 로 다시 내보낸다")
+    # the text too, line ends aside (read_text reads CRLF as LF): the order of the keys, the indent, the last newline
+    assert OPENAPI.read_text(encoding="utf-8") == api.openapi_text(), (
+        "design/studio/openapi.json 의 내용은 같지만 내보낸 글과 다르다 (키 순서 · 들여쓰기 · 끝 줄바꿈). "
+        "uv run relay studio openapi 로 다시 내보낸다")
     assert api.openapi_is_current()
 
 

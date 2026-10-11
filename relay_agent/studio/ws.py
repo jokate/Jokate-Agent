@@ -22,7 +22,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import platform
 import sqlite3
 import threading
 import time
@@ -113,7 +112,10 @@ class Hub:
             self._tick.set()
 
     def drop_device(self, device_id: str) -> int:
-        """Close the connections of a device with 4401 — the device was revoked (§7.1, §6.5). How many."""
+        """Close the connections of a device with 4401 — the device was revoked (§7.1, §6.5). How many.
+
+        Only the connections attached at this moment. One that is still between its token check and `attach`
+        is not here to be dropped: `stream` closes it, reading `revoked_at` again once it has attached."""
         with self._lock:
             conns = [c for c in self._conns if c.device_id == device_id]
         for conn in conns:
@@ -186,6 +188,7 @@ _network_allowed: Callable[[str], bool] | None = None
 
 def install(app: FastAPI, *, network_allowed: Callable[[str], bool]) -> None:
     """Add WS /studio/ws to the server and have every commit that wrote stream events announced to the hub.
+    A revoked device's connections are closed the same way: the revoke route of api.py tells the hub (§6.5).
 
     `network_allowed(host)` is the network check of the server's guard, asked for every connection. The
     config and the token check are api.py's (`api.install` comes first)."""
@@ -193,6 +196,7 @@ def install(app: FastAPI, *, network_allowed: Callable[[str], bool]) -> None:
     _network_allowed = network_allowed
     app.add_api_websocket_route("/studio/ws", stream)
     api.on_commit(hub.notify)
+    api.on_revoke(hub.drop_device)  # api.py does not import this module: it is told whom to call
 
 
 # --- one connection -------------------------------------------------------------------------------------------
@@ -237,7 +241,12 @@ async def stream(ws: WebSocket) -> None:
 
     Accepted first: a close code reaches the client only on an accepted socket (a refused handshake is a
     plain HTTP 403). Then origin · network -> token -> owner, and the stream: `_feed` sends, `_listen`
-    reads, and when one of them ends the other is stopped."""
+    reads, and when one of them ends the other is stopped.
+
+    A device's connection reads its row once more after it is attached. A revoke that was committed between
+    the token check and `hub.attach` told the hub when this connection was not there to drop; read after the
+    attach, either the revoke is seen here (4401, nothing sent) or the connection is in the hub when the
+    revoke tells it. 1013 when the row cannot be read. The shared token has no row and reads nothing."""
     await ws.accept()
     origin = ws.headers.get("origin")
     if origin and urlparse(origin).netloc != ws.headers.get("host"):
@@ -267,6 +276,13 @@ async def stream(ws: WebSocket) -> None:
     conn = Conn(store, who.get("device_id"))
     hub.attach(conn)  # before the first read: nothing committed from here on goes unannounced
     try:
+        if conn.device_id is not None:  # revoked between the token check and the attach? (see the docstring)
+            try:
+                device = await run_in_threadpool(store.get_device, conn.device_id)
+            except (StudioStoreError, sqlite3.Error):
+                return await _close(ws, TRY_LATER, "studio unavailable")
+            if device is None or device["revoked_at"] is not None:
+                return await _close(ws, UNAUTHORIZED, "device revoked")
         async with anyio.create_task_group() as both:
             async def run(part, *args) -> None:
                 await part(*args)
@@ -295,7 +311,7 @@ async def _open(ws: WebSocket, conn: Conn) -> None:
     cursor asked for cannot be resumed."""
     bounds = await run_in_threadpool(conn.store.stream_bounds)
     last_id, oldest_id = bounds["last_id"], bounds["oldest_id"]
-    await _send(ws, {"type": "hello", "last_id": last_id, "now": now(), "machine": {"name": platform.node()}})
+    await _send(ws, {"type": "hello", "last_id": last_id, "now": now(), "machine": api.machine_brief()})
     conn.cursor = last_id  # no after_id: from now on
     asked = ws.query_params.get("after_id")
     if asked is not None:

@@ -19,8 +19,10 @@ files it — studio/runs.py calls that once the engine has let the run go — an
 the engine through `Hooks` (`approve_run` · `cancel_run` · `advance_run`). A run released outside the inbox
 closes its item as cancelled: `close_run`, `sweep_runs`, and `stale_state` at the decision.
 
-Not here: the `package` of a final review (S-12), pushes and the 2-hour reminder (N-1 · N-2), and the §9.4
-check of an `employee.yaml` an approval writes (S-7).
+An `employee.yaml` an approval writes (hire · guide_amend) passes the checks of §9.4 first: `employees.check`
+with the `checks=` this Inbox was made with (`employees.context`).
+
+Not here: the `package` of a final review (S-12), pushes and the 2-hour reminder (N-1 · N-2).
 """
 
 from __future__ import annotations
@@ -36,6 +38,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable
 
+from . import employees
 from .store import StudioStore, Tx, now
 from .tasks import DECISIONS as TASK_DECISIONS
 from .tasks import (BLOCKING_KINDS, EDITABLE, OWNER, TASK_TYPES, TEXT_FIELDS, Actor, TaskMachine, TaskNotFound,
@@ -140,7 +143,7 @@ NOTES = {  # the system message a decision leaves in a 1:1 room (§5.5). Not fed
 GREETING = "안녕하세요, {name}입니다. 잘 부탁드립니다."  # the first message when the draft has none (§5.5)
 HR = "hr"
 SYSTEM_ROOM = "room_system"
-EMPLOYEE_FILES = ("PERSONA.md", "GUIDE.md", "MEMORY.md", "employee.yaml")  # §9.1, in the order they are written
+EMPLOYEE_FILES = employees.FILES  # §9.1, in the order they are written
 
 
 def _text(value: Any) -> bool:
@@ -347,11 +350,12 @@ class Inbox:
     """Files and decides items. It keeps no state of its own: one per request is fine."""
 
     def __init__(self, store: StudioStore, machine: TaskMachine | None = None, hooks: Hooks | None = None, *,
-                 studio_dir: Path | str | None = None):
+                 studio_dir: Path | str | None = None, checks: employees.Checks | None = None):
         self.store = store
         self.machine = machine if machine is not None else TaskMachine(store)
         self.hooks = hooks if hooks is not None else Hooks()
         self.studio_dir = Path(studio_dir) if studio_dir is not None else None  # runs/studio: what hire writes
+        self.checks = checks  # what the checks of an employee.yaml know of the server (§9.4)
 
     # --- reads ----------------------------------------------------------------------------------------------
     def _item(self, inbox_id: str) -> dict:
@@ -388,6 +392,17 @@ class Inbox:
         if self.studio_dir is None:
             raise RuntimeError("Inbox needs studio_dir= to write what a hire approval writes (§2.2)")
         return self.studio_dir
+
+    def _check_yaml(self, text: str, department_id: str, department: dict | None) -> None:
+        """§9.4, before an `employee.yaml` is written: `precondition_failed` with every code in `failed[]`,
+        and nothing is decided. An Inbox made without `checks=` cannot say — a bug, not a refusal."""
+        if self.checks is None:
+            raise RuntimeError("Inbox needs checks= (employees.context) to check an employee.yaml (§9.4)")
+        problems = employees.check(text, department_id=department_id, department=department, checks=self.checks)
+        if problems:
+            raise InboxError("precondition_failed",
+                             "employee.yaml 검사에 걸렸다: " + " / ".join(p["message"] for p in problems),
+                             failed=[p["code"] for p in problems])
 
     # --- filing ---------------------------------------------------------------------------------------------
     def create(self, kind: str, actor: Actor, *, title: str = "", payload: dict | None = None,
@@ -762,13 +777,12 @@ class Inbox:
         draft = payload["draft"]
         name, project_id = draft["name"].strip(), (draft.get("project_id") or "").strip() or None
         department = self._check_hire(draft, name, project_id)
+        self._check_yaml(draft["employee_yaml"], department["id"], department)  # before anything is written
         employee_id = "emp_" + uuid.uuid4().hex[:8]
-        folder = self._root() / "employees" / employee_id
+        folder = employees.folder(self._root(), employee_id)
         texts = (draft["persona_md"], draft["guide_md"], "", draft["employee_yaml"])  # MEMORY.md starts empty
         try:
-            folder.mkdir(parents=True)
-            for file, text in zip(EMPLOYEE_FILES, texts):
-                (folder / file).write_bytes(text.encode("utf-8"))  # bytes: no CRLF on Windows
+            employees.write_files(folder, dict(zip(EMPLOYEE_FILES, texts)))
         except OSError as e:
             shutil.rmtree(folder, ignore_errors=True)
             raise InboxError("precondition_failed", f"직원 폴더를 쓰지 못했다: {e}") from e
@@ -834,6 +848,9 @@ class Inbox:
         target = self.store.get_employee(payload["target_employee_id"])
         if target is None:
             raise InboxError("precondition_failed", f"대상 직원이 없다: {payload['target_employee_id']}")
+        if payload["file"] == "employee.yaml":  # §9.6: the same checks on every way the file is written
+            self._check_yaml(payload["new_text"], target["department_id"],
+                             self.store.get_department(target["department_id"]))
         path = self._root() / "employees" / target["id"] / payload["file"]
 
         def commit(tx: Tx) -> dict:

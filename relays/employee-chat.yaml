@@ -1,0 +1,16 @@
+name: employee-chat
+description: 스튜디오 직원의 채팅 턴 — 방의 새 글에 그 직원으로서 답한다 · 단일 단계, 파일 수정 없음 (studio/chat.py 가 쓰는 내부 릴레이)
+hidden: true              # 목록과 auto 의 후보에서 빠진다 (design/studio/ARCHITECTURE.md §9.5)
+workspace: none           # 읽기만 한다: 작업 공간을 만들지 않고 직원의 프로젝트(미배치면 직원 폴더)에서 돈다
+
+# 모델 · 노력치는 employee.yaml 의 chat 칸이 덮는다. mcp 는 적지 않는다 — 턴마다 chat_mcp + studio 만 붙는다
+# (create 의 mcp_only, 그래서 unreal 은 기본으로 꺼져 있다). 예산 · gate 도 두지 않는다: 채팅 턴은 결재를 만들지 않는다.
+stages:
+  - name: chat
+    provider: claude
+    model: sonnet
+    prompt: ../prompts/employee-chat.md
+    tools: [Read, Grep, Glob]
+    system_mode: replace
+    timeout_s: 900
+    stall_s: 300

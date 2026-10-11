@@ -137,6 +137,452 @@
         "title": "HTTPValidationError",
         "type": "object"
       },
+      "McpAskOwner": {
+        "additionalProperties": false,
+        "description": "`kind` is question · choice · approval (§1.5). question: body, options `{id, label}`. choice: body,\noptions `{id, label, detail, figure}` (two or more), recommended, fix_points. approval: what, why, if_not,\npolicy_ref.",
+        "properties": {
+          "body": {
+            "default": "",
+            "title": "Body",
+            "type": "string"
+          },
+          "fix_points": {
+            "default": "",
+            "title": "Fix Points",
+            "type": "string"
+          },
+          "if_not": {
+            "default": "",
+            "title": "If Not",
+            "type": "string"
+          },
+          "kind": {
+            "default": "",
+            "title": "Kind",
+            "type": "string"
+          },
+          "options": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Options",
+            "type": "array"
+          },
+          "policy_ref": {
+            "default": "",
+            "title": "Policy Ref",
+            "type": "string"
+          },
+          "recommended": {
+            "default": "",
+            "title": "Recommended",
+            "type": "string"
+          },
+          "title": {
+            "default": "",
+            "title": "Title",
+            "type": "string"
+          },
+          "what": {
+            "default": "",
+            "title": "What",
+            "type": "string"
+          },
+          "why": {
+            "default": "",
+            "title": "Why",
+            "type": "string"
+          }
+        },
+        "title": "McpAskOwner",
+        "type": "object"
+      },
+      "McpEmployeeDraft": {
+        "additionalProperties": false,
+        "properties": {
+          "department_id": {
+            "default": "",
+            "title": "Department Id",
+            "type": "string"
+          },
+          "draft_id": {
+            "default": "",
+            "title": "Draft Id",
+            "type": "string"
+          },
+          "employee_yaml": {
+            "default": "",
+            "title": "Employee Yaml",
+            "type": "string"
+          },
+          "file": {
+            "default": "",
+            "title": "File",
+            "type": "string"
+          },
+          "first_message": {
+            "default": "",
+            "title": "First Message",
+            "type": "string"
+          },
+          "guide_md": {
+            "default": "",
+            "title": "Guide Md",
+            "type": "string"
+          },
+          "name": {
+            "default": "",
+            "title": "Name",
+            "type": "string"
+          },
+          "persona_md": {
+            "default": "",
+            "title": "Persona Md",
+            "type": "string"
+          },
+          "project_id": {
+            "default": "",
+            "title": "Project Id",
+            "type": "string"
+          },
+          "target_employee_id": {
+            "default": "",
+            "title": "Target Employee Id",
+            "type": "string"
+          }
+        },
+        "title": "McpEmployeeDraft",
+        "type": "object"
+      },
+      "McpEmployeeList": {
+        "additionalProperties": false,
+        "properties": {
+          "department_id": {
+            "default": "",
+            "title": "Department Id",
+            "type": "string"
+          },
+          "project_id": {
+            "default": "",
+            "title": "Project Id",
+            "type": "string"
+          }
+        },
+        "title": "McpEmployeeList",
+        "type": "object"
+      },
+      "McpEmployeeSubmit": {
+        "additionalProperties": false,
+        "properties": {
+          "draft_id": {
+            "default": "",
+            "title": "Draft Id",
+            "type": "string"
+          },
+          "reason": {
+            "default": "",
+            "title": "Reason",
+            "type": "string"
+          },
+          "source_inbox_id": {
+            "default": "",
+            "title": "Source Inbox Id",
+            "type": "string"
+          }
+        },
+        "title": "McpEmployeeSubmit",
+        "type": "object"
+      },
+      "McpFollowupPropose": {
+        "additionalProperties": false,
+        "properties": {
+          "campaign_id": {
+            "default": "",
+            "title": "Campaign Id",
+            "type": "string"
+          },
+          "depends_on": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Depends On",
+            "type": "array"
+          },
+          "done_criteria": {
+            "default": "",
+            "title": "Done Criteria",
+            "type": "string"
+          },
+          "parent_task_id": {
+            "default": "",
+            "title": "Parent Task Id",
+            "type": "string"
+          },
+          "project_id": {
+            "default": "",
+            "title": "Project Id",
+            "type": "string"
+          },
+          "reason": {
+            "default": "",
+            "title": "Reason",
+            "type": "string"
+          },
+          "spec": {
+            "default": "",
+            "title": "Spec",
+            "type": "string"
+          },
+          "suggested_assignee_id": {
+            "default": "",
+            "title": "Suggested Assignee Id",
+            "type": "string"
+          },
+          "title": {
+            "default": "",
+            "title": "Title",
+            "type": "string"
+          },
+          "type": {
+            "default": "",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "title": "McpFollowupPropose",
+        "type": "object"
+      },
+      "McpPolicyDraft": {
+        "additionalProperties": false,
+        "properties": {
+          "policy_md": {
+            "default": "",
+            "title": "Policy Md",
+            "type": "string"
+          },
+          "project_id": {
+            "default": "",
+            "title": "Project Id",
+            "type": "string"
+          },
+          "reason": {
+            "default": "",
+            "title": "Reason",
+            "type": "string"
+          },
+          "source_inbox_id": {
+            "default": "",
+            "title": "Source Inbox Id",
+            "type": "string"
+          },
+          "submit": {
+            "default": false,
+            "title": "Submit",
+            "type": "boolean"
+          }
+        },
+        "title": "McpPolicyDraft",
+        "type": "object"
+      },
+      "McpRoomPost": {
+        "additionalProperties": false,
+        "properties": {
+          "attachments": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Attachments",
+            "type": "array"
+          },
+          "handoff": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Handoff"
+          },
+          "mentions": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Mentions",
+            "type": "array"
+          },
+          "room": {
+            "default": "",
+            "title": "Room",
+            "type": "string"
+          },
+          "text": {
+            "default": "",
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "title": "McpRoomPost",
+        "type": "object"
+      },
+      "McpTaskGet": {
+        "additionalProperties": false,
+        "properties": {
+          "task_id": {
+            "default": "",
+            "title": "Task Id",
+            "type": "string"
+          }
+        },
+        "title": "McpTaskGet",
+        "type": "object"
+      },
+      "McpTaskList": {
+        "additionalProperties": false,
+        "properties": {
+          "assignee": {
+            "default": "",
+            "title": "Assignee",
+            "type": "string"
+          },
+          "campaign_id": {
+            "default": "",
+            "title": "Campaign Id",
+            "type": "string"
+          },
+          "limit": {
+            "default": 50,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "status": {
+            "default": "",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "title": "McpTaskList",
+        "type": "object"
+      },
+      "McpTaskProgress": {
+        "additionalProperties": false,
+        "properties": {
+          "note": {
+            "default": "",
+            "title": "Note",
+            "type": "string"
+          },
+          "percent": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Percent"
+          }
+        },
+        "title": "McpTaskProgress",
+        "type": "object"
+      },
+      "McpTaskPropose": {
+        "additionalProperties": false,
+        "description": "§8.4. Every argument has a default: a missing one is the result `missing_fields`, not a 422.",
+        "properties": {
+          "campaign_id": {
+            "default": "",
+            "title": "Campaign Id",
+            "type": "string"
+          },
+          "depends_on": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Depends On",
+            "type": "array"
+          },
+          "done_criteria": {
+            "default": "",
+            "title": "Done Criteria",
+            "type": "string"
+          },
+          "project_id": {
+            "default": "",
+            "title": "Project Id",
+            "type": "string"
+          },
+          "reason": {
+            "default": "",
+            "title": "Reason",
+            "type": "string"
+          },
+          "spec": {
+            "default": "",
+            "title": "Spec",
+            "type": "string"
+          },
+          "suggested_assignee_id": {
+            "default": "",
+            "title": "Suggested Assignee Id",
+            "type": "string"
+          },
+          "title": {
+            "default": "",
+            "title": "Title",
+            "type": "string"
+          },
+          "type": {
+            "default": "",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "title": "McpTaskPropose",
+        "type": "object"
+      },
+      "McpTaskRequestReview": {
+        "additionalProperties": false,
+        "description": "The shapes are §5.4: checklist `{criterion, status, note}`, evidence `{kind, ref, caption}`,\njudgment_calls `{text, why}`.",
+        "properties": {
+          "checklist": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Checklist",
+            "type": "array"
+          },
+          "evidence": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Evidence",
+            "type": "array"
+          },
+          "judgment_calls": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Judgment Calls",
+            "type": "array"
+          },
+          "summary": {
+            "default": "",
+            "title": "Summary",
+            "type": "string"
+          }
+        },
+        "title": "McpTaskRequestReview",
+        "type": "object"
+      },
       "NewMessage": {
         "properties": {
           "attachments": {
@@ -313,6 +759,83 @@
         "title": "NewTask",
         "type": "object"
       },
+      "Pair": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "maxLength": 200,
+            "title": "Code",
+            "type": "string"
+          },
+          "fcm_token": {
+            "anyOf": [
+              {
+                "maxLength": 4096,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fcm Token"
+          },
+          "name": {
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "platform": {
+            "default": "android",
+            "maxLength": 20,
+            "minLength": 1,
+            "title": "Platform",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "name"
+        ],
+        "title": "Pair",
+        "type": "object"
+      },
+      "ProjectImport": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "repo": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repo"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "title": "ProjectImport",
+        "type": "object"
+      },
       "ProjectPatch": {
         "additionalProperties": false,
         "properties": {
@@ -367,6 +890,25 @@
           "message_id"
         ],
         "title": "ReadMark",
+        "type": "object"
+      },
+      "Start": {
+        "additionalProperties": false,
+        "properties": {
+          "stage_models": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stage Models"
+          }
+        },
+        "title": "Start",
         "type": "object"
       },
       "TaskPatch": {
@@ -715,6 +1257,139 @@
           }
         },
         "summary": "List Departments",
+        "tags": [
+          "studio"
+        ]
+      }
+    },
+    "/studio/devices": {
+      "get": {
+        "operationId": "list_devices_studio_devices_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response List Devices Studio Devices Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Devices",
+        "tags": [
+          "studio"
+        ]
+      }
+    },
+    "/studio/devices/pair": {
+      "post": {
+        "operationId": "pair_device_studio_devices_pair_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Pair"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Pair Device Studio Devices Pair Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Pair Device",
+        "tags": [
+          "studio"
+        ]
+      }
+    },
+    "/studio/devices/pairing": {
+      "post": {
+        "operationId": "new_pairing_studio_devices_pairing_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response New Pairing Studio Devices Pairing Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "New Pairing",
+        "tags": [
+          "studio"
+        ]
+      }
+    },
+    "/studio/devices/{id}/revoke": {
+      "post": {
+        "operationId": "revoke_device_studio_devices__id__revoke_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "title": "Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Revoke Device Studio Devices  Id  Revoke Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Revoke Device",
         "tags": [
           "studio"
         ]
@@ -1082,6 +1757,583 @@
         ]
       }
     },
+    "/studio/machine": {
+      "get": {
+        "operationId": "read_machine_studio_machine_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Read Machine Studio Machine Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Read Machine",
+        "tags": [
+          "studio"
+        ]
+      }
+    },
+    "/studio/mcp/ask_owner": {
+      "post": {
+        "description": "T4: file a blocking item (§5.7). `{inbox_id}` and `end_turn: true`.",
+        "operationId": "mcp_ask_owner_studio_mcp_ask_owner_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/McpAskOwner"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Mcp Ask Owner Studio Mcp Ask Owner Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Mcp Ask Owner",
+        "tags": [
+          "studio"
+        ]
+      }
+    },
+    "/studio/mcp/employee_draft": {
+      "post": {
+        "description": "HR only: make or change a draft of a hire or of an amendment. `{draft_id, action, problems[]}`.",
+        "operationId": "mcp_employee_draft_studio_mcp_employee_draft_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/McpEmployeeDraft"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Mcp Employee Draft Studio Mcp Employee Draft Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Mcp Employee Draft",
+        "tags": [
+          "studio"
+        ]
+      }
+    },
+    "/studio/mcp/employee_list": {
+      "post": {
+        "description": "The employees of the caller's project (HR: all), the retired left out. `{items[]}`.",
+        "operationId": "mcp_employee_list_studio_mcp_employee_list_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/McpEmployeeList"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Mcp Employee List Studio Mcp Employee List Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Mcp Employee List",
+        "tags": [
+          "studio"
+        ]
+      }
+    },
+    "/studio/mcp/employee_submit": {
+      "post": {
+        "description": "HR only: file the `hire` item of a draft. `{inbox_id}`.",
+        "operationId": "mcp_employee_submit_studio_mcp_employee_submit_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/McpEmployeeSubmit"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Mcp Employee Submit Studio Mcp Employee Submit Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Mcp Employee Submit",
+        "tags": [
+          "studio"
+        ]
+      }
+    },
+    "/studio/mcp/followup_propose": {
+      "post": {
+        "description": "C1 with a parent (default: the task of this turn). `{task_id, inbox_id, parent_id}`.",
+        "operationId": "mcp_followup_propose_studio_mcp_followup_propose_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/McpFollowupPropose"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Mcp Followup Propose Studio Mcp Followup Propose Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Mcp Followup Propose",
+        "tags": [
+          "studio"
+        ]
+      }
+    },
+    "/studio/mcp/policy_draft": {
+      "post": {
+        "description": "HR only: save a policy draft and, with `submit`, file its `hire` item. `{draft_id, diff, inbox_id}`.",
+        "operationId": "mcp_policy_draft_studio_mcp_policy_draft_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/McpPolicyDraft"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Mcp Policy Draft Studio Mcp Policy Draft Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Mcp Policy Draft",
+        "tags": [
+          "studio"
+        ]
+      }
+    },
+    "/studio/mcp/room_post": {
+      "post": {
+        "description": "Write in a room (default: the room of this turn). `{message_id, queued[]}`.",
+        "operationId": "mcp_room_post_studio_mcp_room_post_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/McpRoomPost"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Mcp Room Post Studio Mcp Room Post Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Mcp Room Post",
+        "tags": [
+          "studio"
+        ]
+      }
+    },
+    "/studio/mcp/task_get": {
+      "post": {
+        "description": "Read a task. `{task, depends_on[], dependents[], pending_inbox, recent_events[]}`.",
+        "operationId": "mcp_task_get_studio_mcp_task_get_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/McpTaskGet"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Mcp Task Get Studio Mcp Task Get Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Mcp Task Get",
+        "tags": [
+          "studio"
+        ]
+      }
+    },
+    "/studio/mcp/task_list": {
+      "post": {
+        "description": "The tasks of the caller's project (HR: all). `{items[]}`.",
+        "operationId": "mcp_task_list_studio_mcp_task_list_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/McpTaskList"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Mcp Task List Studio Mcp Task List Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Mcp Task List",
+        "tags": [
+          "studio"
+        ]
+      }
+    },
+    "/studio/mcp/task_progress": {
+      "post": {
+        "description": "Leave a `progress` event on the task of this turn. `{event_id}`.",
+        "operationId": "mcp_task_progress_studio_mcp_task_progress_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/McpTaskProgress"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Mcp Task Progress Studio Mcp Task Progress Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Mcp Task Progress",
+        "tags": [
+          "studio"
+        ]
+      }
+    },
+    "/studio/mcp/task_propose": {
+      "post": {
+        "description": "C1: propose a task. `{task_id, inbox_id}`.",
+        "operationId": "mcp_task_propose_studio_mcp_task_propose_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/McpTaskPropose"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Mcp Task Propose Studio Mcp Task Propose Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Mcp Task Propose",
+        "tags": [
+          "studio"
+        ]
+      }
+    },
+    "/studio/mcp/task_request_review": {
+      "post": {
+        "description": "T6: file the final review. `{inbox_id}` and `end_turn: true`.",
+        "operationId": "mcp_task_request_review_studio_mcp_task_request_review_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/McpTaskRequestReview"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Mcp Task Request Review Studio Mcp Task Request Review Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Mcp Task Request Review",
+        "tags": [
+          "studio"
+        ]
+      }
+    },
+    "/studio/models": {
+      "get": {
+        "operationId": "list_models_studio_models_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "title": "Response List Models Studio Models Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Models",
+        "tags": [
+          "studio"
+        ]
+      }
+    },
     "/studio/projects": {
       "get": {
         "description": "`archived=1` adds the archived projects to the list.",
@@ -1125,6 +2377,47 @@
           }
         },
         "summary": "List Projects",
+        "tags": [
+          "studio"
+        ]
+      },
+      "post": {
+        "operationId": "import_project_studio_projects_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProjectImport"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Import Project Studio Projects Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Import Project",
         "tags": [
           "studio"
         ]
@@ -2125,6 +3418,113 @@
           }
         },
         "summary": "List Task Events",
+        "tags": [
+          "studio"
+        ]
+      }
+    },
+    "/studio/tasks/{id}/start": {
+      "post": {
+        "description": "The trigger of T3 (§4.3): the task joins the line and is still in backlog here — the queue does T3 when\nit has a slot. `stage_models` is kept as the task's override; one that cannot run is `precondition_failed`.",
+        "operationId": "start_task_studio_tasks__id__start_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "title": "Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/Start"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Start Task Studio Tasks  Id  Start Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Start Task",
+        "tags": [
+          "studio"
+        ]
+      }
+    },
+    "/studio/tasks/{id}/stop": {
+      "post": {
+        "description": "Take the task out of the line, or end its run: a working task goes to blocked with a `question` (T4) —\nat once when its run has stopped, else when it stops (§6.4). Nothing to stop is `precondition_failed`.",
+        "operationId": "stop_task_studio_tasks__id__stop_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "title": "Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Stop Task Studio Tasks  Id  Stop Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Stop Task",
         "tags": [
           "studio"
         ]

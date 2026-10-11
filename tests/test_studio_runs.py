@@ -313,9 +313,11 @@ def test_a_task_runs_stop_blocks_the_task_and_the_old_endpoints_refuse_that_run(
     assert lab.status(run) == "awaiting_approval" and lab.world.item(item)["status"] == "pending"
     assert lab.owner.post(f"/runs/{run.id}/interject", json={"text": "참고"}).status_code == 200
 
-    out = ok(lab.decide(item, "approve"))  # T5. Resuming the run is Effects.after('T5') — S-8
-    assert (out["task"]["status"], out["inbox"]["status"], out["inbox"]["delivery"]) == ("working", "decided", "pending")
-    assert ("after", "T5") in lab.fx.calls and lab.status(run) == "awaiting_approval"
+    out = ok(lab.decide(item, "approve"))  # T5. The run has stopped: its decision text goes in at once (§4.7)
+    assert (out["task"]["status"], out["inbox"]["status"], out["inbox"]["delivery"]) == ("working", "decided", "delivered")
+    notes = [e["detail"]["text"] for e in lab.engine.history.events(run.id) if e["kind"] == "user_interject"]
+    assert len(notes) == 2 and notes[0] == "참고"  # the owner's own note, then the decision text
+    assert ("after", "T5") in lab.fx.calls and lab.status(run) == "awaiting_approval"  # going on is the queue's
     assert lab.owner.post(f"/runs/{run.id}/cancel").status_code == 200 and lab.status(run) == "cancelled"
     assert lab.world.item(item)["status"] == "decided"  # a cancel closes only items that have no task
 

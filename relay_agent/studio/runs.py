@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from pathlib import Path
 from typing import Any, Callable
 
 from ..notify import Fanout
@@ -47,6 +48,18 @@ EVENT_OF = {  # StopNote.kind -> the event the engine told that stop with (pipel
 
 def _usd(value: Any, fallback: float) -> float:
     return value if isinstance(value, (int, float)) and not isinstance(value, bool) else fallback
+
+
+def workdir(engine, run_id: str) -> Path | None:
+    """The folder a run's stages work in — `cwd` of RelayEngine._advance: the workspace's path, or
+    RunState.workdir for a run without one. What an employee's attachment path is checked against (§6.6);
+    server.py hands it to api.install. None for a run the engine does not have, and on any error."""
+    try:
+        run = engine.load(run_id)
+        ws = engine.workspace(run)
+        return Path(ws.path if ws is not None else run.workdir)
+    except Exception:  # noqa: BLE001 - no folder is an answer: only paths in the project folder pass then
+        return None
 
 
 class RunSink:
@@ -96,7 +109,7 @@ class RunSink:
         payload = self._payload(run, stop, kind, scope, detail or {})
         store = inbox.store
         owner = store.list_task_runs(run_id=run_id)
-        if owner:  # §5.8 가: T4 by the system. S-8's progress thread takes this over as step 3 of §4.7
+        if owner:  # §5.8 가: T4 by the system. It stays here (S-8): step 3 of §4.7 and §4.8 ask it again (`file_stop`)
             task = store.get_task(owner[0]["task_id"])
             if task is None or task["status"] != "working" or task["queued_at"] is not None:
                 return None
@@ -136,12 +149,34 @@ class EngineHooks(Hooks):
     """`Hooks` on a RelayEngine, for the items of runs that are no task's (§5.8 나). `advance(run_id)` has an
     approved run go on — server.py gives its `_advance_bg`, a thread of its own. None = nobody advances it.
 
-    `interject` · `commit` · `chat_turn` stay the defaults: feeding a task's run its decision text is the
-    progress thread's (S-8), the other two come with S-7."""
+    `chat(employee_id, room_id)` starts that employee's chat turn in that room — server.py gives
+    `chat.ChatTurns.request` (S-7). None = no turn is started.
 
-    def __init__(self, engine, advance: Callable[[str], Any] | None = None):
+    `interject` feeds a decision text to a run that has stopped (§4.7 '런을 이을 때'); a run that is at work takes
+    it when the thread that advances it is back (`work.deliver`). `commit` stays the default: it comes with H-3."""
+
+    def __init__(self, engine, advance: Callable[[str], Any] | None = None,
+                 chat: Callable[[str, str], Any] | None = None):
         self.engine = engine
         self._advance = advance
+        self._chat = chat
+
+    def interject(self, run_id: str, text: str) -> bool:
+        """True = the text is in the run's notes now. False = not now: the engine has no such run, or the run is
+        at work — a note given then would go into a conversation the server is about to cut (§4.7). The
+        ValueError of a run that is `done` goes up as it is: `Inbox.deliver` reads it as False."""
+        try:
+            status = self.engine.load(run_id).status
+        except (OSError, ValueError):
+            return False
+        if status == "running":
+            return False
+        self.engine.interject(run_id, text)
+        return True
+
+    def chat_turn(self, employee_id: str, room_id: str) -> None:
+        if self._chat is not None:
+            self._chat(employee_id, room_id)
 
     def run_status(self, run_id: str) -> str | None:
         try:
@@ -172,14 +207,16 @@ class EngineHooks(Hooks):
 
 
 def attach(engine, inbox_factory: Callable[[], Inbox | None], *,
-           advance: Callable[[str], Any] | None = None) -> EngineHooks:
+           advance: Callable[[str], Any] | None = None,
+           chat: Callable[[str, str], Any] | None = None) -> EngineHooks:
     """Connect an engine to the inbox. Its stops are filed: the sink is put beside whatever `engine.notifier`
     already is, so the toast keeps working. The hooks that come back carry the decision of an item without a
-    task to that engine — give them to the Inbox (`api.use_hooks`)."""
+    task to that engine — give them to the Inbox (`api.use_hooks`). `chat` is what starts a chat turn
+    (`EngineHooks`); without it no turn is started, whoever asks."""
     sink = RunSink(engine, inbox_factory)
     engine.notifier = Fanout(engine.notifier, sink)
     engine.after_advance = sink.idle
-    return EngineHooks(engine, advance)
+    return EngineHooks(engine, advance, chat)
 
 
 def _told(engine, run) -> tuple[str, dict]:
@@ -198,15 +235,23 @@ def _told(engine, run) -> tuple[str, dict]:
     return title, {}
 
 
+def file_stop(engine, inbox: Inbox, run) -> dict | None:
+    """Step 3 of §4.7 for a task's run that waits for approval, and step 1 of §4.8: the item of that stop, by
+    `RunSink.file` — the same code `after_advance` asks, told what the notifier was told. None when there is
+    nothing to file: the sink has filed it (the task is blocked by now), or the task is not working and out of
+    the line."""
+    return RunSink(engine, lambda: inbox).file(run.id, *_told(engine, run))
+
+
 def file_waiting(engine, inbox_factory: Callable[[], Inbox | None]) -> list[dict]:
     """The server's start (§5.8 나 "시작할 때"): file the stops no sink heard — the runs that wait for approval,
     are no task's and have no pending item. The CLI stopped them in a process of its own, or this server did
     while the studio store was not open.
 
     A run that already has a pending item is left alone whatever that item says: filing it again would close
-    the item and put another in its place at every start. A task's run is left to the restart recovery of
-    S-8 (§4.8 step 1) — a T4 done here would be done twice once the progress thread exists. A run without a
-    StopNote files nothing (`RunSink.file`).
+    the item and put another in its place at every start. A task's run is left to the restart recovery
+    (`work.recover`, §4.8 step 1), which does the whole table of §4.7 for it. A run without a StopNote files
+    nothing (`RunSink.file`).
 
     Returns the items it filed. Never raises, and a run that cannot be filed does not keep the others: the
     server must start."""

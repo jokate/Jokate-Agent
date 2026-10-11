@@ -504,12 +504,13 @@ class StudioStore:
     def list_inbox(self, *, status: str | None = None, kind: str | None = None, project_id: str | None = None,
                    task_id: str | None = None, run_id: str | None = None, closed_first: bool = False,
                    before: str | None = None, closed_at: str | None = None, limit: int | None = None,
-                   tx: Tx | None = None) -> list[dict]:
+                   delivery: str | None = None, tx: Tx | None = None) -> list[dict]:
         """Oldest first by `created_at` — how long an item has waited. `closed_first`: the closed items, the
         newest closed first, and `before` is the `closed_at` cursor: the ones closed earlier than it (§6.4).
-        `closed_at`: only the ones closed at exactly that time — the rest of the second a page ends in."""
+        `closed_at`: only the ones closed at exactly that time — the rest of the second a page ends in.
+        `delivery`: only the items in that state of §3.13 — `pending` is the decision texts still owed (§4.8)."""
         filters = {"status": status, "kind": kind, "project_id": project_id, "task_id": task_id, "run_id": run_id,
-                   "closed_at": closed_at}
+                   "closed_at": closed_at, "delivery": delivery}
         if closed_first:
             filters["closed_at <"] = before
             return self._select(INBOX, filters, tx, extra=("closed_at IS NOT NULL",),

@@ -336,47 +336,58 @@ def autostart_command(action: str, port: int = 8020, folder: Path | None = None,
             f"서버(포트 {port}): {'실행 중' if port_busy(port) else '꺼짐'}"]
 
 
-def doctor(cfg) -> int:
-    """Environment check for a fresh machine. Makes no AI calls. Returns a process exit code."""
+def doctor_checks(cfg) -> list[dict]:
+    """The checks of `relay doctor` as a list, in the order it prints them: `{id, ok, what, hint}`. `ok` is None
+    for a note that is not counted as a problem (➖); `hint` says what to do and is empty unless the check failed.
+    Makes no AI calls. `GET /studio/machine` reports the same list (studio/machine.py; server.py hands it over)."""
     import shutil
     import subprocess
 
-    from .providers import ProviderRegistry
-
-    problems = 0
-
-    def line(ok: bool, what: str, hint: str = "") -> None:
-        nonlocal problems
-        problems += 0 if ok else 1
-        print(f"{'✅' if ok else '❌'} {what}" + (f"\n   → {hint}" if hint and not ok else ""))
-
-    line(sys.version_info >= (3, 11), f"Python {sys.version.split()[0]}", "Python 3.11 이상 필요")
-    line(shutil.which("git") is not None, "git", "git 설치 필요 (작업 공간 스냅샷에 사용)")
-    claude = shutil.which("claude")
-    line(claude is not None, f"Claude Code CLI ({claude or '없음'})", "npm i -g @anthropic-ai/claude-code 후 `claude` 로 로그인")
-    if claude:
-        out = subprocess.run([claude, "--version"], capture_output=True, text=True, encoding="utf-8", errors="replace")
-        line(out.returncode == 0, f"claude --version: {out.stdout.strip()}", "claude 실행 실패")
-        creds = [Path.home() / ".claude" / ".credentials.json", Path.home() / ".claude.json"]
-        line(any(p.exists() for p in creds), "Claude 로그인 흔적", "`claude` 를 한 번 실행해 로그인하세요 (확실한 확인: relay providers --probe)")
-    for name, p in (("runs_dir", cfg.runs_dir), ("relays_dir", cfg.relays_dir)):
-        line(p.exists() or name == "runs_dir", f"{name}: {p}", "경로가 없습니다")
-    if cfg.docs_root.exists():
-        line(True, f"docs_root: {cfg.docs_root}")
-    else:  # optional (docs-qa only): a warning, not a problem
-        print(f"➖ docs_root 없음 (선택): {cfg.docs_root} — 문서 질의는 저장소 등록 시 docs 폴더를 지정하면 됩니다")
-    line(True, f"auth_token: {'설정됨' if cfg.auth_token else '없음 (이 PC 에서만 접속 가능)'}")
-    remote = cfg.serve_host not in LOOPBACK_HOSTS
-    line(not remote or bool(cfg.auth_token), f"serve_host: {cfg.serve_host} ({'원격 접속 켜짐' if remote else '이 PC 전용'})",
-         "원격 접속에는 토큰이 필요합니다: relay remote on")
-    if remote:
-        print(f"➖ 원격 허용 네트워크: {', '.join(cfg.remote_networks) or '제한 없음 (토큰만)'}"
-              + ("  — Tailscale 전용으로: relay remote on --tailscale" if not cfg.remote_networks else ""))
     from .repos import RepoRegistry
 
+    checks: list[dict] = []
+
+    def line(id: str, ok: bool | None, what: str, hint: str = "") -> None:
+        ok = ok if ok is None else bool(ok)
+        checks.append({"id": id, "ok": ok, "what": what, "hint": hint if ok is False else ""})
+
+    line("python", sys.version_info >= (3, 11), f"Python {sys.version.split()[0]}", "Python 3.11 이상 필요")
+    line("git", shutil.which("git") is not None, "git", "git 설치 필요 (작업 공간 스냅샷에 사용)")
+    claude = shutil.which("claude")
+    line("claude", claude is not None, f"Claude Code CLI ({claude or '없음'})", "npm i -g @anthropic-ai/claude-code 후 `claude` 로 로그인")
+    if claude:
+        out = subprocess.run([claude, "--version"], capture_output=True, text=True, encoding="utf-8", errors="replace")
+        line("claude_version", out.returncode == 0, f"claude --version: {out.stdout.strip()}", "claude 실행 실패")
+        creds = [Path.home() / ".claude" / ".credentials.json", Path.home() / ".claude.json"]
+        line("claude_login", any(p.exists() for p in creds), "Claude 로그인 흔적", "`claude` 를 한 번 실행해 로그인하세요 (확실한 확인: relay providers --probe)")
+    for name, p in (("runs_dir", cfg.runs_dir), ("relays_dir", cfg.relays_dir)):
+        line(name, p.exists() or name == "runs_dir", f"{name}: {p}", "경로가 없습니다")
+    if cfg.docs_root.exists():
+        line("docs_root", True, f"docs_root: {cfg.docs_root}")
+    else:  # optional (docs-qa only): a note, not a problem
+        line("docs_root", None, f"docs_root 없음 (선택): {cfg.docs_root} — 문서 질의는 저장소 등록 시 docs 폴더를 지정하면 됩니다")
+    line("auth_token", True, f"auth_token: {'설정됨' if cfg.auth_token else '없음 (이 PC 에서만 접속 가능)'}")
+    remote = cfg.serve_host not in LOOPBACK_HOSTS
+    line("serve_host", not remote or bool(cfg.auth_token), f"serve_host: {cfg.serve_host} ({'원격 접속 켜짐' if remote else '이 PC 전용'})",
+         "원격 접속에는 토큰이 필요합니다: relay remote on")
+    if remote:
+        line("remote_networks", None, f"원격 허용 네트워크: {', '.join(cfg.remote_networks) or '제한 없음 (토큰만)'}"
+              + ("  — Tailscale 전용으로: relay remote on --tailscale" if not cfg.remote_networks else ""))
     for repo in RepoRegistry(cfg.repos).repos.values():
         hint = f"relay repo clone {repo.name}" if repo.url else f"relay repo add {repo.name} <이 머신의 경로>"
-        line(repo.exists, f"repo {repo.name}: {repo.path or '(경로 미지정)'}", hint)
+        line(f"repo:{repo.name}", repo.exists, f"repo {repo.name}: {repo.path or '(경로 미지정)'}", hint)
+    return checks
+
+
+def doctor(cfg) -> int:
+    """Environment check for a fresh machine. Makes no AI calls. Returns a process exit code."""
+    from .providers import ProviderRegistry
+
+    checks = doctor_checks(cfg)
+    for check in checks:
+        mark = "➖" if check["ok"] is None else "✅" if check["ok"] else "❌"
+        print(f"{mark} {check['what']}" + (f"\n   → {check['hint']}" if check["hint"] else ""))
+    problems = sum(check["ok"] is False for check in checks)
     print("\nAI providers:")
     reg = ProviderRegistry(cfg.providers, cfg.fallback_chain)
     for name, spec in reg.specs.items():
