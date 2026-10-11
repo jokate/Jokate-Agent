@@ -1,5 +1,5 @@
 name: studio-task
-description: 스튜디오 작업 — 정찰 → 설계 → 구현 → 검토, 모든 단계 Opus · 설계·구현 xhigh, 정찰·검토 high (studio-campaign 이 쓰는 내부 릴레이)
+description: 스튜디오 작업 — 정찰 → 설계 → 구현 → 검토, 모든 단계 Opus · 설계 xhigh, 구현·정찰·검토 high (studio-campaign 이 쓰는 내부 릴레이)
 hidden: true
 workspace: inplace        # 저장소 등록값이 우선한다 (studio-server 는 copy)
 auto_apply: true          # copy 로 돌릴 때도 끝나면 자동 적용 (충돌 시에만 대기)
@@ -38,7 +38,7 @@ stages:
   - name: build
     provider: claude
     model: opus
-    effort: xhigh
+    effort: high               # 2026-10-12: xhigh -> high (owner 결정). 검토가 되돌려 보낸 재시도만 xhigh
     retry_model: opus
     retry_effort: xhigh
     prompt: ../prompts/build.md

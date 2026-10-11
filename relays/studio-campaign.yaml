@@ -10,7 +10,7 @@ campaign:
   task_relay: studio-task
   max_tasks: 20
   max_followups: 1         # 작업당 자동 마무리 1회 (2026-10-10 조정: 2회일 때 런 9개 중 6개가 마무리였다)
-  max_cost_usd: 200        # Opus 는 계산상 비용이 크다 — 넘으면 일시 정지, 재개하면 같은 만큼 더
+  max_cost_usd: 300        # Opus 는 계산상 비용이 크다 — 넘으면 일시 정지, 재개하면 같은 만큼 더 (3단계가 149 를 썼다)
   max_attempts: 2
   model_cap: opus          # 재시도·되돌림에서도 Fable 로 올라가지 않는다
   effort_cap: xhigh        # max 로 올라가지 않는다
