@@ -154,7 +154,8 @@ class EngineHooks(Hooks):
     `chat.ChatTurns.request` (S-7). None = no turn is started.
 
     `turns` is what a mention asks its turn of — server.py gives the `chat.ChatTurns` itself (S-9): `room_turn`
-    is its `put`, `turn_failed` its `failed`. None = a mention starts no turn. `tell_run` needs neither: it is
+    is its `put`, `turn_failed` its `failed`, `staffing_ask` its `judge` (HR's turn on a trigger, T5). None = a
+    mention starts no turn and nobody is asked. `tell_run` needs neither: it is
     `engine.interject`, for a run that may be at work.
 
     `interject` feeds a decision text to a run that has stopped (§4.7 '런을 이을 때'); a run that is at work takes
@@ -201,6 +202,10 @@ class EngineHooks(Hooks):
     def chat_turn(self, employee_id: str, room_id: str) -> None:
         if self._chat is not None:
             self._chat(employee_id, room_id)
+
+    def staffing_ask(self, signal: dict) -> bool | None:
+        """T5: HR's judging turn — `ChatTurns.judge`. False when there are no turns to ask through."""
+        return bool(self._turns.judge(signal)) if self._turns is not None else False
 
     def turn_failed(self, employee_id: str, room_id: str) -> list[str]:
         return list(self._turns.failed(employee_id, room_id)) if self._turns is not None else []

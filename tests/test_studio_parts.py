@@ -11,9 +11,9 @@ from relay_agent.studio import api, drafts, employees
 from relay_agent.studio.store import now
 from test_studio_api import refused, world  # noqa: F401 - `world` is its fixture
 
-PARTS = ("design_doc", "program", "design_setup")
-RELAYS = {"design_doc": "doc-write", "program": "auto", "design_setup": "editor-task"}  # CAMPAIGN.md H-1: the seed
-STAGES = {"design_doc": "doc-write", "program": "studio-task", "design_setup": "editor-task"}  # whose stages `work` names
+PARTS = ("design_doc", "program", "design_setup", "art")
+RELAYS = {"design_doc": "doc-write", "program": "auto", "design_setup": "editor-task", "art": "editor-task"}  # CAMPAIGN.md H-1: the seed
+STAGES = {"design_doc": "doc-write", "program": "studio-task", "design_setup": "editor-task", "art": "editor-task"}  # whose stages `work` names
 FRAME = "- 묻고 한다 (`ask_owner` 로 무엇을 · 왜 · 안 하면 어떻게 되는지를 올린다):\n- 알아서 한다:\n"
 
 
@@ -34,7 +34,7 @@ def test_the_originals_are_a_guide_for_each_part_and_one_file_of_defaults():
         guide = values["guide_template"]
         assert guide.startswith("# 지침\n") and "`task_request_review`" in guide
         assert FRAME in guide[guide.index("## 결재 기준"):]  # the frame of the approvals, empty
-        assert len(guide.encode("utf-8")) <= 4096 and "모델" not in guide
+        assert len(guide.encode("utf-8")) <= 4096 and "모델" not in guide.replace("3D 모델", "")
         assert set(values["default_models"]) == set(employees.MODEL_KEYS)
         assert values["default_mcp"] and employees.STUDIO_MCP not in values["default_mcp"]
     program = defaults["program"]["guide_template"]  # the harness: in this order
@@ -44,6 +44,9 @@ def test_the_originals_are_a_guide_for_each_part_and_one_file_of_defaults():
     setup = defaults["design_setup"]["guide_template"]
     assert all(word in setup for word in ("DataTable", "DataAsset", "GameplayTag", "프로젝트 설정", "MCP 로"))
     assert "`Docs/`" in defaults["design_doc"]["guide_template"]
+    art = defaults["art"]["guide_template"]  # T3: the fifth part
+    assert all(word in art for word in ("머티리얼 인스턴스", "나이아가라", "포스트 프로세스", "`Docs/`", "`Source/`", "unreal MCP"))
+    assert "owner 에게 요청" in art and "만들어 낸 척하지 않는다" in art
 
 
 def test_the_originals_are_package_data():
@@ -129,7 +132,7 @@ def test_the_defaults_pass_the_checks_of_an_employee_yaml(world):
 def test_a_hire_is_told_the_defaults_and_the_frame_of_each_part(world):
     store, checks, defaults = world.store, employees.context(world.cfg), employees.part_defaults()
     bare = employees.hiring_notes(store, checks)
-    assert bare.count("(틀 없음 — 범용 틀)") == 3
+    assert bare.count("(틀 없음 — 범용 틀)") == 4
     assert "- `program` relay auto · mcp 없음 · work 없음 · cap 없음" in bare.splitlines()
     api.fill_parts()
     text = employees.hiring_notes(store, checks)
@@ -138,6 +141,10 @@ def test_a_hire_is_told_the_defaults_and_the_frame_of_each_part(world):
     assert line.startswith("- `program` relay auto · mcp unreal · work ") and line.endswith(" · cap opus/high")
     assert "plan=opus/high" in line and "scout=sonnet/low" in line
     assert "- `design_doc` relay doc-write · mcp docs_read · work " in text
+    art = next(line for line in text.splitlines() if line.startswith("- `art` relay "))  # the fifth part is listed
+    assert art.startswith("- `art` relay editor-task · mcp unreal · work ") and "edit=sonnet/medium" in art
+    mine = world.owner.post("/studio/departments", json={"name": "사운드"}).json()  # and so is the owner's
+    assert f"- `{mine['id']}` 사운드" in employees.hiring_notes(store, checks)
     assert "`hr` " not in text  # HR hires no HR: neither its defaults nor its guide
 
 
@@ -149,12 +156,12 @@ def test_a_part_of_the_owners_comes_with_its_room_and_is_listed(world):
     assert r.status_code == 201, r.text
     row = r.json()
     assert row["id"].startswith("dep_") and (row["name"], row["builtin"], row["archived_at"]) == ("사운드", False, None)
-    assert (row["default_relay"], row["default_mcp"], row["sort_order"]) == ("quick", ["unreal"], 4)
+    assert (row["default_relay"], row["default_mcp"], row["sort_order"]) == ("quick", ["unreal"], 5)
     assert (row["default_models"], row["guide_template"]) == (body["default_models"], "# 지침\n")
     items = world.owner.get("/studio/departments").json()["items"]
-    assert len(items) == 5 and items[-1] == row
+    assert len(items) == 6 and items[-1] == row
     room = part_rooms(world)[row["id"]]
-    assert room["title"] == "사운드" and room["id"].startswith("room_") and len(part_rooms(world)) == 5
+    assert room["title"] == "사운드" and room["id"].startswith("room_") and len(part_rooms(world)) == 6
     assert len(world.events("room.updated")) == 1
     notes = employees.hiring_notes(world.store, employees.context(world.cfg)).splitlines()
     assert f"- `{row['id']}` 사운드 (chat 기본값: sonnet · low)" in notes  # a hire can be of it
@@ -164,7 +171,7 @@ def test_a_part_of_the_owners_comes_with_its_room_and_is_listed(world):
     bare = bare.json()
     assert (bare["default_relay"], bare["default_mcp"], bare["default_models"], bare["guide_template"]) == (
         None, [], {}, "")
-    assert bare["sort_order"] == 5 and len(world.events("room.updated")) == 2
+    assert bare["sort_order"] == 6 and len(world.events("room.updated")) == 2
 
 
 def test_a_part_is_refused_for_its_name_and_its_defaults(world):
@@ -178,7 +185,7 @@ def test_a_part_is_refused_for_its_name_and_its_defaults(world):
     assert no(bad, "precondition_failed")["failed"] == ["effort_unsupported"]
     assert no(post(name="사운드", default_models={"tier": {}}), "precondition_failed")["failed"] == ["unknown_key"]
     assert no(post(name="사운드", default_mcp=["studio"]), "precondition_failed")["failed"] == ["mcp_unknown"]
-    assert len(world.owner.get("/studio/departments").json()["items"]) == 4 and len(part_rooms(world)) == 4
+    assert len(world.owner.get("/studio/departments").json()["items"]) == 5 and len(part_rooms(world)) == 5
     assert world.store.list_stream_events() == []
 
 

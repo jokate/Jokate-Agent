@@ -75,6 +75,7 @@ RUN_KINDS = ("run_failed", "campaign_done", "campaign_paused")  # the engine's a
 
 # N-2 (§5.9): how loud a push is. The grade goes out as `data.grade`, the Android priority and the channel.
 URGENT, QUIET, DIGEST = "urgent", "quiet", "digest"  # 즉시 · 조용히 · 묶음
+QUIET_KIND = "hire_recommendation"  # the one inbox kind pushed quietly, and never reminded of
 CHANNELS = {URGENT: "katae_urgent", QUIET: "katae_quiet", DIGEST: "katae_digest"}  # the app makes them (A-11)
 DIGEST_TAG = "katae_digest"  # one entry in the drawer: a later digest takes the place of the one before
 NOTICE_EVENTS = {  # `meta.event` of the notices of §5.9 that are pushed at once -> the title of the push
@@ -271,7 +272,8 @@ def _of_inbox(data: dict, store) -> Told | None:
     if item is None or item["status"] != "pending":
         return None  # decided or cancelled before its turn came: nothing to ask any more
     label = KIND_LABEL.get(item["kind"], "")
-    return URGENT, _line(item["title"]) or label, label, {"type": "inbox", "id": item["id"]}
+    grade = QUIET if item["kind"] == QUIET_KIND else URGENT  # a hiring recommendation waits for no one (§5.9)
+    return grade, _line(item["title"]) or label, label, {"type": "inbox", "id": item["id"]}
 
 
 def _of_message(data: dict, store) -> Told | None:
@@ -694,6 +696,8 @@ class Pusher:
         try:
             at = self.clock()
             for item in store.list_inbox(status="pending"):
+                if item["kind"] == QUIET_KIND:
+                    continue  # the reminder is urgent; a quiet kind is never raised to it
                 since = _seconds(item["reminded_at"] or item["created_at"])
                 if since is None or at - since < after:
                     continue

@@ -19,11 +19,14 @@ Decision values, payload shapes and the REST / MCP mapping belong to S-5 · S-3 
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from dataclasses import dataclass
 from typing import Any, Callable
 
 from .store import StudioStore, Tx, now
+
+log = logging.getLogger(__name__)
 
 # --- identifiers (§1.5, §3.12, §5.2) ------------------------------------------------------------------
 STATES = ("proposed", "backlog", "working", "blocked", "review", "done", "rejected", "cancelled")
@@ -277,6 +280,11 @@ class Effects:
         A text it returns — what it could not do while the transition goes on all the same (a run the engine
         has no more is not reverted) — is put after the `reason` of the transition row."""
 
+    def staffing(self, task: dict, item: dict | None) -> None:
+        """A task has just been filed (C1 with its `task_proposal` item, C2 without): look at whether it brings a
+        reason to ask HR for a hire (studio/staffing.py, §5.3). Called before `after`; an exception is logged and
+        the task stands. The default does nothing."""
+
     def after(self, what: str, row: dict, event_ids: tuple[int, ...]) -> None:
         """After the commit: push the stream events, start / resume the run, send the push. `what` is the rule,
         the task_events kind of a non-transition change, 'campaign', or CAMPAIGN_STARTED for a campaign that has
@@ -513,6 +521,10 @@ class TaskMachine:
             else:
                 room = self._open_room(tx, task)
             ids = tuple(tx.emitted)
+        try:
+            self.effects.staffing(task, item)
+        except Exception:  # noqa: BLE001 - a look at the staffing never undoes the filing (§5.3)
+            log.exception("studio: 작업 %s 의 채용 계기를 보지 못했습니다", task["id"])
         self.effects.after(rule, task, ids)
         return Outcome(task=task, rule=rule, event=event, inbox=item, room=room, stream_ids=ids)
 

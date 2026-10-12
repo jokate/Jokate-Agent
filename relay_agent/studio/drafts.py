@@ -102,8 +102,14 @@ def hire_problems(store: StudioStore, body: dict, checks: employees.Checks) -> l
     out: list[dict] = []
     if any(row["name"] == name for row in store.list_employees(include_retired=True)):
         out.append(problem("name_taken", f"같은 이름의 직원이 이미 있다 (퇴사한 직원 포함): {name}"))
-    department = store.get_department(department_id)
-    if department is None or department["archived_at"] is not None:
+    if employees.proposes_part(body):  # a new part with the hire: it is not in the DB, so it is checked as proposed
+        department, _ = employees.proposed_part(body)
+        out += employees.part_proposal_problems(body, store.list_departments(include_archived=True), checks)
+    else:
+        department = store.get_department(department_id)
+    if employees.proposes_part(body):
+        pass
+    elif department is None or department["archived_at"] is not None:
         out.append(problem("department_not_found", f"파트가 없다: {department_id}"))
     elif department["id"] == HR:
         if store.list_employees(department_id=HR):

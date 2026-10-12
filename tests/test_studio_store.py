@@ -13,7 +13,7 @@ from relay_agent.studio.store import now
 
 DOC = Path(__file__).resolve().parent.parent / "design" / "studio" / "ARCHITECTURE.md"
 TABLES = {"projects", "departments", "employees", "rooms", "room_members", "messages", "campaigns", "tasks",
-          "task_deps", "task_events", "inbox", "devices", "stream_events"}
+          "task_deps", "task_events", "inbox", "devices", "stream_events", "hire_signals"}
 STAMP = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d")
 
 
@@ -48,8 +48,8 @@ def test_empty_db_is_created_and_migrated(tmp_path):
     path = tmp_path / "runs" / "studio" / "studio.sqlite"
     store = StudioStore(path)
     try:
-        assert path.exists() and store.migrated == [1, 2, 3]
-        assert store._exec("PRAGMA user_version").fetchone()[0] == MIGRATIONS[-1][0] == 3
+        assert path.exists() and store.migrated == [1, 2, 3, 4, 5]
+        assert store._exec("PRAGMA user_version").fetchone()[0] == MIGRATIONS[-1][0] == 5
         assert store._exec("PRAGMA foreign_keys").fetchone()[0] == 1
         master = store._rows("SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'")
         assert {r["name"] for r in master if r["type"] == "table"} == TABLES
@@ -74,9 +74,12 @@ def test_schema_is_the_documents_ddl():
     if not DOC.exists():
         pytest.skip("design/studio/ARCHITECTURE.md is not in this checkout")
     text = DOC.read_text(encoding="utf-8")
-    (v1, first), (v2, second), (v3, third) = MIGRATIONS
-    assert (v1, v2, v3) == (1, 2, 3) and len(first) == 42 and len(second) == 1 and len(third) == 7
-    assert [_norm(s) for s in third] == _doc_statements(text, "3.2", "3.3")  # rooms made again (the group rooms)
+    (v1, first), (v2, second), (v3, third), (v4, fourth), (v5, fifth) = MIGRATIONS
+    assert (v1, v2, v3, v4, v5) == (1, 2, 3, 4, 5) and len(first) == 42 and len(second) == 1 and len(third) == 7
+    assert len(fourth) == 2 and len(fifth) == 12
+    in_3_2 = _doc_statements(text, "3.2", "3.3")
+    assert [_norm(s) for s in third] == in_3_2[:7]  # rooms made again (the group rooms)
+    assert [_norm(s) for s in fifth] == in_3_2[7:]  # inbox made again (the hiring recommendation) + hire_signals
     ddl = _doc_statements(text, "3.3", "3.15")  # 12 tables + 21 indexes
     assert len(ddl) == 33
     assert [_norm(s) for s in first[:33]] == ddl
@@ -88,7 +91,8 @@ def test_seed_departments_and_rooms(store):
     deps = store.list_departments()
     assert [(d["id"], d["name"], d["default_relay"], d["sort_order"]) for d in deps] == [
         ("hr", "인사", None, 0), ("design_doc", "기획(문서)", "doc-write", 1),
-        ("program", "프로그램", "auto", 2), ("design_setup", "기획(세팅)", "editor-task", 3)]
+        ("program", "프로그램", "auto", 2), ("design_setup", "기획(세팅)", "editor-task", 3),
+        ("art", "아트", "editor-task", 4)]
     assert all(d["builtin"] is True and d["default_mcp"] == [] and d["default_models"] == {} for d in deps)
     assert all(STAMP.fullmatch(d["created_at"]) and d["created_at"] == d["updated_at"] for d in deps)
     rooms = store.list_rooms()
@@ -96,7 +100,8 @@ def test_seed_departments_and_rooms(store):
         ("room_system", "system", "시스템 공지", None), ("room_dep_hr", "department", "인사", "hr"),
         ("room_dep_design_doc", "department", "기획(문서)", "design_doc"),
         ("room_dep_program", "department", "프로그램", "program"),
-        ("room_dep_design_setup", "department", "기획(세팅)", "design_setup")]
+        ("room_dep_design_setup", "department", "기획(세팅)", "design_setup"),
+        ("room_dep_art", "department", "아트", "art")]
     assert all(r["muted"] is False and r["owner_read_id"] == 0 and STAMP.fullmatch(r["created_at"]) for r in rooms)
     assert store.list_employees() == []
 
@@ -105,17 +110,17 @@ def test_opening_twice_migrates_and_seeds_once(tmp_path):
     path = tmp_path / "studio.sqlite"
     first, second = StudioStore(path), StudioStore(path)
     try:
-        assert first.migrated == [1, 2, 3] and second.migrated == []
-        assert len(second.list_departments()) == 4 and len(second.list_rooms()) == 5
+        assert first.migrated == [1, 2, 3, 4, 5] and second.migrated == []
+        assert len(second.list_departments()) == 5 and len(second.list_rooms()) == 6
         assert list(tmp_path.glob("*.bak-v*")) == []
         # the re-check under the write lock: a step that is already in is skipped, not run again
         assert second._apply_step(1, MIGRATIONS[0][1]) is False
-        assert len(first.list_departments()) == 4
+        assert len(first.list_departments()) == 5
     finally:
         first.close()
         second.close()
     third = StudioStore(path)
-    assert third.migrated == [] and len(third.list_rooms()) == 5
+    assert third.migrated == [] and len(third.list_rooms()) == 6
     third.close()
 
 
@@ -137,8 +142,8 @@ def test_two_servers_starting_together_migrate_once(tmp_path):
         t.join(60)
     try:
         assert not errors and len(stores) == 2
-        assert sorted(v for s in stores for v in s.migrated) == [1, 2, 3]
-        assert len(stores[0].list_departments()) == 4 and len(stores[1].list_rooms()) == 5
+        assert sorted(v for s in stores for v in s.migrated) == [1, 2, 3, 4, 5]
+        assert len(stores[0].list_departments()) == 5 and len(stores[1].list_rooms()) == 6
     finally:
         for s in stores:
             s.close()
@@ -169,14 +174,14 @@ def test_upgrade_backs_up_and_a_failed_step_leaves_the_version(tmp_path):
     assert backup.exists() and raw(backup, "PRAGMA user_version")[0][0] == 1
 
     store = StudioStore(path)
-    assert store.migrated == [2, 3] and len(store.list_departments()) == 4
+    assert store.migrated == [2, 3, 4, 5] and len(store.list_departments()) == 5
     store.close()
     # what the design relies on: user_version set inside a transaction goes back with it
     conn = sqlite3.connect(path, isolation_level=None)
     conn.execute("BEGIN IMMEDIATE")
     conn.execute("PRAGMA user_version = 7")
     conn.execute("ROLLBACK")
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
     conn.close()
 
 
@@ -196,7 +201,7 @@ def test_a_late_server_does_not_overwrite_the_backup(tmp_path, monkeypatch):
     monkeypatch.setattr(StudioStore, "_user_version", stale_first)
     late = StudioStore(path)
     try:
-        assert late.migrated == [] and len(calls) == 3  # read once to plan, then once under the lock of each step
+        assert late.migrated == [] and len(calls) == 5  # read once to plan, then once under the lock of each step
     finally:
         late.close()
     assert raw(backup, "PRAGMA user_version")[0][0] == 1  # not replaced by a copy of the upgraded file
@@ -247,7 +252,7 @@ def test_version_3_makes_rooms_again_and_keeps_every_row_index_and_reference(tmp
     assert [len(before[name]) for name in ("rooms", "room_members", "messages", "employees")] == [8, 4, 6, 2]
     assert "'group'" not in raw(path, "SELECT sql FROM sqlite_master WHERE name = 'rooms'")[0][0]
 
-    store = StudioStore(path)
+    store = StudioStore(path, migrations=MIGRATIONS[:3])  # the step of version 3 on its own
     try:
         assert store.migrated == [3] and _dump(path) == before
         assert raw(tmp_path / "studio.sqlite.bak-v2", "PRAGMA user_version")[0][0] == 2
@@ -298,7 +303,7 @@ def test_a_rooms_step_that_loses_a_room_goes_back_as_a_whole(tmp_path):
     assert raw(path, "SELECT name FROM sqlite_master WHERE name = 'rooms_hold'") == []
     assert "'group'" not in raw(path, "SELECT sql FROM sqlite_master WHERE name = 'rooms'")[0][0]
 
-    store = StudioStore(path)  # the step as it is written goes in
+    store = StudioStore(path, migrations=MIGRATIONS[:3])  # the step as it is written goes in
     assert store.migrated == [3] and _dump(path) == before
     store.close()
 
@@ -348,7 +353,7 @@ def test_departments_crud(store):
     with pytest.raises(ValueError):  # builtin is fixed at creation
         store.update_department(dep["id"], builtin=True)
     store.update_department(dep["id"], archived_at=now())
-    assert len(store.list_departments()) == 4
+    assert len(store.list_departments()) == 5
     assert store.list_departments(include_archived=True)[-1]["id"] == dep["id"]
 
 
@@ -385,7 +390,7 @@ def test_rooms_and_members_crud(store):
     with pytest.raises(ValueError):
         store.update_room(room["id"], kind="task")
     store.update_room(room["id"], archived_at=now())
-    assert len(store.list_rooms()) == 5 and len(store.list_rooms(include_archived=True)) == 6
+    assert len(store.list_rooms()) == 6 and len(store.list_rooms(include_archived=True)) == 7
 
     member = store.create_room_member(room["id"], emp["id"], session_id="s1", conversation_id="c1")
     assert member["fed_message_id"] == 0 and STAMP.fullmatch(member["joined_at"]) and member["left_at"] is None
@@ -586,3 +591,63 @@ def test_other_threads_wait_for_the_transaction(store):
         store.create_project("A", "D:/A", "a", tx=tx)
     worker.join(10)
     assert len(done) == 1 and [p["name"] for p in store.list_projects()] == ["A", "B"]
+
+
+# --- version 4: the built-in art part and its room (T3; §3.4 · §3.15) ----------------------------------
+def _art(store):
+    return store.get_department("art"), store.list_rooms(kind="department", department_id="art")
+
+
+def test_version_4_makes_art_on_an_empty_db_and_on_a_running_one(tmp_path):
+    fresh = StudioStore(tmp_path / "a.sqlite")
+    try:
+        part, rooms = _art(fresh)
+        assert (part["name"], part["builtin"], part["default_relay"], part["sort_order"]) == ("아트", True, "editor-task", 4)
+        assert [(r["id"], r["title"]) for r in rooms] == [("room_dep_art", "아트")]
+    finally:
+        fresh.close()
+    path = tmp_path / "b.sqlite"  # a DB that already runs (version 3), which the owner has changed
+    old = StudioStore(path, migrations=MIGRATIONS[:3])
+    old.update_department("design_setup", name="세팅", default_relay="quick")
+    old.update_department("hr", guide_template="고친 지침")
+    old.close()
+    store = StudioStore(path, migrations=MIGRATIONS[:4])
+    try:
+        assert store.migrated == [4] and _art(store)[0]["sort_order"] == 4
+        assert store.get_department("design_setup")["name"] == "세팅"  # nothing of the owner's is written over
+        assert (store.get_department("design_setup")["default_relay"], store.get_department("hr")["guide_template"]) == (
+            "quick", "고친 지침")
+    finally:
+        store.close()
+    again = StudioStore(path, migrations=MIGRATIONS[:4])  # the step ran once: nothing is made twice
+    try:
+        assert again.migrated == [] and len(again.list_departments()) == 5 and len(again.list_rooms()) == 6
+    finally:
+        again.close()
+
+
+def test_version_4_goes_after_the_owners_parts_and_leaves_a_part_of_the_same_name_alone(tmp_path):
+    path = tmp_path / "c.sqlite"
+    old = StudioStore(path, migrations=MIGRATIONS[:3])
+    mine = old.create_department("사운드", sort_order=4)
+    old.create_room("department", title="사운드", department_id=mine["id"])
+    old.close()
+    store = StudioStore(path, migrations=MIGRATIONS[:4])
+    try:
+        assert _art(store)[0]["sort_order"] == 5  # MAX + 1: the owner's part keeps its place
+        assert [d["id"] for d in store.list_departments()][-2:] == [mine["id"], "art"]
+    finally:
+        store.close()
+
+    path = tmp_path / "d.sqlite"  # the owner's part is called 아트 already (an archived one counts too)
+    old = StudioStore(path, migrations=MIGRATIONS[:3])
+    taken = old.create_department("아트", sort_order=4)
+    old.update_department(taken["id"], archived_at=now())
+    old.close()
+    store = StudioStore(path, migrations=MIGRATIONS[:4])
+    try:
+        assert store.migrated == [4]  # the version is taken, nothing fails
+        assert _art(store) == (None, []) and store.get_department(taken["id"])["name"] == "아트"
+        assert len(store.list_departments(include_archived=True)) == 5 and len(store.list_rooms()) == 5
+    finally:
+        store.close()

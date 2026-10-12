@@ -290,6 +290,35 @@ def test_the_owners_message_in_a_held_room_counts_anew_and_goes_on(party, monkey
     assert party.count() == 2 and len(party.notices("group_exchange_limit")) == 2
 
 
+def test_a_held_room_is_told_past_the_page_and_a_turn_held_is_found_past_the_page(party, monkeypatch):
+    a, b, c = party.order
+    party.hold(monkeypatch)
+    monkeypatch.setattr(api, "MAX_PAGE", 2)
+    for n in range(5):  # more than a page of the employees' messages after the notice, none of the owner's
+        party.store.create_message(party.room, "employee", author_id=c, body=f"잡담 {n}")
+    assert api.group_halted(party.store, party.room)
+    # a turn put in now is still held, and the room is not told a second time
+    before, turns = len(party.messages()), party.turns()
+    assert party.desk.turns.group(party.room, [b], True) == [b]
+    party.go()
+    assert len(party.notices("group_exchange_limit")) == 1 and party.turns() == turns and len(party.messages()) == before
+    assert api.group_owed(party.store, party.room) == [b]
+    # c never had a turn: it reads from the room's start, and a's mention of c lies past the first page
+    assert party.desk.member(party.room, c)["fed_message_id"] in (0, None)
+    party.store.create_message(party.room, "employee", author_id=a, body="현우 씨도 봐 주세요", mentions=[c])
+    assert api.group_owed(party.store, party.room) == [b, c]
+    party.cast.moves = {b: [""], c: [""]}
+    r = party.owner.post(f"/studio/rooms/{party.room}/continue")
+    assert r.status_code == 200 and r.json()["exchange_count"] == 0
+    assert len(party.notices("group_continued")) == 1 and not api.group_halted(party.store, party.room)
+
+    # the other way: once the owner wrote, no older notice of the limit is looked for
+    party.say("다시 시작합시다", mentions=[a])
+    for n in range(4):  # a whole number of pages
+        party.store.create_message(party.room, "employee", author_id=c, body=f"또 잡담 {n}")
+    assert not api.group_halted(party.store, party.room)
+
+
 # --- push (§5.9) --------------------------------------------------------------------------------------------------
 def test_an_employees_message_in_a_group_room_is_pushed_as_in_a_dm_room_and_not_from_a_muted_one(party):
     a, _, _ = party.order

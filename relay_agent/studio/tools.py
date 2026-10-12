@@ -16,7 +16,8 @@ the machine.
 
 The five that are no task's: `room_post` writes a message as the employee and copies its attachments
 (§6.6 '직원의 첨부', studio/files.py); `employee_list` reads; HR's three keep drafts in `runs/studio/drafts/`
-(studio/drafts.py) and file the `hire` item through Inbox.
+(studio/drafts.py) and file the `hire` item through Inbox. The hiring pair (T5): `hire_recommend` (HR only) files
+a `hire_recommendation` and `staff_request` (anyone) asks HR to judge (studio/staffing.py).
 
 A mention in a task room asks for a turn (S-9; §4.6 · §8.4 · §9.5): the assignee's is the task's run, which is told
 the message; any other member's is a read turn. Both go through `inbox.hooks` — a tool knows the turn, not the
@@ -35,12 +36,13 @@ from __future__ import annotations
 
 import logging
 import shutil
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from . import drafts, employees, files
-from .inbox import AMEND_FILES, DRAFT_KEYS, DRAFT_REQUIRED, Inbox, InboxError, validate_payload
+from . import drafts, employees, files, staffing
+from .inbox import AMEND_FILES, DRAFT_KEYS, DRAFT_REQUIRED, RECOMMEND, Inbox, InboxError, validate_payload
 from .tasks import (FORBIDDEN_WHY, STATES, SYSTEM, TASK_TYPES, TEXT_FIELDS, Actor, Outcome, TaskMachine,
                     TaskNotFound, TransitionError, classify)
 
@@ -389,7 +391,7 @@ def ask_owner(caller: Caller, args: dict, machine: TaskMachine, inbox: Inbox) ->
 # --- room_post (§8.4 · §8.5; the attachments are §6.6 '직원의 첨부') -------------------------------------------
 EMPLOYEE_LISTED = ("id", "name", "department_id", "project_id", "status")
 AMEND_ARG = {"PERSONA.md": "persona_md", "GUIDE.md": "guide_md", "employee.yaml": "employee_yaml"}  # file -> its text
-TRIMMED = ("name", "department_id", "project_id")  # the draft keys that are a name or an id, not a text
+TRIMMED = ("name", "department_id", "project_id", "part_name", "part_relay")  # the draft keys that are a name or an id, not a text
 
 
 def _root(inbox: Inbox) -> Path:
@@ -644,9 +646,19 @@ def _draft(root: Path, draft_id: str) -> dict:
 def _hire_draft(store: Any, args: dict, old: dict | None, checks: employees.Checks) -> dict:
     body = {key: "" for key in DRAFT_KEYS}
     body.update({key: value for key, value in ((old or {}).get("draft") or {}).items() if key in DRAFT_KEYS})
+    was_new = employees.proposes_part(body)  # the saved draft already proposed a part: its id stays
     for key in DRAFT_KEYS:  # an empty argument keeps what the draft has
         if not _blank(args.get(key)):
             body[key] = args[key].strip() if key in TRIMMED else args[key]
+    if employees.proposes_part(body):  # a new part: its id is the server's, and the yaml names it by the token
+        if not _blank(args.get("department_id")):
+            hint = (" 이 초안은 이미 새 파트를 제안했다 — 기존 파트로 채용하려면 draft_id 를 비워 새 초안을 만든다"
+                    if was_new else "")
+            raise Refusal("precondition_failed", "새 파트를 제안할 때는 department_id 를 적지 않는다 — 서버가 "
+                          "새 파트의 id 를 정해 돌려준다. employee_yaml 의 department 에는 {department_id} 를 적는다."
+                          + hint, failed=[])
+        body["department_id"] = body["department_id"] if was_new else "dep_" + uuid.uuid4().hex[:8]
+        body["employee_yaml"] = body["employee_yaml"].replace("{department_id}", body["department_id"])
     missing = [key for key in DRAFT_REQUIRED if _blank(body[key])]
     if missing:
         raise Refusal("missing_fields", f"비어 있는 인자: {', '.join(missing)}. 채용 초안은 "
@@ -697,8 +709,10 @@ def employee_draft(caller: Caller, args: dict, machine: TaskMachine, inbox: Inbo
     problems = saved["problems"]
     state = ("문제가 있다: " + " / ".join(p["message"] for p in problems) + ". 고쳐서 같은 draft_id 로 다시 부른다"
              if problems else "employee_submit 으로 올릴 수 있다")
+    extra = ({"department_id": saved["draft"]["department_id"]}
+             if saved["action"] == "hire" and employees.proposes_part(saved["draft"]) else {})
     return ok(f"초안 {saved['id']} 을 저장했다. {state}", draft_id=saved["id"], action=saved["action"],
-              problems=problems)
+              problems=problems, **extra)
 
 
 def _source(args: dict, payload: dict) -> dict:
@@ -725,6 +739,8 @@ def employee_submit(caller: Caller, args: dict, machine: TaskMachine, inbox: Inb
         problems = drafts.hire_problems(store, body, _checks(inbox))
         payload["draft"] = {key: body.get(key, "") for key in DRAFT_KEYS}
         title, project_id = f"채용: {body['name']}", _text(body.get("project_id"))
+        if employees.proposes_part(body):  # the owner sees the new part in the title (§5.5)
+            title += f" — 새 파트 {body['part_name'].strip()} 를 만든다"
     else:
         target = store.get_employee(draft["target_employee_id"])
         problems = drafts.amend_problems(store, target, draft["file"], draft["new_text"], _checks(inbox))
@@ -771,12 +787,76 @@ def policy_draft(caller: Caller, args: dict, machine: TaskMachine, inbox: Inbox)
     return ok(f"정책 초안 {draft_id} 을 저장했다. {state}", draft_id=draft_id, diff=saved["diff"], inbox_id=inbox_id)
 
 
+# --- the hiring pair (T5): hire_recommend (HR) · staff_request (any employee) ------------------------------
+RECOMMEND_TEXT = ("reason", "role", "model", "effort", "department_id", "part_name", "part_job", "part_relay",
+                  "part_models", "project_id", "signal_key")
+REQUEST_WHY = {  # staffing.Staffing.request -> `why`: what the employee is told
+    "asked": "인사에게 채용이 필요한지 판단해 달라고 요청했다.",
+    "open": "같은 파트·프로젝트의 채용 권장이 이미 owner 의 결재를 기다린다.",
+    "skipped": "같은 파트·프로젝트의 채용 권장을 얼마 전에 넘겼다. 한동안 다시 올리지 않는다.",
+    "recently": "같은 파트·프로젝트로는 얼마 전에 인사에게 이미 물었다.",
+    "unheard": "물을 인사 직원이 없어 요청이 전해지지 않았다.",
+}
+REQUEST_NOTE = " 인사가 판단한다 — 채용 권장은 보장이 아니다."
+
+
+def hire_recommend(caller: Caller, args: dict, machine: TaskMachine, inbox: Inbox) -> dict:
+    """HR raises a recommendation to hire (§5.3 채용 권장) -> an inbox item `hire_recommendation` for the owner. The
+    evidence `numbers` is the server's (the staff of the part now, those placed in the project), the title too.
+    A trigger's key goes in `signal_key`. The filing is Inbox's (`conflict` · `precondition_failed` on a key that
+    waits or was skipped); on success one line stays in HR's 1:1 room."""
+    _hr_only(caller, "채용 권장을 올릴")
+    store = machine.store
+    payload: dict[str, Any] = {key: _text(args.get(key)) for key in RECOMMEND_TEXT if _text(args.get(key))}
+    ids = args.get("task_ids")
+    if isinstance(ids, list) and ids:
+        payload["task_ids"] = [i.strip() for i in ids if isinstance(i, str) and i.strip()]
+    project_id = payload.get("project_id") or caller.employee["project_id"]
+    if project_id:
+        payload["project_id"] = project_id
+    department_id = payload.get("department_id")
+    staff = store.list_employees(department_id=department_id) if department_id else []
+    placed = sum(1 for e in staff if project_id and e["project_id"] == project_id)
+    payload["numbers"] = {"staff": len(staff), "placed": placed}
+    department = store.get_department(department_id) if department_id else None
+    part = department["name"] if department else payload.get("part_name", "")
+    title = f"채용 권장: {part} · {payload.get('role', '')}".strip(" ·:")
+    item = inbox.create(RECOMMEND, caller.actor, title=title, payload=payload, project_id=project_id)
+    inbox.note_recommendation(item)
+    return ok("채용 권장을 올렸다. owner 가 면담을 열면 이 방에서 채용 면담이 이어진다. 더 할 일은 없다 — output 은 비운다.",
+              inbox_id=item["id"])
+
+
+def staff_request(caller: Caller, args: dict, machine: TaskMachine, inbox: Inbox) -> dict:
+    """An employee tells HR that help is needed (§5.3 판단 요청 · 계기 다): `staffing.Staffing.request`. It asks HR to
+    judge; it files nothing for the owner, and HR may recommend nothing."""
+    reason = _text(args.get("reason"))
+    if reason is None:
+        raise Refusal("missing_fields", "reason(왜 사람이 더 필요한지)을 적는다", fields=["reason"])
+    task_id = _text(args.get("task_id")) or caller.task_id
+    if task_id and machine.store.get_task(task_id) is None:
+        raise Refusal("not_found", f"작업 {task_id} 이 없다. task_list 로 id 를 확인한다")
+    staffing_ = staffing.Staffing(machine.store, ask=inbox.hooks.staffing_ask, cooldown_days=inbox.hire_cooldown_days)
+    try:
+        result = staffing_.request(caller.id, reason=reason, role=_text(args.get("role")) or "", task_id=task_id,
+                                   department_id=_text(args.get("department_id")),
+                                   project_id=_text(args.get("project_id")))
+    except Exception as e:  # noqa: BLE001 - the question to HR failed; the employee goes on with the work
+        log.exception("studio: 직원의 채용 요청을 인사에게 전하지 못했다")
+        raise Refusal("precondition_failed", f"요청을 전하지 못했다 ({type(e).__name__}). 하던 일을 계속한다", failed=[]) from e
+    if result["why"] == "invalid":
+        raise Refusal("precondition_failed", "요청을 받을 수 없다 — 파트나 프로젝트를 정할 수 없다. department_id · "
+                      "project_id · task_id 중 하나로 알려 준다", failed=[])
+    return ok(REQUEST_WHY.get(result["why"], result["why"]) + REQUEST_NOTE, asked=result["asked"], why=result["why"])
+
+
 # --- the one way in ---------------------------------------------------------------------------------------
 TOOLS: dict[str, Callable[[Caller, dict, TaskMachine, Inbox], dict]] = {
     "task_propose": task_propose, "followup_propose": followup_propose, "task_get": task_get,
     "task_list": task_list, "task_progress": task_progress, "task_request_review": task_request_review,
     "ask_owner": ask_owner, "room_post": room_post, "employee_list": employee_list,
     "employee_draft": employee_draft, "employee_submit": employee_submit, "policy_draft": policy_draft,
+    "hire_recommend": hire_recommend, "staff_request": staff_request,
 }
 
 

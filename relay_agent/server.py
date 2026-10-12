@@ -1081,7 +1081,7 @@ def stop_push_reminders() -> None:
 from .studio import stats as studio_stats  # noqa: E402
 
 reporter = studio_stats.Reporter(studio_api.get_store, at=lambda: cfg.studio_report_at,
-                                 model=lambda: cfg.studio_report_model)
+                                 model=lambda: cfg.studio_report_model, sweep=studio_api.staffing_sweep)
 
 
 @app.on_event("startup")
@@ -1127,3 +1127,4 @@ from .studio import editor_watch as studio_editor_watch  # noqa: E402
 
 task_editor_watch = studio_editor_watch.EditorWatch(engine, task_runs, studio_api.run_inbox, task_queue.holds)
 task_runs.watch = task_editor_watch.begin
+task_runs.staffing_look = studio_api.staffing_on_task  # a task filed: the triggers for a hire (§5.3 가·나)

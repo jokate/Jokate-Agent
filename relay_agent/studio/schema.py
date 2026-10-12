@@ -7,8 +7,9 @@ there is no downgrade. Dropping a column/table or changing a CHECK needs the own
 
 Version 1 = the 12 tables and 21 indexes of §3.3–§3.14 (the document's text with the comments left out)
 followed by the §3.15 seed. Version 2 = stream_events (§7.2). Version 3 = rooms made again for the group
-rooms (§3.2: `group` in the CHECK of kind, and exchange_count). tests/test_studio_store.py compares the
-three with the document.
+rooms (§3.2: `group` in the CHECK of kind, and exchange_count). Version 4 = the art part and its part room (§3.15). Version 5 = inbox made again for the kind
+`hire_recommendation`, and `hire_signals` (§3.2).
+tests/test_studio_store.py compares the four with the document.
 """
 
 from __future__ import annotations
@@ -323,8 +324,86 @@ DROP TABLE rooms_hold;
 CREATE UNIQUE INDEX rooms_one_system ON rooms(kind) WHERE kind = 'system';
 """
 
+# Version 4 (§3.4 · §3.15): the fifth built-in part, art, and its room. Two INSERT … SELECT, so a DB that runs
+# gets them at its next start and nothing the owner changed is touched. Not made when a part with the id `art`
+# or the name '아트' is there (archived ones count): `name` is UNIQUE, a failing INSERT would send the whole step
+# back, and renaming or taking over the owner's part is a write over what the owner made. The migration runs
+# once, so such a DB never gets the built-in art. sort_order is MAX+1: fifth on an empty DB, after the owner's
+# own parts on a DB that has some. The room is made only for a built-in `art` (never for the owner's part).
+_ART_V4 = f"""
+INSERT INTO departments (id, name, builtin, default_relay, sort_order, created_at, updated_at)
+SELECT 'art', '아트', 1, 'editor-task', (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM departments), {_NOW}, {_NOW}
+WHERE NOT EXISTS (SELECT 1 FROM departments WHERE id = 'art' OR name = '아트');
+INSERT INTO rooms (id, kind, title, department_id, created_at, updated_at)
+SELECT 'room_dep_art', 'department', '아트', 'art', {_NOW}, {_NOW}
+WHERE EXISTS (SELECT 1 FROM departments WHERE id = 'art' AND builtin = 1)
+  AND NOT EXISTS (SELECT 1 FROM rooms WHERE id = 'room_dep_art' OR department_id = 'art');
+"""
+
+# Version 5 (§3.2 · §3.13): the tenth kind of inbox, `hire_recommendation` (채용 권장), and the table that keeps
+# when a trigger was last put to HR. kind has a CHECK, so inbox is made again the way rooms was (see _ROOMS_V3 for
+# why the order is the point): nothing points at inbox, so the deferred check is only a guard. All 18 columns are
+# named, rows come back in rowid order, and the five indexes are the ones of version 1 (the partial unique one
+# included). `hire_signals` is written by studio/staffing.py: one row per key (§3.2 'hire_signals').
+_INBOX_V5 = """
+PRAGMA defer_foreign_keys = ON;
+CREATE TABLE inbox_hold AS SELECT * FROM inbox;
+DROP TABLE inbox;
+CREATE TABLE inbox (
+    id                TEXT PRIMARY KEY,
+    kind              TEXT NOT NULL CHECK (kind IN
+                      ('task_proposal', 'hire', 'design_approval', 'structure_choice', 'question',
+                       'pre_approval', 'budget', 'risky_command', 'final_review', 'hire_recommendation')),
+    status            TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'decided', 'cancelled')),
+    title             TEXT NOT NULL,
+    project_id        TEXT REFERENCES projects(id),
+    task_id           TEXT REFERENCES tasks(id),
+    requester_kind    TEXT NOT NULL CHECK (requester_kind IN ('employee', 'system')),
+    requester_id      TEXT REFERENCES employees(id),
+    run_id            TEXT,
+    payload_json      TEXT NOT NULL DEFAULT '{}',
+    decision          TEXT,
+    decision_comment  TEXT NOT NULL DEFAULT '',
+    decision_json     TEXT NOT NULL DEFAULT '{}',
+    created_at        TEXT NOT NULL,
+    closed_at         TEXT,
+    reminded_at       TEXT,
+    delivery          TEXT NOT NULL DEFAULT 'none'
+                      CHECK (delivery IN ('none', 'pending', 'delivered')),
+    delivered_at      TEXT,
+    CHECK ((requester_kind = 'employee') = (requester_id IS NOT NULL)),
+    CHECK ((status = 'pending') = (closed_at IS NULL)),
+    CHECK ((status = 'decided') = (decision IS NOT NULL)),
+    CHECK ((delivery = 'delivered') = (delivered_at IS NOT NULL)),
+    CHECK (delivery = 'none' OR status = 'decided')
+);
+INSERT INTO inbox (id, kind, status, title, project_id, task_id, requester_kind, requester_id, run_id,
+                   payload_json, decision, decision_comment, decision_json, created_at, closed_at, reminded_at,
+                   delivery, delivered_at)
+SELECT id, kind, status, title, project_id, task_id, requester_kind, requester_id, run_id,
+       payload_json, decision, decision_comment, decision_json, created_at, closed_at, reminded_at,
+       delivery, delivered_at
+FROM inbox_hold ORDER BY rowid;
+DROP TABLE inbox_hold;
+CREATE INDEX inbox_status ON inbox(status, created_at);
+CREATE INDEX inbox_task ON inbox(task_id);
+CREATE INDEX inbox_run ON inbox(run_id) WHERE run_id IS NOT NULL;
+CREATE UNIQUE INDEX inbox_one_pending_per_task ON inbox(task_id)
+    WHERE status = 'pending' AND task_id IS NOT NULL;
+CREATE INDEX inbox_undelivered ON inbox(run_id) WHERE delivery = 'pending';
+CREATE TABLE hire_signals (
+    key            TEXT PRIMARY KEY,
+    department_id  TEXT,
+    project_id     TEXT,
+    trigger        TEXT NOT NULL,
+    asked_at       TEXT NOT NULL
+);
+"""
+
 MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
     (1, _statements(_TABLES_V1) + _SEED_V1),
     (2, _statements(_STREAM_V2)),
     (3, _statements(_ROOMS_V3)),
+    (4, _statements(_ART_V4)),
+    (5, _statements(_INBOX_V5)),
 )

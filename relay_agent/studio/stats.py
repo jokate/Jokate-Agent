@@ -394,8 +394,10 @@ class Reporter:
 
     def __init__(self, store: Callable[[], StudioStore | None], *, at: Callable[[], str],
                  model: Callable[[], str] = lambda: "haiku", clock: Callable[[], datetime] = datetime.now,
-                 writer: Callable[[str], Writer | None] = model_writer):
+                 writer: Callable[[str], Writer | None] = model_writer,
+                 sweep: Callable[[StudioStore], Any] | None = None):
         self.store, self.at, self.model, self.clock, self.writer = store, at, model, clock, writer
+        self.sweep = sweep  # (store): the sweep for hiring triggers at the report (§5.3 라); None = none
         self._lock = threading.Lock()
         self._watching, self._round, self._timer = False, 0, None
 
@@ -411,7 +413,13 @@ class Reporter:
                 return None
             if store is None or _day(last_report(store)) == moment.date().isoformat():
                 return None  # looked at before the writer is made: no model is asked for a day that has its report
-            return report(store, now=moment, writer=self.writer(self.model()))
+            message = report(store, now=moment, writer=self.writer(self.model()))
+            if message is not None and self.sweep is not None:
+                try:
+                    self.sweep(store)
+                except Exception:  # noqa: BLE001 - the report stands whatever the sweep does
+                    log.exception("studio: 채용 계기 훑기에 실패했습니다")
+            return message
         except Exception:  # noqa: BLE001 - a look that failed is tried again at the next
             log.exception("studio: 일일 보고를 쓰지 못했습니다")
             return None

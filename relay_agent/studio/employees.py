@@ -57,8 +57,8 @@ HR_DIR = Path(__file__).with_name("hr")  # the HR employee's own files (H-1 · H
 HR_NAME = "인사"  # the title of hr/PERSONA.md; the HR employee's row takes this name
 HR_ID = "emp_68720001"  # the HR employee a start makes (§3.15); fixed, as the seed's
 HR_DEPARTMENT = "hr"
-PARTS_DIR = Path(__file__).with_name("parts")  # the originals of the three other parts (H-1): <id>.md · defaults.yaml
-PART_IDS = ("design_doc", "program", "design_setup")  # the parts `fill_parts` fills, in the order of the seed
+PARTS_DIR = Path(__file__).with_name("parts")  # the originals of the four other parts (H-1 · T3): <id>.md · defaults.yaml
+PART_IDS = ("design_doc", "program", "design_setup", "art")  # the parts `fill_parts` fills, in the order of the seed
 MODEL_KEYS = ("chat", "work", "cap")  # the keys of `departments.default_models` (§9.2)
 
 
@@ -557,7 +557,7 @@ def _defaults_line(part: dict) -> str:
     return f"- `{part['id']}` " + " · ".join(f"{key} {value or '없음'}" for key, value in values)
 
 
-# --- the three other parts (H-1; §3.4 · §3.15) --------------------------------------------------------------
+# --- the four other parts (H-1 · T3; §3.4 · §3.15) --------------------------------------------------------------
 def part_defaults() -> dict[str, dict]:
     """What the rows of PART_IDS take where they have nothing, from relay_agent/studio/parts/: `guide_template`
     is `<id>.md`, `default_mcp` and `default_models` (`{chat, work, cap}`) are that part's entry of
@@ -600,11 +600,72 @@ def defaults_problems(department_id: str, *, relay: Any, mcp: Any, models: Any, 
     return [p for code in CODES for p in found if p["code"] == code]
 
 
+# --- a part proposed with a hire (T3; §5.5) ----------------------------------------------------------------
+PART_GUIDE = """# 지침
+
+- 맡은 일: {job}
+- 담당 범위:
+- 하지 않는 것:
+- 끝나면 한 일 · 확인한 방법 · 남은 문제를 적고 `task_request_review` 로 검수를 올린다.
+
+## 결재 기준
+
+- 묻고 한다 (`ask_owner` 로 무엇을 · 왜 · 안 하면 어떻게 되는지를 올린다):
+- 알아서 한다:
+- 알아서 한 판단은 검수를 올릴 때 적는다.
+"""
+
+
+def proposes_part(draft: dict) -> bool:
+    """A hire draft proposes a new part when its `part_name` is not empty."""
+    name = draft.get("part_name")
+    return isinstance(name, str) and bool(name.strip())
+
+
+def proposed_part(draft: dict) -> tuple[dict | None, str]:
+    """The part a hire draft proposes, as a row would carry it (`id` = the draft's `department_id`; no MCP, no
+    sort_order), and "" — or (None, why) when `part_models` is not a YAML mapping of `chat` · `work` · `cap`."""
+    models: Any = {}
+    text = draft.get("part_models")
+    if isinstance(text, str) and text.strip():
+        try:
+            models = yaml.safe_load(text)
+        except (yaml.YAMLError, ValueError, RecursionError) as e:
+            return None, f"part_models 를 YAML 로 읽지 못했다: {' '.join(str(e).split())[:200]}"
+        if not isinstance(models, dict):
+            return None, "part_models 는 chat · work · cap 의 묶음(매핑)이어야 한다"
+    job = " ".join(str(draft.get("part_job") or "").split())
+    return {"id": (draft.get("department_id") or "").strip(), "name": (draft.get("part_name") or "").strip(),
+            "default_relay": (draft.get("part_relay") or "").strip() or None, "default_mcp": [],
+            "default_models": models, "guide_template": PART_GUIDE.replace("{job}", job)}, ""
+
+
+def part_proposal_problems(draft: dict, parts: list[dict], checks: Checks) -> list[dict]:
+    """What would refuse the new part of a hire draft: `[{code, message}]`. `parts` are all the rows, archived
+    ones too. The defaults go through the checks of §9.4 as an employee.yaml's keys (`defaults_problems`), so a
+    relay that is not in relays/ is `relay_unknown`."""
+    out: list[dict] = []
+    part, why = proposed_part(draft)
+    name = (draft.get("part_name") or "").strip()
+    if not " ".join(str(draft.get("part_job") or "").split()):
+        out.append(_problem("part_job_missing", "새 파트가 하는 일(part_job)이 비어 있다"))
+    if any(row["name"] == name for row in parts):
+        out.append(_problem("part_name_taken", f"같은 이름의 파트가 이미 있다 (보관된 파트 포함): {name}"))
+    if part is not None and any(row["id"] == part["id"] for row in parts):
+        out.append(_problem("part_id_taken", f"같은 id 의 파트가 이미 있다: {part['id']}"))
+    if part is None:
+        out.append(_problem("part_models_invalid", why))
+    else:
+        out += defaults_problems(part["id"], relay=part["default_relay"], mcp=None, models=part["default_models"],
+                                 checks=checks)
+    return out
+
+
 def fill_parts(store: StudioStore) -> list[dict]:
     """Fill `guide_template` · `default_mcp` · `default_models` of the rows of PART_IDS from `part_defaults()`,
     each cell on its own and only while it is empty ('' · [] · {}): a value that is there is never written over,
     so a DB that already runs gets the originals and keeps what its owner changed. `default_relay` is not
-    touched — NULL says "no relay", and the seed has the three. One transaction, no event. Returns the rows
+    touched — NULL says "no relay", and the seed has the four. One transaction, no event. Returns the rows
     that were written, in the order of PART_IDS; [] when nothing was empty.
 
     `default_models` is one cell: it is filled only while the whole of it is empty, and `chat` · `work` · `cap`

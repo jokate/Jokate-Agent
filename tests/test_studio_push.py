@@ -886,3 +886,11 @@ def test_a_room_is_muted_over_rest_and_its_employees_words_are_not_pushed(server
     for bad in ({}, {"muted": None}, {"muted": True, "title": "새 이름"}):
         assert owner.patch(f"/studio/rooms/{dm}", json=bad).status_code == 422, bad
     assert store.get_room(dm)["muted"] is False
+
+
+def test_a_hiring_recommendation_is_pushed_quietly_and_is_not_reminded_of(studio, http):
+    studio.device(1, "fcm-1")
+    item = studio.file("아트 파트 채용 권장", kind="hire_recommendation", run_id=None)
+    assert [m["data"]["grade"] for m in http.messages()] == [push.QUIET] and len(http.sent()) == 1
+    studio.look(seconds(item["created_at"]) + 7200 * 3)  # long past the two hours: the reminder is urgent
+    assert len(http.sent()) == 1 and studio.reminded(item) is None

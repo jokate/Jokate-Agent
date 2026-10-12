@@ -38,7 +38,8 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable
 
-from . import employee_git, employees
+from ..pipeline import EFFORT_ORDER
+from . import employee_git, employees, staffing
 from .store import StudioStore, Tx, now
 from .tasks import DECISIONS as TASK_DECISIONS
 from .tasks import (BLOCKING_KINDS, EDITABLE, OWNER, STARTED, TASK_TYPES, TEXT_FIELDS, Actor, TaskMachine,
@@ -48,8 +49,10 @@ log = logging.getLogger(__name__)
 
 # --- the tables of §5.2 -----------------------------------------------------------------------------------
 KINDS = ("task_proposal", "hire", "design_approval", "structure_choice", "question", "pre_approval", "budget",
-         "risky_command", "final_review")  # the order of §3.13 and §5.2
+         "risky_command", "final_review", "hire_recommendation")  # the order of §3.13 and §5.2
 DECISIONS = {kind: TASK_DECISIONS.get(kind, ("approve", "reject", "revise")) for kind in KINDS}  # + hire
+DECISIONS["hire_recommendation"] = ("interview", "skip")  # no task, no approval: HR holds the interview or lets it go
+RECOMMEND = "hire_recommendation"
 COMMENT_REQUIRED = {"task_proposal": ("reject",), "hire": ("revise",), "design_approval": ("revise",),
                     "structure_choice": ("revise",), "pre_approval": ("revise",), "final_review": ("rework",)}
 NOTIFY_OK = ("task_proposal", "hire", "design_approval", "pre_approval", "budget")  # a plain approve only (N-3)
@@ -84,6 +87,7 @@ PAYLOAD_REQUIRED = {
     "budget": ("scope", "stage", "spent_usd", "limit_usd", "stop_reason"),
     "risky_command": ("command", "tool", "rule_id", "reason"),
     "final_review": ("summary", "checklist", "exchange_count"),
+    "hire_recommendation": ("reason", "role", "model", "effort"),
 }
 NUMBER_KEYS = ("spent_usd", "limit_usd", "exchange_count")
 LIST_KEYS = ("options", "checklist")
@@ -94,7 +98,9 @@ HIRE_BODY = {  # action -> its body fields
 }
 MAY_BE_EMPTY = ("diff", "base_sha256")  # must be there, "" is a value (no file yet, nothing to show)
 DRAFT_REQUIRED = ("name", "department_id", "persona_md", "guide_md", "employee_yaml")
-DRAFT_KEYS = DRAFT_REQUIRED + ("project_id", "first_message")
+DRAFT_PART = ("part_name", "part_job", "part_relay", "part_models")  # a new part proposed with the hire (T3)
+RECOMMEND_STRINGS = ("project_id", "signal_key") + DRAFT_PART  # optional text of a recommendation
+DRAFT_KEYS = DRAFT_REQUIRED + ("project_id", "first_message") + DRAFT_PART
 AMEND_FILES = ("PERSONA.md", "GUIDE.md", "employee.yaml")  # MEMORY.md is not amended (§9.1)
 SCOPES = ("run", "stage")
 CHECK_STATUS = ("verified_auto", "verified_manual", "unverified")
@@ -108,9 +114,11 @@ OPTION_LABEL = {"retry": "다시 시도", "wrap_up": "지금까지 한 것으로
 # --- decision texts (§5.6) --------------------------------------------------------------------------------
 KIND_LABEL = {"task_proposal": "작업 제안", "hire": "채용", "design_approval": "설계 승인",
               "structure_choice": "구조 선택", "question": "질문", "pre_approval": "사전 승인", "budget": "예산",
-              "risky_command": "위험 명령", "final_review": "최종 검수"}
+              "risky_command": "위험 명령", "final_review": "최종 검수",
+              "hire_recommendation": "채용 권장"}
 DECISION_LABEL = {"approve": "승인", "reject": "반려", "revise": "수정 요청", "choose": "선택", "answer": "답변",
-                  "pass": "통과", "rework": "재작업", "revert": "되돌리기"}
+                  "pass": "통과", "rework": "재작업", "revert": "되돌리기", "interview": "면담 시작",
+                  "skip": "넘기기"}
 ANSWERS = {  # question: by reason (`asked`, `no_review_request`) or by the option the owner picked
     "asked": "질문의 답이다: `{label}`.",
     "retry": "멈췄던 자리에서 이어서 하라.",
@@ -132,6 +140,9 @@ SENTENCES = {
     ("budget", "reject"): "예산을 더 쓰지 않는다. " + ANSWERS["wrap_up"],
     ("risky_command", "approve"): "이 명령을 한 번 실행해도 된다: `{command}`. 다른 명령은 다시 결재를 받는다.",
     ("risky_command", "reject"): "이 명령은 실행하지 않는다: `{command}`. 다른 방법으로 진행하거나 `ask_owner` 로 물어라.",
+    ("hire_recommendation", "interview"): "채용 권장에 대해 owner 가 면담을 열기로 했다. 권장의 근거를 들어 채용안을 "
+                                          "의논하라.",
+    ("hire_recommendation", "skip"): "채용 권장을 넘겼다. 같은 파트·프로젝트로는 한동안 다시 올리지 않는다.",
     ("final_review", "rework"): "검수에서 재작업이 나왔다. 코멘트를 반영하고 다시 `task_request_review` 를 올려라.",
 }
 NOTES = {  # the system message a decision leaves in a 1:1 room (§5.5). Not fed to a run; wording is S-5's
@@ -200,12 +211,45 @@ def _hire_problems(payload: dict) -> list[str]:
         if not isinstance(draft, dict):
             return ["draft"]
         bad = [f"draft.{key}" for key in DRAFT_REQUIRED if not _text(draft.get(key))]
-        return bad + [f"draft.{key}" for key in ("project_id", "first_message")
-                      if draft.get(key) is not None and not isinstance(draft[key], str)]
+        bad += [f"draft.{key}" for key in ("project_id", "first_message") + DRAFT_PART
+                if draft.get(key) is not None and not isinstance(draft[key], str)]
+        if _text(draft.get("part_name")) and not _text(draft.get("part_job")) and "draft.part_job" not in bad:
+            bad.append("draft.part_job")
+        return bad
     bad = [key for key in HIRE_BODY[action]
            if not (isinstance(payload.get(key), str) if key in MAY_BE_EMPTY else _text(payload.get(key)))]
     if action == "guide_amend" and "file" not in bad and payload["file"] not in AMEND_FILES:
         bad.append("file")
+    return bad
+
+
+def _recommend_problems(payload: dict) -> list[str]:
+    """§5.3 채용 권장: the evidence (`task_ids` and / or `numbers`), exactly one of an existing part
+    (`department_id`) and a new one (`part_name`, with `part_job`), and the text keys that may be there."""
+    bad: list[str] = []
+    ids, numbers = payload.get("task_ids"), payload.get("numbers")
+    ids_ok = ids is None or (isinstance(ids, list) and all(_text(i) for i in ids))
+    numbers_ok = numbers is None or (isinstance(numbers, dict) and all(_number(v) for v in numbers.values()))
+    if not ids_ok:
+        bad.append("task_ids")
+    if not numbers_ok:
+        bad.append("numbers")
+    if ids_ok and numbers_ok and not (ids or numbers):
+        bad.append("task_ids")  # nothing to show for it
+    has_dep, has_name = payload.get("department_id") is not None, payload.get("part_name") is not None
+    if has_dep == has_name:
+        bad.append("department_id")  # exactly one of the two
+    elif has_dep and not _text(payload["department_id"]):
+        bad.append("department_id")
+    elif has_name and not _text(payload["part_name"]):
+        bad.append("part_name")
+    if has_name and not has_dep and _text(payload["part_name"]) and not _text(payload.get("part_job")):
+        bad.append("part_job")
+    bad += [key for key in RECOMMEND_STRINGS if payload.get(key) is not None and not isinstance(payload[key], str)
+            and key not in bad]
+    effort = payload.get("effort")
+    if _text(effort) and effort not in EFFORT_ORDER and "effort" not in bad:
+        bad.append("effort")  # a closed set; `model` is open (other providers' names)
     return bad
 
 
@@ -226,6 +270,8 @@ def validate_payload(kind: str, payload: Any) -> list[str]:
         flag("type", not _one_of(payload.get("type"), TASK_TYPES))
     elif kind == "hire":
         bad += [key for key in _hire_problems(payload) if key not in bad]
+    elif kind == RECOMMEND:
+        bad += [key for key in _recommend_problems(payload) if key not in bad]
     elif kind == "structure_choice":
         options = payload.get("options")
         flag("options", not _options_ok(options, detail=True, minimum=2))
@@ -346,6 +392,13 @@ class Hooks:
         is wired."""
         return False
 
+    def staffing_ask(self, signal: dict) -> bool | None:
+        """'판단 요청' (T4 · §5.3): a trigger of studio/staffing.py passed the gate — HR is to judge whether to
+        recommend a hire. `signal` is `{trigger, via, key, department_id, project_id, task_ids, numbers, …}`.
+        The turn that judges is T5's; the default does nothing and returns False. False = nobody to ask, the record
+        that HR was asked is taken back (`unheard`); True or None = the question was put."""
+        return False
+
     def group_turns(self, room_id: str, employee_ids: list[str], mentioned: bool = False) -> list[str]:
         """Put those members' turns in the line of that group room, in that order (§6.6): they run one after
         the other. `mentioned` = an employee's mention asks, not the owner — such a turn is held at the room's
@@ -385,7 +438,8 @@ class Inbox:
 
     def __init__(self, store: StudioStore, machine: TaskMachine | None = None, hooks: Hooks | None = None, *,
                  studio_dir: Path | str | None = None, checks: employees.Checks | None = None,
-                 max_exchanges: int | None = None):
+                 max_exchanges: int | None = None, hire_cooldown_days: float = 3):
+        self.hire_cooldown_days = hire_cooldown_days  # §5.3 되풀이 막기: days a skipped recommendation is not raised again
         self.max_exchanges = max_exchanges  # §4.6: the limit `room_post` looks at; None = no limit is looked at
         self.store = store
         self.machine = machine if machine is not None else TaskMachine(store)
@@ -462,6 +516,8 @@ class Inbox:
         payload = copy.deepcopy(payload) if isinstance(payload, dict) else {}
         if kind == "hire":
             return self._create_hire(actor, title, payload, project_id)
+        if kind == RECOMMEND:
+            return self._create_recommendation(actor, title, payload, project_id)
         if task_id is None:
             raise ValueError(f"a {kind} item without a task is not filed here: file_run files a run's stop (§5.8 나)")
         task = self.store.get_task(task_id)
@@ -541,6 +597,54 @@ class Inbox:
                 payload["supersedes_inbox_id"] = prior[-1]["id"]
             item = self.store.create_inbox_item("hire", _one_line(title), "employee", requester_id=actor.id,
                                                 project_id=project_id or None, payload=payload, tx=tx)
+            self.store.emit(tx, "inbox.created", {"inbox": item}, project_id=item["project_id"])
+        return item
+
+    def _create_recommendation(self, actor: Actor, title: str, payload: dict, project_id: str | None) -> dict:
+        """§5.3 채용 권장: filed by the system or by the HR employee in service; no task, no run. The server writes
+        `payload.key` (the part and the project) and `payload.project_id` — on a copy: the dict received is not
+        changed. The same key waiting is `conflict`
+        (field `key`, the waiting item in `inbox`); the same key skipped within `hire_cooldown_days` is
+        `precondition_failed`."""
+        if actor.kind == "employee":
+            requester = self.store.get_employee(actor.id)
+            if requester is None or requester["retired_at"] is not None or requester["department_id"] != HR:
+                raise InboxError("actor_not_allowed", "채용 권장은 재직 중인 인사 직원이나 서버만 올린다")
+        elif actor.kind != "system":
+            raise InboxError("actor_not_allowed", "채용 권장은 재직 중인 인사 직원이나 서버만 올린다")
+        payload = dict(payload)
+        project_id = project_id or payload.get("project_id")
+        problems = validate_payload(RECOMMEND, payload)
+        if not _one_line(title):
+            problems.append("title")
+        if not _text(project_id) and "project_id" not in problems:
+            problems.append("project_id")
+        if problems:
+            raise InboxError("missing_fields", f"payload 에 없거나 틀린 값이 있다: {', '.join(problems)}",
+                             fields=problems)
+        failed = []
+        if self.store.get_project(project_id) is None:
+            failed.append("프로젝트가 없다")
+        department_id = payload.get("department_id")
+        if department_id is not None:
+            department = self.store.get_department(department_id)
+            if department is None or department["archived_at"] is not None:
+                failed.append("파트가 없거나 보관됐다")
+        if failed:
+            raise InboxError("precondition_failed", " / ".join(failed))
+        payload["project_id"] = project_id
+        payload["key"] = staffing.key_of(department_id, project_id, part_name=payload.get("part_name"))
+        limit = staffing.since(self.hire_cooldown_days)
+        with self.store.transaction() as tx:
+            blocked = staffing.held(self.store.list_inbox(kind=RECOMMEND, tx=tx), staffing.keys_of(payload), limit)
+            if blocked and blocked[0] == "open":
+                raise InboxError("conflict", "같은 파트·프로젝트의 채용 권장이 이미 결재를 기다린다", field="key",
+                                 inbox=blocked[1])
+            if blocked:
+                raise InboxError("precondition_failed", "같은 파트·프로젝트의 채용 권장을 넘긴 지 얼마 되지 않았다")
+            item = self.store.create_inbox_item(
+                RECOMMEND, _one_line(title), actor.kind, requester_id=actor.id, project_id=project_id,
+                payload=payload, tx=tx)
             self.store.emit(tx, "inbox.created", {"inbox": item}, project_id=item["project_id"])
         return item
 
@@ -643,6 +747,8 @@ class Inbox:
         self._check_decision(item, decision, comment, data, via)
         if item["kind"] == "hire":
             return {"inbox": self._decide_hire(item, decision, comment, data, via), "task": None}
+        if item["kind"] == RECOMMEND:
+            return {"inbox": self._decide_recommendation(item, decision, comment, data, via), "task": None}
         if item["task_id"] is None:
             return {"inbox": self._decide_run(item, decision, comment, data, via), "task": None}
         return self._decide_task(item, decision, comment, data, via)
@@ -804,6 +910,16 @@ class Inbox:
             if approved:  # the engine took the approval: the run goes on even when the write then lost a race
                 self._safely("런 진행", self.hooks.advance_run, run_id)
 
+    def _decide_recommendation(self, item: dict, decision: str, comment: str, data: dict, via: str) -> dict:
+        """§5.3: `interview` and `skip` write the decision (and `inbox.decided`) — no task, no run, and no text
+        fed to a run. What follows (`_follow`, T5): `interview` puts the recommendation as a line into HR's 1:1 room
+        and gives HR a chat turn to go on with the hiring interview (`_interview`); `skip` leaves nothing but the
+        cooldown of §5.3 되풀이 막기."""
+        with self.store.transaction() as tx:
+            fresh = self._write_decision(tx, item, decision, comment, {**data, "via": via})
+        self._follow(fresh)
+        return fresh
+
     # --- hire (§5.5, provisional until H-2 · H-3 · H-6) -----------------------------------------------------
     def _decide_hire(self, item: dict, decision: str, comment: str, data: dict, via: str) -> dict:
         stored = {**data, "via": via}
@@ -847,6 +963,14 @@ class Inbox:
             with self.store.transaction() as tx:
                 fresh = self._write_decision(tx, item, "approve", comment, stored)
                 department = self._check_hire(draft, name, project_id, tx)  # the write lock is ours from here
+                if employees.proposes_part(draft):  # the part and its room first, as POST /studio/departments
+                    parts = self.store.list_departments(include_archived=True, tx=tx)
+                    self.store.create_department(
+                        department["name"], id=department["id"], default_relay=department["default_relay"],
+                        default_models=department["default_models"], guide_template=department["guide_template"],
+                        sort_order=max((row["sort_order"] for row in parts), default=-1) + 1, tx=tx)
+                    self.store.create_room("department", title=department["name"], department_id=department["id"],
+                                           tx=tx)  # its room.updated is the loop below's, with the member in it
                 employee = self.store.create_employee(name, department["id"], id=employee_id, project_id=project_id,
                                                       tx=tx)
                 dm = self.store.create_room("dm", title=name, employee_id=employee_id, tx=tx)
@@ -868,6 +992,8 @@ class Inbox:
                                 room_id=dm["id"])
         except sqlite3.IntegrityError as e:
             shutil.rmtree(folder, ignore_errors=True)
+            if "departments.name" in str(e):  # another approval took the part's name after the check above
+                raise InboxError("precondition_failed", "같은 이름의 파트가 이미 있다") from e
             if "employees.name" in str(e):  # another hire took the name after the check above
                 raise InboxError("conflict", f"같은 이름의 직원이 이미 있다: {name}", field="name") from e
             raise
@@ -880,9 +1006,19 @@ class Inbox:
     def _check_hire(self, draft: dict, name: str, project_id: str | None, tx: Tx | None = None) -> dict:
         """What a `hire` approval needs (§5.5): the part, no second HR employee in service, the project, a
         free name. Returns the part. `precondition_failed`, or `conflict` for the name."""
-        department = self.store.get_department(draft["department_id"], tx=tx)
         problems = []
-        if department is None or department["archived_at"] is not None:
+        if employees.proposes_part(draft):  # the part is not there yet: the row as it would be made (T3)
+            if self.checks is None:
+                raise RuntimeError("Inbox needs checks= (employees.context) to check a new part (§9.4)")
+            department, _ = employees.proposed_part(draft)
+            found = employees.part_proposal_problems(
+                draft, self.store.list_departments(include_archived=True, tx=tx), self.checks)
+            problems += [p["message"] for p in found]
+        else:
+            department = self.store.get_department(draft["department_id"], tx=tx)
+        if employees.proposes_part(draft):
+            pass
+        elif department is None or department["archived_at"] is not None:
             problems.append("파트가 없다")
         elif department["id"] == HR:
             if self._hr(tx) is not None:
@@ -1028,6 +1164,8 @@ class Inbox:
         if kind in BLOCKING_KINDS or (kind, decision) == ("final_review", "rework"):
             rooms = self.store.list_rooms(kind="task", task_id=item["task_id"], include_archived=True)
             self._say(rooms[0] if rooms else None, decision_text(item), self._meta(item))  # the text the run gets
+        elif (kind, decision) == (RECOMMEND, "interview"):
+            self._interview(item)
         elif (kind, decision) in NOTES and item["requester_id"]:
             room = self._dm_room(item["requester_id"])
             note = NOTES[(kind, decision)].replace("{title}", item["title"])
@@ -1040,6 +1178,58 @@ class Inbox:
                 self.hooks.chat_turn(item["requester_id"], room["id"])  # HR reworks the draft; a reject has no turn
         if kind == "final_review" and decision in UPSTREAM_NOTE:
             self._upstream(item)
+
+    def _recommendation_lines(self, payload: dict) -> list[str]:
+        """What a recommendation says, as lines: why, the part (or the new one), the role, the model and effort,
+        the project, the tasks and the numbers it stands on. Only what it carries."""
+        lines: list[str] = []
+        department = self.store.get_department(payload["department_id"]) if payload.get("department_id") else None
+        project = self.store.get_project(payload["project_id"]) if payload.get("project_id") else None
+        if _text(payload.get("reason")):
+            lines.append(f"- 사유: {payload['reason']}")
+        if department is not None:
+            lines.append(f"- 파트: {department['name']} (id `{department['id']}`)")
+        elif _text(payload.get("part_name")):
+            lines.append(f"- 새 파트 제안: {payload['part_name']}")
+            for key, label in (("part_job", "하는 일"), ("part_relay", "기본 릴레이"), ("part_models", "모델")):
+                if _text(payload.get(key)):
+                    lines.append(f"  - {label}: {payload[key]}")
+        for key, label in (("role", "역할"), ("model", "모델"), ("effort", "노력치")):
+            if _text(payload.get(key)):
+                lines.append(f"- {label}: {payload[key]}")
+        if project is not None:
+            lines.append(f"- 프로젝트: {project['name']} (id `{project['id']}`)")
+        if payload.get("task_ids"):
+            lines.append("- 관련 작업: " + ", ".join(f"`{i}`" for i in payload["task_ids"]))
+        if payload.get("numbers"):
+            lines.append("- 수치: " + ", ".join(f"{k}={v}" for k, v in payload["numbers"].items()))
+        return lines
+
+    def _interview(self, item: dict) -> None:
+        """'면담 시작' (T5 · §5.5): the recommendation goes into HR's 1:1 room as a system line and HR gets a chat
+        turn, which takes up the hiring interview from what the recommendation already says (HR does not ask it
+        again; the guide's section says so). With nobody in HR or no room for it the line goes to the system room
+        and no turn is made."""
+        body = "\n".join([decision_text(item), "채용 권장의 내용:", *self._recommendation_lines(item["payload"] or {}),
+                          "여기 적힌 것은 다시 묻지 않고, 남은 것만 owner 에게 물어 채용 면담을 잇는다."])
+        hr = self._hr()
+        room = self._dm_room(hr["id"]) if hr else None
+        if room is None:
+            self._say(self.store.get_room(SYSTEM_ROOM), body, self._meta(item))
+            return
+        self._say(room, body, self._meta(item))
+        self.hooks.chat_turn(hr["id"], room["id"])
+
+    def note_recommendation(self, item: dict) -> None:
+        """A recommendation HR raised leaves one line in HR's 1:1 room (T5): what was raised and why. Never
+        raises; no turn follows. Nothing is written when there is no such room."""
+        hr = self._hr()
+        room = self._dm_room(hr["id"]) if hr else None
+        if room is None:
+            return
+        reason = ((item["payload"] or {}).get("reason") or "").strip()
+        self._safely("채용 권장 알림", self._say, room, f"채용 권장을 올렸다: {item['title']} — {reason}",
+                     {"event": "inbox.created", "inbox_id": item["id"]})
 
     def _upstream(self, item: dict) -> None:
         """§5.9 "선행 반려": T8 · T9 marked the tasks that had started behind this one (`TaskMachine._flag_later`);

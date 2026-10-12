@@ -556,6 +556,26 @@
             "title": "Name",
             "type": "string"
           },
+          "part_job": {
+            "default": "",
+            "title": "Part Job",
+            "type": "string"
+          },
+          "part_models": {
+            "default": "",
+            "title": "Part Models",
+            "type": "string"
+          },
+          "part_name": {
+            "default": "",
+            "title": "Part Name",
+            "type": "string"
+          },
+          "part_relay": {
+            "default": "",
+            "title": "Part Relay",
+            "type": "string"
+          },
           "persona_md": {
             "default": "",
             "title": "Persona Md",
@@ -673,6 +693,75 @@
         "title": "McpFollowupPropose",
         "type": "object"
       },
+      "McpHireRecommend": {
+        "additionalProperties": false,
+        "properties": {
+          "department_id": {
+            "default": "",
+            "title": "Department Id",
+            "type": "string"
+          },
+          "effort": {
+            "default": "",
+            "title": "Effort",
+            "type": "string"
+          },
+          "model": {
+            "default": "",
+            "title": "Model",
+            "type": "string"
+          },
+          "part_job": {
+            "default": "",
+            "title": "Part Job",
+            "type": "string"
+          },
+          "part_models": {
+            "default": "",
+            "title": "Part Models",
+            "type": "string"
+          },
+          "part_name": {
+            "default": "",
+            "title": "Part Name",
+            "type": "string"
+          },
+          "part_relay": {
+            "default": "",
+            "title": "Part Relay",
+            "type": "string"
+          },
+          "project_id": {
+            "default": "",
+            "title": "Project Id",
+            "type": "string"
+          },
+          "reason": {
+            "default": "",
+            "title": "Reason",
+            "type": "string"
+          },
+          "role": {
+            "default": "",
+            "title": "Role",
+            "type": "string"
+          },
+          "signal_key": {
+            "default": "",
+            "title": "Signal Key",
+            "type": "string"
+          },
+          "task_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Task Ids",
+            "type": "array"
+          }
+        },
+        "title": "McpHireRecommend",
+        "type": "object"
+      },
       "McpPolicyDraft": {
         "additionalProperties": false,
         "properties": {
@@ -747,6 +836,38 @@
           }
         },
         "title": "McpRoomPost",
+        "type": "object"
+      },
+      "McpStaffRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "department_id": {
+            "default": "",
+            "title": "Department Id",
+            "type": "string"
+          },
+          "project_id": {
+            "default": "",
+            "title": "Project Id",
+            "type": "string"
+          },
+          "reason": {
+            "default": "",
+            "title": "Reason",
+            "type": "string"
+          },
+          "role": {
+            "default": "",
+            "title": "Role",
+            "type": "string"
+          },
+          "task_id": {
+            "default": "",
+            "title": "Task Id",
+            "type": "string"
+          }
+        },
+        "title": "McpStaffRequest",
         "type": "object"
       },
       "McpTaskGet": {
@@ -2683,7 +2804,8 @@
                     "pre_approval",
                     "budget",
                     "risky_command",
-                    "final_review"
+                    "final_review",
+                    "hire_recommendation"
                   ],
                   "type": "string"
                 },
@@ -3260,6 +3382,50 @@
         ]
       }
     },
+    "/studio/mcp/hire_recommend": {
+      "post": {
+        "description": "HR only: raise a recommendation to hire (an inbox item for the owner). `{inbox_id}`.",
+        "operationId": "mcp_hire_recommend_studio_mcp_hire_recommend_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/McpHireRecommend"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Mcp Hire Recommend Studio Mcp Hire Recommend Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Mcp Hire Recommend",
+        "tags": [
+          "studio"
+        ]
+      }
+    },
     "/studio/mcp/policy_draft": {
       "post": {
         "description": "HR only: save a policy draft and, with `submit`, file its `hire` item. `{draft_id, diff, inbox_id}`.",
@@ -3343,6 +3509,50 @@
           }
         },
         "summary": "Mcp Room Post",
+        "tags": [
+          "studio"
+        ]
+      }
+    },
+    "/studio/mcp/staff_request": {
+      "post": {
+        "description": "An employee asks HR to judge whether more staff is needed. `{asked, why}`; HR may recommend nothing.",
+        "operationId": "mcp_staff_request_studio_mcp_staff_request_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/McpStaffRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Mcp Staff Request Studio Mcp Staff Request Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Mcp Staff Request",
         "tags": [
           "studio"
         ]

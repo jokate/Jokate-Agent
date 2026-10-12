@@ -73,7 +73,7 @@ from starlette.requests import HTTPConnection
 
 from . import creator, devices, employee_git, employees, files, guard, importer, jobs as create_jobs
 from . import editor as editor_control
-from . import machine as machine_info, review, sat, stats, tools, work
+from . import machine as machine_info, review, sat, staffing, stats, tools, work
 from .inbox import Hooks, Inbox, InboxError
 from .store import StudioStore, StudioStoreError, Tx, now
 from .tasks import (OWNER, STATES, TERMINAL, TEXT_FIELDS, CampaignNotFound, Effects, TaskMachine, TaskNotFound,
@@ -1572,7 +1572,7 @@ def list_task_events(id: str, after_id: int = Query(0, ge=0), limit: int = Query
 # --- inbox (§5, §6.4 '결재') --------------------------------------------------------------------------------
 InboxStatus = Literal["pending", "decided", "cancelled"]
 InboxKind = Literal["task_proposal", "hire", "design_approval", "structure_choice", "question", "pre_approval",
-                    "budget", "risky_command", "final_review"]
+                    "budget", "risky_command", "final_review", "hire_recommendation"]
 
 
 class Decide(BaseModel):
@@ -1591,7 +1591,7 @@ def get_inbox(machine: TaskMachine = Depends(get_machine)) -> Inbox:
     studio/runs.py for the runs that are no task's; the turns come with S-7 · S-8)."""
     cfg = _config()
     return Inbox(machine.store, machine, _hooks, studio_dir=cfg.studio_dir, checks=employees.context(cfg),
-                 max_exchanges=cfg.studio_max_exchanges)
+                 max_exchanges=cfg.studio_max_exchanges, hire_cooldown_days=cfg.studio_hire_cooldown_days)
 
 
 # --- the engine's side of the inbox (§5.8) ----------------------------------------------------------------
@@ -1603,6 +1603,32 @@ def use_hooks(hooks: Hooks | None) -> None:
     defines further down (`_advance_bg`)."""
     global _hooks
     _hooks = hooks
+
+
+def staffing_for(store: StudioStore) -> staffing.Staffing:
+    """The hiring triggers (studio/staffing.py, §5.3) on that store, asking HR through the hooks the server
+    gave (`Hooks.staffing_ask`; nothing wired = nothing asked). The limits are read now, from the config."""
+    cfg = _config()
+
+    def ask(signal: dict) -> bool | None:
+        return _hooks.staffing_ask(signal) if _hooks is not None else False
+
+    return staffing.Staffing(store, ask=ask, backlog_limit=cfg.studio_hire_backlog_limit,
+                             cooldown_days=cfg.studio_hire_cooldown_days)
+
+
+def staffing_on_task(task: dict, item: dict | None = None) -> None:
+    """(가)·(나) of §5.3 for a task just filed: `WorkEffects.staffing_look`. Never raises."""
+    try:
+        store = get_store()
+        staffing_for(store).on_task(task, item)
+    except Exception:  # noqa: BLE001 - the filing of the task is not this look's to undo
+        log.exception("studio: 작업 %s 의 채용 계기를 보지 못했습니다", task.get("id"))
+
+
+def staffing_sweep(store: StudioStore) -> None:
+    """(라) of §5.3: the daily report's sweep of every open task (`stats.Reporter(sweep=)`)."""
+    staffing_for(store).sweep()
 
 
 def use_effects(effects: Effects | None, *, models: Callable[[], list[dict]] | None = None) -> None:
@@ -1701,7 +1727,8 @@ def run_inbox() -> Inbox | None:
     if store is None or _cfg is None:
         return None
     return Inbox(store, TaskMachine(store, _effects), _hooks, studio_dir=_cfg.studio_dir,
-                 checks=employees.context(_cfg), max_exchanges=_cfg.studio_max_exchanges)
+                 checks=employees.context(_cfg), max_exchanges=_cfg.studio_max_exchanges,
+                 hire_cooldown_days=_cfg.studio_hire_cooldown_days)
 
 
 def is_task_run(run_id: str) -> bool:
@@ -1898,26 +1925,39 @@ def group_order(store: StudioStore, room_id: str, tx: Tx | None = None) -> list[
 def group_halted(store: StudioStore, room_id: str, tx: Tx | None = None) -> bool:
     """§4.6: is the room held at its limit? Told by its messages, the newest first: the notice of the limit
     before any message of the owner's and any `group_continued` = held. No column: a restart changes nothing,
-    and a room that is held is told so once."""
-    for message in reversed(store.list_messages(room_id, limit=MAX_PAGE, tx=tx)):
-        event = (message["meta"] or {}).get("event") if message["author_kind"] == "system" else None
-        if message["author_kind"] == "owner" or event == GROUP_CONTINUED:
+    and a room that is held is told so once. Not bound to one page: it goes back page by page until it is told,
+    or to the start of the room."""
+    before_id = None
+    while True:
+        page = store.list_messages(room_id, before_id=before_id, limit=MAX_PAGE, tx=tx)
+        for message in reversed(page):
+            event = (message["meta"] or {}).get("event") if message["author_kind"] == "system" else None
+            if message["author_kind"] == "owner" or event == GROUP_CONTINUED:
+                return False
+            if event == GROUP_LIMIT:
+                return True
+        if len(page) < MAX_PAGE:
             return False
-        if event == GROUP_LIMIT:
-            return True
-    return False
+        before_id = page[0]["id"]
 
 
 def group_owed(store: StudioStore, room_id: str) -> list[str]:
     """Whose turn a held room kept back (§4.6), in the room's order: a member an employee's message mentions
-    after what that member last read (`fed_message_id`). Read from the DB: the line of a room is memory only."""
+    after what that member last read (`fed_message_id`). Read from the DB: the line of a room is memory only.
+    Not bound to one page: it reads on to the end of the room, page by page."""
     owed = []
     for employee_id in group_order(store, room_id):
         member = store.get_room_member(room_id, employee_id)
-        unread = store.list_messages(room_id, after_id=member["fed_message_id"] or 0, limit=MAX_PAGE)
-        if any(m["author_kind"] == "employee" and m["author_id"] != employee_id and employee_id in (m["mentions"] or [])
-               for m in unread):
-            owed.append(employee_id)
+        after_id = member["fed_message_id"] or 0
+        while True:
+            page = store.list_messages(room_id, after_id=after_id, limit=MAX_PAGE)
+            if any(m["author_kind"] == "employee" and m["author_id"] != employee_id
+                   and employee_id in (m["mentions"] or []) for m in page):
+                owed.append(employee_id)
+                break
+            if len(page) < MAX_PAGE:
+                break
+            after_id = page[-1]["id"]
     return owed
 
 
@@ -2454,6 +2494,33 @@ class McpEmployeeList(BaseModel):
     department_id: str = ""
 
 
+class McpHireRecommend(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str = ""
+    role: str = ""
+    model: str = ""
+    effort: str = ""
+    department_id: str = ""             # an existing part ... or
+    part_name: str = ""                 # ... a new one (with part_job): exactly one of the two
+    part_job: str = ""
+    part_relay: str = ""
+    part_models: str = ""
+    project_id: str = ""
+    task_ids: list[str] = Field(default_factory=list)
+    signal_key: str = ""                # the key of the trigger this answers
+
+
+class McpStaffRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str = ""
+    role: str = ""
+    task_id: str = ""                   # empty: the task the turn is of
+    department_id: str = ""
+    project_id: str = ""
+
+
 class McpEmployeeDraft(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -2465,6 +2532,10 @@ class McpEmployeeDraft(BaseModel):
     guide_md: str = ""
     employee_yaml: str = ""
     first_message: str = ""
+    part_name: str = ""                 # given: a new part is made with the hire (department_id is then the server's)
+    part_job: str = ""
+    part_relay: str = ""
+    part_models: str = ""               # YAML of {chat, work, cap}
     target_employee_id: str = ""        # given: an amendment of `file` of that employee
     file: str = ""                      # PERSONA.md · GUIDE.md · employee.yaml
 
@@ -2625,6 +2696,20 @@ def mcp_employee_list(body: McpEmployeeList, caller: tools.Caller = Depends(get_
                       machine: TaskMachine = Depends(get_machine), inbox: Inbox = Depends(get_inbox)) -> dict:
     """The employees of the caller's project (HR: all), the retired left out. `{items[]}`."""
     return _tool("employee_list", body, caller, machine, inbox)
+
+
+@router.post("/mcp/hire_recommend")
+def mcp_hire_recommend(body: McpHireRecommend, caller: tools.Caller = Depends(get_caller),
+                       machine: TaskMachine = Depends(get_machine), inbox: Inbox = Depends(get_inbox)) -> dict:
+    """HR only: raise a recommendation to hire (an inbox item for the owner). `{inbox_id}`."""
+    return _tool("hire_recommend", body, caller, machine, inbox)
+
+
+@router.post("/mcp/staff_request")
+def mcp_staff_request(body: McpStaffRequest, caller: tools.Caller = Depends(get_caller),
+                      machine: TaskMachine = Depends(get_machine), inbox: Inbox = Depends(get_inbox)) -> dict:
+    """An employee asks HR to judge whether more staff is needed. `{asked, why}`; HR may recommend nothing."""
+    return _tool("staff_request", body, caller, machine, inbox)
 
 
 @router.post("/mcp/employee_draft")

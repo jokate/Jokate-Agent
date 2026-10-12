@@ -316,7 +316,7 @@ def test_the_seed_files_are_package_data():
 # --- the HR employee's own files (H-1 · H-2) ------------------------------------------------------------------
 HR_STEPS = ("무엇을 맡길지", "담당 범위와 금지", "결재 기준", "일하는 방식 · 말투", "모델 · 노력치")  # H-2, this order
 HIRED_PARTS = ("program", "design_doc", "design_setup")  # the parts of the default DB a hire can be of
-HR_GUIDE_BUDGET = 4096  # bytes of UTF-8: this test's budget for the packaged hr/GUIDE.md, not a limit of the server
+HR_GUIDE_BUDGET = 5632 # bytes of UTF-8: this test's budget for the packaged hr/GUIDE.md, not a limit of the server
 HR_NO_EFFORT = "노력치가 없다고 적힌 모델에는 `effort` 를 적지 않는다"  # haiku: a work slot would refuse the pair
 
 

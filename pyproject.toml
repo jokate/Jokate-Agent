@@ -27,7 +27,7 @@ packages = ["relay_agent", "relay_agent.studio", "mcp_servers"]
 "relay_agent.studio" = [
     "defaults/*",  # what a new UE project is given as it is (plugins.GUARDS_DEFAULT)
     "hr/*",  # the HR employee's files (employees.HR_DIR): no __init__.py, so not a package
-    "parts/*",  # the guides and the defaults of the three other parts (employees.PARTS_DIR)
+    "parts/*",  # the guides and the defaults of the four other parts (employees.PARTS_DIR)
     "seed/*",  # the seed employee's files (employees.SEED_DIR): no __init__.py, so not a package
     "template/**/*",  # the skeleton of a new UE project (creator.TEMPLATE_DIR): every file, at any depth
 ]

@@ -186,18 +186,50 @@ def employee_list(project_id: str = "", department_id: str = "") -> dict:
     return _call("employee_list", project_id=project_id, department_id=department_id)
 
 
+@mcp.tool()
+def staff_request(reason: str, role: str = "", task_id: str = "", department_id: str = "",
+                  project_id: str = "") -> dict:
+    """사람이 더 필요할 때 인사에게 판단을 요청한다. reason 은 왜 필요한지, role 은 필요한 역할, task_id 는 관련
+    작업(비우면 지금 작업), department_id · project_id 는 파트와 프로젝트(비우면 작업·내 소속에서 정한다).
+    인사가 판단한다 — 채용 권장은 보장이 아니고, 같은 파트·프로젝트로는 한동안 다시 올릴 수 없다. 돌려주는 것:
+    {asked, why} — why 는 asked · open · skipped · recently · unheard 다."""
+    return _call("staff_request", reason=reason, role=role, task_id=task_id, department_id=department_id,
+                 project_id=project_id)
+
+
 # --- HR only ----------------------------------------------------------------------------------------------
+@mcp.tool()
+def hire_recommend(reason: str, role: str, model: str, effort: str, department_id: str = "", part_name: str = "",
+                   part_job: str = "", part_relay: str = "", part_models: str = "", project_id: str = "",
+                   task_ids: list[str] | None = None, signal_key: str = "") -> dict:
+    """인사 전용. 채용을 권장하는 결재를 owner 에게 올린다 (초안이 아니다 — owner 가 면담을 열면 그때 이 방에서
+    채용 면담을 잇는다). reason 은 왜, role 은 역할, model · effort 는 권장하는 모델과 노력치다. 맞는 파트가 있으면
+    department_id, 없으면 part_name · part_job(하는 일)으로 새 파트를 제안한다 — 둘 중 하나만. part_relay ·
+    part_models 는 정했을 때만. project_id 는 배치할 프로젝트, task_ids 는 근거가 되는 작업. 판단 요청을 받았으면
+    그 key 를 signal_key 에 적는다. 같은 파트·프로젝트의 권장이 이미 결재를 기다리거나 최근 넘겨졌으면 거부된다.
+    돌려주는 것: {inbox_id}."""
+    return _call("hire_recommend", reason=reason, role=role, model=model, effort=effort,
+                 department_id=department_id, part_name=part_name, part_job=part_job, part_relay=part_relay,
+                 part_models=part_models, project_id=project_id, task_ids=task_ids or [], signal_key=signal_key)
+
+
+
 @mcp.tool()
 def employee_draft(name: str = "", department_id: str = "", persona_md: str = "", guide_md: str = "",
                    employee_yaml: str = "", draft_id: str = "", project_id: str = "", first_message: str = "",
-                   target_employee_id: str = "", file: str = "") -> dict:
+                   target_employee_id: str = "", file: str = "", part_name: str = "", part_job: str = "",
+                   part_relay: str = "", part_models: str = "") -> dict:
     """인사 전용. 채용 초안을 만들거나 고친다: name · department_id · persona_md · guide_md · employee_yaml 이
     필수이고, draft_id 를 주면 그 초안에서 적은 인자만 바꾼다. target_employee_id 를 주면 기존 직원의 수정안이다 —
-    file(PERSONA.md · GUIDE.md · employee.yaml)과 그 파일의 본문 인자만 쓴다. 돌려주는 것: {draft_id, action,
-    problems[]} — problems 가 비어야 employee_submit 으로 올릴 수 있다."""
+    file(PERSONA.md · GUIDE.md · employee.yaml)과 그 파일의 본문 인자만 쓴다. 맞는 파트가 없으면 새 파트를 함께
+    제안한다: part_name · part_job(하는 일)을 적고 part_relay(기본 릴레이) · part_models(chat · work · cap 의
+    YAML)는 정했을 때만 적는다. 이때 department_id 는 적지 않고(서버가 새 id 를 돌려준다) employee_yaml 의
+    department 에는 {department_id} 를 적는다. 돌려주는 것: {draft_id, action, problems[]} (새 파트면
+    department_id 도) — problems 가 비어야 employee_submit 으로 올릴 수 있다."""
     return _call("employee_draft", draft_id=draft_id, name=name, department_id=department_id,
                  project_id=project_id, persona_md=persona_md, guide_md=guide_md, employee_yaml=employee_yaml,
-                 first_message=first_message, target_employee_id=target_employee_id, file=file)
+                 first_message=first_message, target_employee_id=target_employee_id, file=file,
+                 part_name=part_name, part_job=part_job, part_relay=part_relay, part_models=part_models)
 
 
 @mcp.tool()

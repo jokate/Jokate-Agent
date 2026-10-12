@@ -125,6 +125,15 @@ def auto(line, monkeypatch):  # noqa: F811
     return Auto(line, monkeypatch)
 
 
+def test_art_is_an_optional_part_nothing_waits_for_it(auto):
+    # T3: the part and its room are there and no one is in it — the campaign goes on, no "배치 필요" comes of it
+    assert auto.store.get_department("art")["builtin"] is True and auto.store.list_employees(department_id="art") == []
+    auto.campaign("nonstop")
+    assert auto.drive() == ["A", "C", "M", "B"] and auto.idle() == []
+    assert told(auto.line, "needs_assignment") == []
+    assert not [m for m in auto.store.list_messages(SYSTEM_ROOM, limit=200) if "아트" in m["body"]]
+
+
 # --- the mock campaign in the three modes (CAMPAIGN.md S-14 · 467–471행) -----------------------------------------
 def test_nonstop_goes_to_the_end_without_the_owner(auto):
     cid = auto.campaign("nonstop")

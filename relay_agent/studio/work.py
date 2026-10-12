@@ -302,6 +302,7 @@ class WorkEffects(Effects):
     holds: Callable[[str], bool] | None = None
     campaign: Callable[..., Any] | None = None  # (campaign id or None), and `again=True` after a start · resume
     watch: Callable[[str, str], Any] | None = None  # (task id, run id): the run passed the editor check
+    staffing_look: Callable[[dict, dict | None], Any] | None = None  # (task, its proposal item): §5.3 triggers
 
     def __init__(self, engine, cfg, store: Callable[[], StudioStore],
                  catalog: Callable[[], list[dict]] | None = None, server_root: Path | str | None = None):
@@ -312,6 +313,11 @@ class WorkEffects(Effects):
         self.editor_processes: Callable[[], list[dict]] = machine_info.editor_processes
         self.editor_healthy: Callable[[Any], bool] = machine_info.health_check
         self.editor_tools = editor_control.Tools()
+
+    def staffing(self, task: dict, item: dict | None) -> None:
+        """A task was filed: `staffing_look` (server.py sets it) looks at the triggers for a hire (§5.3)."""
+        if self.staffing_look is not None:
+            self.staffing_look(task, item)
 
     def folder(self, task: dict) -> Path | None:
         """The folder that task's run works in: what the queue asks `RelayEngine.folder_holder` about before it

@@ -17,7 +17,8 @@ from relay_agent.studio.tasks import CODES, STATES, TaskNotFound, TransitionErro
 DOC = Path(__file__).resolve().parent.parent / "design" / "studio" / "ARCHITECTURE.md"
 TOKEN = "shared-Token-1"
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
-SEEDED_ROOMS = {"room_system", "room_dep_hr", "room_dep_design_doc", "room_dep_program", "room_dep_design_setup"}
+SEEDED_ROOMS = {"room_system", "room_dep_hr", "room_dep_design_doc", "room_dep_program", "room_dep_design_setup",
+                "room_dep_art"}
 
 
 class World:
@@ -369,9 +370,9 @@ def test_project_archive_waits_for_unfinished_tasks(world):
 
 
 # --- departments · employees ------------------------------------------------------------------------------
-def test_departments_are_the_seeded_four(world):
+def test_departments_are_the_seeded_five(world):
     items = world.owner.get("/studio/departments").json()["items"]
-    assert {d["id"] for d in items} == {"hr", "design_doc", "program", "design_setup"} and items[0]["id"] == "hr"
+    assert {d["id"] for d in items} == {"hr", "design_doc", "program", "design_setup", "art"} and items[0]["id"] == "hr"
     assert all(d["builtin"] is True for d in items)
     assert isinstance(items[0]["default_mcp"], list) and "default_mcp_json" not in items[0]
 
@@ -456,7 +457,7 @@ def test_rooms_list_counts_unread_and_shows_the_last_message(world):
     assert set(listed) == SEEDED_ROOMS | {dm}
     assert listed[dm]["unread"] == 2 and listed[dm]["last_message"] == mine  # the owner's own message is not unread
     assert listed["room_system"]["unread"] == 0 and listed["room_system"]["last_message"] is None
-    assert set(rooms("?kind=dm")) == {dm} and len(rooms("?kind=department")) == 4
+    assert set(rooms("?kind=dm")) == {dm} and len(rooms("?kind=department")) == 5
     assert world.owner.get("/studio/rooms?kind=nope").status_code == 422
     world.store.update_room(dm, archived_at=now())
     assert dm not in rooms() and dm in rooms("?archived=1")

@@ -232,8 +232,9 @@ def test_decision_values_are_the_table_of_5_2():
         assert inbox.DECISIONS[kind] == values
         assert inbox.COMMENT_REQUIRED.get(kind, ()) == tuple(v for v in ticks(cells[3]) if v in values)
         assert (kind in inbox.NOTIFY_OK) == cells[5].startswith("`approve`")
-    assert tuple(seen) == inbox.KINDS == get_args(api.InboxKind) and len(seen) == 9
-    assert set(inbox.TARGET) == {(k, d) for k in inbox.KINDS if k != "hire" for d in inbox.DECISIONS[k]}
+    assert tuple(seen) == inbox.KINDS == get_args(api.InboxKind) and len(seen) == 10
+    assert set(inbox.TARGET) == {(k, d) for k in inbox.KINDS if k not in ("hire", "hire_recommendation")
+                                 for d in inbox.DECISIONS[k]}
     assert {inbox.TARGET[(k, d)] for k in BLOCKING_KINDS for d in inbox.DECISIONS[k]} == {"working"}  # all T5
 
 
@@ -247,7 +248,7 @@ def test_required_payload_keys_are_the_tables_of_5_3_and_5_4():
             seen.add(kind)
     marked = tuple(cells[0].strip("`").removesuffix("[]")
                    for cells in table(doc_section("payload (저장):", "`package` (GET 때 계산):"), 3) if cells[1] == "●")
-    assert inbox.PAYLOAD_REQUIRED["final_review"] == marked and len(seen) == 8
+    assert inbox.PAYLOAD_REQUIRED["final_review"] == marked and len(seen) == 9
     actions = [cells[0].strip("`") for cells in table(doc_section("| `action` | 뜻 |", "- `source_inbox_id`"), 3)]
     assert actions[2:] == list(inbox.HIRE_BODY)  # after the header and the rule
     reasons = [cells[0].strip("`") for cells in table(doc_section("`question` 의 `reason`:", "M-7 의"), 4)]
@@ -265,7 +266,8 @@ def test_decision_texts_are_the_sentences_of_5_6():
         assert sentence.replace("{label}", "<고른 선택지의 label>") in doc, key
     assert inbox.SENTENCES[("budget", "reject")] == "예산을 더 쓰지 않는다. " + inbox.ANSWERS["wrap_up"]
     assert set(inbox.SENTENCES) == {("final_review", "rework")} | {
-        (k, d) for k in BLOCKING_KINDS if k != "question" for d in inbox.DECISIONS[k]}
+        (k, d) for k in BLOCKING_KINDS if k != "question" for d in inbox.DECISIONS[k]} | {
+        ("hire_recommendation", d) for d in inbox.DECISIONS["hire_recommendation"]}  # the one kind that is no run's
     item = {"id": "inb_1a2b3c4d", "kind": "pre_approval", "decision": "approve", "decision_comment": " 키만 ",
             "decision_data": {}, "payload": {}}
     head = "[결재 inb_1a2b3c4d · 사전 승인 · 승인]\n올린 변경이 승인됐다. 올린 범위 안에서 진행하라."

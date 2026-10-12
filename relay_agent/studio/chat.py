@@ -71,6 +71,7 @@ HANDOFF_LOOKBACK = 5      # turns of the session looked through for the last one
 HANDOFF_TITLE = "이전 대화의 인계 (HANDOFF)"
 RUN_ERROR = "run_error"   # `meta.event` of what a turn says about itself (§7.6)
 UNANSWERED = (RUN_ERROR, api.GROUP_LIMIT, api.GROUP_CONTINUED)  # system messages no turn reads: they are the owner's
+STAFFING_SIGNAL = "staffing.signal"  # `meta.event` of the server's question to HR (T5): read by the turn, answered quietly
 
 
 class Refused(Exception):
@@ -98,7 +99,9 @@ class Where:
 @dataclass
 class Begun:
     """A turn whose run is made and not advanced yet: what `ChatTurns._finish` goes on with. `posted` is what
-    `_finish` found: the turn left a message in the room — its answer, or what its run wrote there itself."""
+    `_finish` found: the turn left a message in the room — its answer, or what its run wrote there itself.
+    `quiet`: all that is new is the server's own lines and one is a question to HR (`STAFFING_SIGNAL`) — the
+    turn may end with no answer, and then the room is not told that it did not answer (T5)."""
     store: StudioStore
     room: dict
     employee: dict
@@ -106,6 +109,7 @@ class Begun:
     run: Any
     where: Where
     posted: bool = False
+    quiet: bool = False
 
 
 def _thread(work: Callable[[], None]) -> None:
@@ -190,6 +194,33 @@ class ChatTurns:
                 self._busy.pop(key, None)
             raise
         return begun is not None
+
+    def judge(self, signal: dict) -> bool:
+        """`Hooks.staffing_ask` (T5 · §5.3 '판단 요청'): put the trigger to the HR employee in service as a system
+        line of its 1:1 room (`meta.event` `staffing.signal`, the brief of `staffing.brief`) and give it a turn
+        (`put`). The turn is a chat turn: it can change no file, and it may raise a recommendation with
+        `hire_recommend` or nothing — an empty output leaves no line in the room (`Begun.quiet`).
+
+        False = nobody to ask (no HR employee in service, or no 1:1 room for it): only logged, the caller takes
+        back its record of the question. True = the question is in the room; when the turn itself could not be
+        put the line stays unread and the next turn of HR reads it (logged), so the same trigger is not asked
+        again within the cooldown."""
+        from . import staffing
+        store = api.get_store()
+        hr = next(iter(store.list_employees(department_id=employees.HR_DEPARTMENT)), None)
+        rooms = store.list_rooms(kind="dm", employee_id=hr["id"]) if hr is not None else []
+        if hr is None or not rooms:
+            log.info("studio: 채용 계기 %s 를 물을 인사 직원이나 1:1 방이 없다", signal.get("key"))
+            return False
+        room = rooms[0]
+        self._say(store, room, staffing.brief(store, signal), event=STAFFING_SIGNAL, key=signal["key"],
+                  trigger=signal["trigger"])
+        try:
+            if not self.put(hr["id"], room["id"]):
+                log.info("studio: 인사의 판단 턴이 들어가지 않았다 (%s) — 글은 방에 남아 다음 턴이 읽는다", signal["key"])
+        except Exception:  # noqa: BLE001 - the line is in the room; a turn that cannot be put is not the trigger's failure
+            log.exception("studio: 인사의 판단 턴을 넣지 못했다 (%s)", signal["key"])
+        return True
 
     def failed(self, employee_id: str, room_id: str) -> list[str]:
         """`Hooks.turn_failed`: §9.5 의 5 (가) for that employee's turn, asked before a mention's message is made —
@@ -338,7 +369,9 @@ class ChatTurns:
         except Refused as e:
             self._say(store, room, f"{employee['name']} 의 턴을 시작하지 못했다 — {e}")
             return None
-        return Begun(store, room, employee, listed, run, where)
+        quiet = (all(m["author_kind"] == "system" for m in fresh)
+                 and any((m["meta"] or {}).get("event") == STAFFING_SIGNAL for m in fresh))
+        return Begun(store, room, employee, listed, run, where, quiet=quiet)
 
     def _finish(self, begun: Begun) -> bool:
         """The second half: advance the run and store its answer. True when it read a full page."""
@@ -371,7 +404,7 @@ class ChatTurns:
                                      conversation_id=run.done_sessions.get(STAGE) if keep else None,
                                      fed_message_id=listed[-1]["id"])
         # after the block: `_say` opens a transaction of its own. Not in a group room: there no answer is a pass
-        if not posted and room["kind"] != "group":
+        if not posted and room["kind"] != "group" and not begun.quiet:
             self._say(store, room, f"{employee['name']} 이(가) 답하지 못했다 — 턴은 끝났지만 답이 비어 있다", run.id)
         return len(listed) >= FEED_MESSAGES
 

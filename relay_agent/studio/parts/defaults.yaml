@@ -1,4 +1,4 @@
-# 기본 세 파트의 기본값 — 사람이 읽고 고치는 원본이다 (design/studio/ARCHITECTURE.md §3.4 · §3.15 · §9.2).
+# 기본 네 파트의 기본값 — 사람이 읽고 고치는 원본이다 (design/studio/ARCHITECTURE.md §3.4 · §3.15 · §9.2).
 # 인사 파트의 것은 ../hr/employee.yaml 에 있다.
 #
 # 서버가 시작할 때 각 파트 행의 빈 칸만 이 값으로 채운다. 값이 있는 칸은 덮어쓰지 않는다 — 이미 도는
@@ -10,7 +10,7 @@
 #   cap   이 파트 직원의 상한. chat · work 는 이 값을 넘지 못한다
 #
 # 직원의 employee.yaml 이 적지 않은 키가 이 값을 따른다. 기본 릴레이는 여기 없고 schema.py 의 시드에 있다
-# (design_doc = doc-write, program = auto, design_setup = editor-task).
+# (design_doc = doc-write, program = auto, design_setup = editor-task, art = editor-task).
 #
 # 알아 둘 것:
 # - unreal 은 서버에 내장된 MCP 가 아니다. 프로젝트의 .mcp.json 이나 relay.config 의 mcp_servers 에 있어야 붙고,
@@ -41,6 +41,14 @@ program:  # 프로그램 — auto 가 고르는 relays/studio-task.yaml: scout �
   cap: {model: opus, effort: high}
 
 design_setup:  # 기획(세팅) — relays/editor-task.yaml: edit → verify
+  mcp: [unreal]
+  chat: {model: sonnet, effort: medium}
+  work:
+    edit: {model: sonnet, effort: medium}
+    verify: {model: sonnet, effort: low}
+  cap: {model: opus, effort: high}
+
+art:  # 아트 — relays/editor-task.yaml: edit → verify (선택 파트라 직원이 없어도 괜찮다)
   mcp: [unreal]
   chat: {model: sonnet, effort: medium}
   work:

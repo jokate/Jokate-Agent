@@ -74,6 +74,12 @@ class Config(BaseModel):
     # one message of the owner's, before the room is held and the owner told (ARCHITECTURE.md §4.6). Read before
     # every such turn; the owner's next message there, or `POST /studio/rooms/{id}/continue`, counts anew.
     studio_group_max_exchanges: int = 6
+    # Katae Studio: how many tasks may wait (`backlog`) in front of one employee before HR is asked whether to
+    # hire another (ARCHITECTURE.md §5.3 채용 권장). More than this is a trigger. 0 or less = the queue is not looked at.
+    studio_hire_backlog_limit: int = 5
+    # Katae Studio: days a hiring recommendation the owner skipped is not raised again for the same part and
+    # project, and HR is asked about one trigger at most once (ARCHITECTURE.md §5.3 되풀이 막기). 0 or less = no wait.
+    studio_hire_cooldown_days: int = 3
     # Katae Studio: hosts an employee may upload to without the owner being asked, besides the git remotes of
     # the registered projects (ARCHITECTURE.md §10.4 의 5). An approved upload does not add to it.
     studio_known_hosts: list[str] = []

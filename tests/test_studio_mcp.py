@@ -58,11 +58,11 @@ def room_of(desk, kind, **fields):  # noqa: F811
     return found[0] if found else desk.store.create_room(kind, title=kind, **fields)
 
 
-# --- the twelve tools (§8.4) ----------------------------------------------------------------------------------
-def test_the_twelve_tools_are_the_ones_of_8_4(process):
+# --- the fourteen tools (§8.4; the hiring pair of T5 made twelve fourteen) ---------------------------------------
+def test_the_fourteen_tools_are_the_ones_of_8_4(process):
     twelve = tools_of_8_4()
     listed = asyncio.run(process.mcp.list_tools())
-    assert len(twelve) == 12 and {tool.name for tool in listed} == twelve == set(tools.TOOLS)
+    assert len(twelve) == 14 and {tool.name for tool in listed} == twelve == set(tools.TOOLS)
     schema = api.openapi_schema()
     assert {path.rsplit("/", 1)[1] for path in schema["paths"] if path.startswith("/studio/mcp/")} == twelve
     models = schema["components"]["schemas"]
@@ -470,7 +470,8 @@ def test_employee_draft_keeps_its_problems_and_submit_refuses_them(desk, studio_
     payload = item["payload"]
     assert (payload["action"], payload["draft_id"], payload["reason"], payload["source_inbox_id"]) == (
         "hire", draft_id, "사람이 모자라다", "inb_0badc0de")
-    assert payload["draft"] == {**DRAFT, "project_id": desk.w.pid, "first_message": ""}
+    assert payload["draft"] == {**DRAFT, "project_id": desk.w.pid, "first_message": "", "part_name": "", "part_job": "",
+                                "part_relay": "", "part_models": ""}
 
     again = desk.call("employee_submit", token, draft_id=draft_id, reason="다시 올린다")  # replaces the pending one
     assert desk.store.get_inbox_item(out["inbox_id"])["status"] == "cancelled"
