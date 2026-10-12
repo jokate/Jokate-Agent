@@ -292,6 +292,36 @@ def seed_employee() -> dict | None:
         return None
 
 
+def ensure_hr() -> dict | None:
+    """Make the HR employee when the studio DB has no row of the HR part (§3.15; studio/employees.py
+    `ensure_hr`), and fill the HR part's empty defaults (`fill_hr_part`). Called once at the server's start,
+    after `seed_employee()`. The two are tried apart — one that fails is logged and leaves the other, and the
+    server starts either way. Returns the employee's row, or None: nothing was made, or the store is not open.
+    An HR employee that is there keeps its files, so a GUIDE.md older than the section of the values of a hire
+    is only named in the log (`employees.hr_guides_behind`): the owner brings it up to date by hand."""
+    with _lock:
+        store = _store
+    if store is None or _cfg is None:
+        return None
+    try:
+        employees.fill_hr_part(store)
+    except Exception:  # noqa: BLE001 - a start must not depend on the part's defaults
+        log.exception("studio: 인사 파트의 기본값을 채우지 못했다")
+    made = None
+    try:
+        made = employees.ensure_hr(store, _cfg.studio_dir)
+    except Exception:  # noqa: BLE001 - a start must not depend on the HR employee
+        log.exception("studio: 인사 직원을 만들지 못했다")
+    try:
+        for employee_id in employees.hr_guides_behind(store, _cfg.studio_dir):
+            log.warning("studio: 인사 %s 의 GUIDE.md 가 옛 문안이다 — '%s' 절을 가리키는 말이 없다 (%s). 서버는 "
+                        "덮어쓰지 않는다 — relay_agent/studio/hr/GUIDE.md 를 보고 손으로 맞춘다", employee_id,
+                        employees.HIRING_TITLE, employees.folder(_cfg.studio_dir, employee_id) / "GUIDE.md")
+    except Exception:  # noqa: BLE001 - a start must not depend on this look at a file
+        log.exception("studio: 인사의 GUIDE.md 를 살피지 못했다")
+    return made
+
+
 def close_store() -> None:
     """Close and forget the store and a remembered failure (tests, and a retry after the cause is fixed)."""
     global _store, _failure
@@ -550,10 +580,25 @@ def _need(row: dict | None, what: str, id: Any) -> dict:
     return row
 
 
-def _with_dm_room(store: StudioStore, employees: list[dict]) -> list[dict]:
-    """Employee rows with `dm_room_id` (None while the 1:1 room does not exist)."""
+def _with_dm_room(store: StudioStore, rows: list[dict]) -> list[dict]:
+    """Employee rows with `dm_room_id` (None while the 1:1 room does not exist) and `company_wide` (true for
+    an employee of the HR part: of the company, not of a project — §3.5)."""
     rooms = {r["employee_id"]: r["id"] for r in store.list_rooms(kind="dm", include_archived=True)}
-    return [{**e, "dm_room_id": rooms.get(e["id"])} for e in employees]
+    return [{**e, "dm_room_id": rooms.get(e["id"]),
+             "company_wide": e["department_id"] == employees.HR_DEPARTMENT} for e in rows]
+
+
+def _project_staff(store: StudioStore, project_id: str, *, department_id: str | None = None,
+                   include_retired: bool = False) -> list[dict]:
+    """The employees a project shows (§6.4): the ones placed in it, then the HR employee in service — who is
+    placed in no project and works for all of them. A part filter other than HR leaves HR out; a retired HR
+    is of no project, so `include_retired` does not bring one in. Other employees that are not placed stay out."""
+    rows = store.list_employees(project_id=project_id, department_id=department_id, include_retired=include_retired)
+    if department_id in (None, employees.HR_DEPARTMENT):
+        seen = {row["id"] for row in rows}
+        rows = rows + [row for row in store.list_employees(department_id=employees.HR_DEPARTMENT)
+                       if row["id"] not in seen]
+    return rows
 
 
 EMPLOYEE_FILES = employees.FILE_KEYS
@@ -743,9 +788,9 @@ def cleanup_job(id: str, store: StudioStore = Depends(get_store)) -> dict:
 @router.get("/projects/{id}")
 def get_project(id: str, store: StudioStore = Depends(get_store)) -> dict:
     row = _need(store.get_project(id), "프로젝트", id)
-    employees = _with_dm_room(store, store.list_employees(project_id=id))
+    staff = _with_dm_room(store, _project_staff(store, id))  # as `GET /employees?project_id`: HR comes last
     # `editor` stays null (M-7, §6.4): the status is `GET …/editor`'s — here it would read the processes each time
-    return {**row, "employees": employees, "task_counts": store.count_tasks_by_status(id), "editor": None}
+    return {**row, "employees": staff, "task_counts": store.count_tasks_by_status(id), "editor": None}
 
 
 # §6.4 · §6.6 (M-7): the project's Unreal editor — how it is, start it, stop it, a picture of its viewport. The
@@ -902,8 +947,15 @@ def list_models() -> list[dict]:
 def list_employees(project_id: str | None = None, department_id: str | None = None,
                    retired: int = Query(0, ge=0, le=1), store: StudioStore = Depends(get_store)) -> dict:
     """`retired=1` adds the retired employees to the list."""
-    rows = store.list_employees(project_id=project_id, department_id=department_id,
-                                include_retired=bool(retired))
+    # With `project_id` the HR employee in service is listed too, after the ones placed there (`_project_staff`,
+    # §6.4) — said here and not in the docstring, which the saved contract (openapi.json) carries. A project
+    # that does not exist has nobody, HR neither: an empty list and no error, as `list_campaigns` filters.
+    if project_id is None:
+        rows = store.list_employees(department_id=department_id, include_retired=bool(retired))
+    elif store.get_project(project_id) is None:
+        rows = []
+    else:
+        rows = _project_staff(store, project_id, department_id=department_id, include_retired=bool(retired))
     return {"items": _with_dm_room(store, rows)}
 
 

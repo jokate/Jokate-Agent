@@ -383,6 +383,36 @@ def test_employees_list_filters_and_carries_the_dm_room(world):
     assert (items[world.emp["id"]]["name"], items[world.emp["id"]]["status"]) == ("민수", "idle")
 
 
+def test_a_project_lists_the_hr_employee_as_company_wide(world):
+    old = world.store.create_employee("옛 인사", "hr")
+    world.store.update_employee(old["id"], retired_at=now())
+    hr = world.store.create_employee("인사", "hr")  # in service, placed nowhere
+    idle = world.store.create_employee("대기", "program")  # not placed and not HR: of no project
+
+    def rows(query=""):
+        return world.owner.get("/studio/employees" + query).json()["items"]
+
+    def ids(query=""):
+        return [e["id"] for e in rows(query)]
+
+    listed = rows(f"?project_id={world.pid}")
+    assert [(e["id"], e["company_wide"]) for e in listed] == [(world.emp["id"], False), (hr["id"], True)]
+    assert listed[1]["project_id"] is None and "dm_room_id" in listed[1]  # shown with the project, not placed in it
+    assert ids(f"?project_id={world.pid}&department_id=hr") == [hr["id"]]
+    assert ids(f"?project_id={world.pid}&department_id=program") == [world.emp["id"]]
+    assert ids(f"?project_id={world.pid}&retired=1") == [world.emp["id"], hr["id"]]  # a retired HR is of no project
+    assert world.store.get_project("prj_none") is None  # a project that is not there: nobody, HR neither
+    assert ids("?project_id=prj_none") == ids("?project_id=prj_none&department_id=hr") == []
+    assert ids("?project_id=prj_none&retired=1") == []
+    assert set(ids()) == {world.emp["id"], hr["id"], idle["id"]}  # without a project: as it was
+    assert set(ids("?retired=1")) == {world.emp["id"], old["id"], hr["id"], idle["id"]}
+    assert {e["id"] for e in rows("?retired=1") if e["company_wide"]} == {old["id"], hr["id"]}
+    detail = world.owner.get(f"/studio/projects/{world.pid}").json()["employees"]
+    assert [(e["id"], e["company_wide"]) for e in detail] == [(world.emp["id"], False), (hr["id"], True)]
+    assert world.owner.get(f"/studio/employees/{hr['id']}").json()["company_wide"] is True
+    assert world.store.get_employee(hr["id"])["project_id"] is None and "company_wide" not in world.store.get_employee(hr["id"])
+
+
 def test_employee_detail_adds_files_tasks_and_runs(world):
     url = f"/studio/employees/{world.emp['id']}"
     body = world.owner.get(url).json()

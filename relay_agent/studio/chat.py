@@ -14,8 +14,9 @@ A turn is one run of `relays/employee-chat.yaml` — a single stage, `chat` — 
   filed under (one per employee and room, kept when the conversation changes), `conversation_id` the Claude Code
   conversation the next turn resumes (NULL = a new one), `fed_message_id` the last message a finished turn read;
 - a turn that resumes is made like any run and then told to continue that conversation: the engine resumes the
-  conversation `RunState.stage_sessions` names and sends only what `interject` left — the new messages. The whole
-  goal stays the prompt of a conversation that could not be resumed (`StageCall.fresh_prompt`);
+  conversation `RunState.stage_sessions` names and sends only what `interject` left — the new messages and, for
+  the HR employee, the values of a hire as they are now (§8.4). The whole goal stays the prompt of a conversation
+  that could not be resumed (`StageCall.fresh_prompt`);
 - when a turn's input passes HANDOFF_TOKENS, or its conversation could not be resumed, the conversation is
   closed: the next turn starts a new one from the hand-over — what the last finished turn said the conversation
   had come to (`state` · `open_issues` · `next_steps`). No model is called for it;
@@ -301,7 +302,8 @@ class ChatTurns:
         session_id, conversation = self._session(store, member, employee, repo, folder, where)
         if where.task is not None:
             text = f"{text}\n{self._read_note(store, where.task)}"
-        goal = self._goal(store, employee, room, text, session_id, where.project_id)
+        hiring = self._hiring(store, employee, where)
+        goal = self._goal(store, employee, room, text, session_id, where.project_id, hiring)
         try:
             run = self.engine.create(
                 self.relay, goal, None if repo else folder, session_id=session_id, repo=repo,
@@ -315,7 +317,9 @@ class ChatTurns:
             run.stage_sessions[STAGE] = conversation
             self.engine.save(run)
             files = "".join(f"\n- `{path}`" for path in run.baton.attachments)
-            self.engine.interject(run.id, text + (f"\n첨부 파일 (필요하면 Read 로 읽는다):{files}" if files else ""))
+            said = text + (f"\n첨부 파일 (필요하면 Read 로 읽는다):{files}" if files else "")
+            # HR's values are made anew every turn: a project made since the conversation began is in this one
+            self.engine.interject(run.id, f"{said}\n\n{hiring}" if hiring else said)
         return run
 
     def _values(self, store: StudioStore, employee: dict) -> dict:
@@ -374,13 +378,31 @@ class ChatTurns:
         return session["id"], None
 
     def _goal(self, store: StudioStore, employee: dict, room: dict, text: str, session_id: str,
-              project_id: str | None) -> str:
+              project_id: str | None, hiring: str = "") -> str:
         """The new messages first — the session's list of earlier requests shows the head of a goal —, then the
-        hand-over of the conversation before, then the employee's part of the prompt (§9.1)."""
+        hand-over of the conversation before, then the employee's part of the prompt (§9.1) and last `hiring`:
+        for the HR employee, the values of a hire (§8.4; `_hiring`). The goal is sent when a conversation
+        starts: a turn that resumes sends the new messages, and of the rest only `hiring` again (`_make`)."""
         handoff = self._handoff(session_id)
         parts = [text, f"===== {HANDOFF_TITLE} =====\n{handoff}" if handoff else "",
-                 employees.prompt_for(store, self.cfg.studio_dir, employee, room["id"], project_id)]
+                 employees.prompt_for(store, self.cfg.studio_dir, employee, room["id"], project_id), hiring]
         return "\n\n".join(part for part in parts if part.strip())
+
+    def _hiring(self, store: StudioStore, employee: dict, where: Where) -> str:
+        """`employees.hiring_notes` for a chat turn of an employee of the HR part, "" for anyone else and for a
+        read turn of a task room — no hire is drafted there (§8.4): the project ids, the parts and the models HR
+        writes in a draft — the REST paths that list them are the owner's. Read from the store at every turn.
+        The models are the engine's catalog, as `GET /studio/models` reads it (work.py `catalog`); when it
+        cannot be read the turn is made without them."""
+        if employee["department_id"] != employees.HR_DEPARTMENT or where.mode != "chat":
+            return ""
+        checks = employees.context(self.cfg)
+        try:
+            catalog = (getattr(self.engine, "providers", None) or checks.providers).catalog()
+        except Exception:  # noqa: BLE001 - a list that cannot be read must not stop the turn
+            log.exception("studio: 채용에 쓰는 모델 목록을 읽지 못했다")
+            catalog = []
+        return employees.hiring_notes(store, checks, catalog)
 
     def _handoff(self, session_id: str) -> str:
         """What the session's last finished turn said the conversation had come to. A turn that resumes does not

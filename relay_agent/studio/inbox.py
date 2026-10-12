@@ -1015,7 +1015,11 @@ class Inbox:
         elif (kind, decision) in NOTES and item["requester_id"]:
             room = self._dm_room(item["requester_id"])
             note = NOTES[(kind, decision)].replace("{title}", item["title"])
-            self._say(room, _compose(item, note), self._meta(item))
+            body = _compose(item, note)
+            draft_id = (item["payload"] or {}).get("draft_id") if kind == "hire" else None
+            if draft_id:  # HR's next conversation may be a new one: the message is its one way back to the draft
+                body += f"\n초안 id: {draft_id}"
+            self._say(room, body, self._meta(item))
             if (kind, decision) == ("hire", "revise") and room is not None:
                 self.hooks.chat_turn(item["requester_id"], room["id"])  # HR reworks the draft; a reject has no turn
         if kind == "final_review" and decision in UPSTREAM_NOTE:

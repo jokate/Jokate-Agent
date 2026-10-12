@@ -953,6 +953,13 @@ def seed_studio_employee() -> None:
     studio_api.seed_employee()
 
 
+# The HR employee (H-2; design/studio/ARCHITECTURE.md §3.5 · §3.15): made once, in a studio DB that has no row of
+# the HR part. Registered after the seed, so an empty DB starts with both; a startup function of its own as well.
+@app.on_event("startup")
+def ensure_studio_hr() -> None:
+    studio_api.ensure_hr()
+
+
 # Task runs (S-8, part 1; design/studio/ARCHITECTURE.md §9.5 · §11.2): what T3 makes a task's run with on this
 # engine, and the models `GET /studio/models` lists — this engine's registry, which knows the benched ones. Down
 # here for the reasons given above.

@@ -1,9 +1,9 @@
-"""Employee folders, `employee.yaml` and the seed employee (S-7, 1/2).
+"""Employee folders, `employee.yaml`, the seed employee (S-7, 1/2) and the HR employee every studio has (H-2).
 
 Contract: design/studio/ARCHITECTURE.md §9.1 (the four files, the order of the prompt, the 4 KB of MEMORY.md),
 §9.2 (the eight keys and the part's defaults), §9.4 (the eleven checks and their `failed[]` codes), §9.5 (the
 values of a chat turn, the cap), §9.6 (a file that cannot be read), §4.9 (the derived status), §2.2 · §3.15
-(the seed employee).
+(the seed employee), §3.5 · §3.15 (the HR employee and the HR part's defaults).
 
 Every way an `employee.yaml` is written goes through `check()`: the two approvals of inbox.py (hire ·
 guide_amend) and HR's drafts (drafts.py · tools.py). What the checks must know of the server — the relay
@@ -53,6 +53,10 @@ SEED_ID = "emp_5eed0001"
 SEED_NAME = "시드"  # provisional, as are the files of SEED_DIR
 SEED_DEPARTMENT = "program"
 SEED_DIR = Path(__file__).with_name("seed")
+HR_DIR = Path(__file__).with_name("hr")  # the HR employee's own files (H-1 · H-2): the original, not provisional
+HR_NAME = "인사"  # the title of hr/PERSONA.md; the HR employee's row takes this name
+HR_ID = "emp_68720001"  # the HR employee a start makes (§3.15); fixed, as the seed's
+HR_DEPARTMENT = "hr"
 
 
 def _problem(code: str, message: str) -> dict:
@@ -434,6 +438,11 @@ def seed_texts() -> dict[str, str]:
     return {name: "" if name == "MEMORY.md" else (SEED_DIR / name).read_text(encoding="utf-8") for name in FILES}
 
 
+def hr_texts() -> dict[str, str]:
+    """The four files of the HR employee from relay_agent/studio/hr/. MEMORY.md is empty, as at a hire."""
+    return {name: "" if name == "MEMORY.md" else (HR_DIR / name).read_text(encoding="utf-8") for name in FILES}
+
+
 def seed(store: StudioStore, studio_dir: Path | str) -> dict | None:
     """Make the seed employee — the folder with its four files, the row, the 1:1 room — in a DB that has no
     employee at all. Retired employees count, so a seed that was retired does not come back, and a second
@@ -442,22 +451,12 @@ def seed(store: StudioStore, studio_dir: Path | str) -> dict | None:
         return None
     target = folder(studio_dir, SEED_ID)
     fresh = not target.exists()
-    write_files(target, seed_texts(), keep=True)  # a folder left by a start that broke off is used
     employee = None
-    try:
+    try:  # the files too: a folder made here goes when they cannot all be written
+        write_files(target, seed_texts(), keep=True)  # a folder left by a start that broke off is used
         with store.transaction() as tx:
             if not store.list_employees(include_retired=True, tx=tx):  # the write lock is ours from here
-                employee = store.create_employee(SEED_NAME, SEED_DEPARTMENT, id=SEED_ID, tx=tx)
-                dm = store.create_room("dm", title=SEED_NAME, employee_id=SEED_ID, tx=tx)
-                store.create_room_member(dm["id"], SEED_ID, tx=tx)
-                store.emit(tx, "employee.updated", {"employee": employee, "change": "created"})
-                store.emit(tx, "room.updated",
-                           {"room": dm, "members": store.list_room_members(room_id=dm["id"], tx=tx)},
-                           room_id=dm["id"])
-                for part in store.list_rooms(kind="department", department_id=SEED_DEPARTMENT, tx=tx)[:1]:
-                    store.create_room_member(part["id"], SEED_ID, tx=tx)
-                    members = store.list_room_members(room_id=part["id"], tx=tx)
-                    store.emit(tx, "room.updated", {"room": part, "members": members}, room_id=part["id"])
+                employee = _enroll(store, tx, SEED_ID, SEED_NAME, SEED_DEPARTMENT)
     except BaseException:
         employee = None
         raise
@@ -465,3 +464,128 @@ def seed(store: StudioStore, studio_dir: Path | str) -> dict | None:
         if employee is None and fresh:
             shutil.rmtree(target, ignore_errors=True)
     return employee
+
+
+def _enroll(store: StudioStore, tx: Any, employee_id: str, name: str, department_id: str) -> dict:
+    """What the seed and the HR employee write in their one transaction: the row (not placed), the 1:1 room,
+    the membership of that room and of the part's room, and the three events in that order. Returns the row."""
+    employee = store.create_employee(name, department_id, id=employee_id, tx=tx)
+    dm = store.create_room("dm", title=name, employee_id=employee_id, tx=tx)
+    store.create_room_member(dm["id"], employee_id, tx=tx)
+    store.emit(tx, "employee.updated", {"employee": employee, "change": "created"})
+    store.emit(tx, "room.updated", {"room": dm, "members": store.list_room_members(room_id=dm["id"], tx=tx)},
+               room_id=dm["id"])
+    for part in store.list_rooms(kind="department", department_id=department_id, tx=tx)[:1]:
+        store.create_room_member(part["id"], employee_id, tx=tx)
+        members = store.list_room_members(room_id=part["id"], tx=tx)
+        store.emit(tx, "room.updated", {"room": part, "members": members}, room_id=part["id"])
+    return employee
+
+
+# --- the HR employee every studio has (H-2; §3.5 · §3.15) ---------------------------------------------------
+def hr_defaults() -> dict:
+    """What the HR part's row takes where it has nothing (§3.4): `guide_template` is hr/GUIDE.md and
+    `default_models` is `{chat: …}` of hr/employee.yaml — the same originals the HR employee is made from."""
+    texts = hr_texts()
+    data, _ = parse(texts["employee.yaml"])
+    chat = _mapping(_mapping(data).get("chat"))
+    return {"guide_template": texts["GUIDE.md"], "default_models": {"chat": dict(chat)} if chat else {}}
+
+
+HIRING_TITLE = "채용에 쓰는 값"  # the section `hiring_notes` makes: in the prompt of HR's chat turn only (§8.4)
+
+
+def hiring_notes(store: StudioStore, checks: Checks, catalog: Iterable[dict] | None = None) -> str:
+    """What HR writes in the draft of a hire and has no tool to ask for — the REST paths that list them are the
+    owner's (§8.4 인사 전용): the projects that are not archived, the parts but HR's own with the `chat` default
+    of each, and of `catalog` (`ProviderRegistry.catalog()`) the models of the Claude Code runners with the
+    efforts each takes. A catalog that is empty or not given leaves the models out. One section, titled the way
+    `assemble` titles its own; it is no part of `assemble` — a task's run does not get it."""
+    lines: list[str] = []
+    projects = store.list_projects()
+    if projects:
+        lines.append("프로젝트 — `project_id` 에 id 를 적는다. 비우면 미배치다:")
+        lines += [f"- `{row['id']}` {row['name']}" for row in projects]
+    else:
+        lines.append("프로젝트: 아직 없다. `project_id` 를 비운다.")
+    lines.append("파트 — `department_id` 와 `employee_yaml` 의 `department` 에 id 를 적는다:")
+    for part in store.list_departments():
+        if part["id"] == HR_DEPARTMENT:
+            continue
+        slot = _mapping(_mapping(part.get("default_models")).get("chat"))
+        default = " · ".join(str(slot[key]) for key in CAP_KEYS if slot.get(key)) or "기본값 없음"
+        lines.append(f"- `{part['id']}` {part['name']} (chat 기본값: {default})")
+    models: dict[str, list] = {}
+    for item in catalog or ():
+        if not (isinstance(item, dict) and item.get("provider") and checks.guarded(item["provider"])):
+            continue
+        for entry in item.get("models") or ():
+            name = _mapping(entry).get("model")
+            if isinstance(name, str) and name:
+                models.setdefault(name, list(entry.get("efforts") or ()))
+    if models:
+        lines.append("모델 — `employee_yaml` 의 `chat` 에 적는다 (지금 이 PC 에서 쓸 수 있는 것):")
+        lines += [f"- `{name}` 노력치 {' · '.join(map(str, efforts))}" if efforts
+                  else f"- `{name}` 노력치 없음 — `effort` 를 적지 않는다" for name, efforts in models.items()]
+    return f"===== {HIRING_TITLE} =====\n" + "\n".join(lines)
+
+
+def fill_hr_part(store: StudioStore) -> dict | None:
+    """Fill the HR part's `guide_template` · `default_models`, each on its own and only while it is empty: a
+    value that is there is never written over. Returns the row when one was written, else None (nothing was
+    empty, or there is no HR part). No event."""
+    with store.transaction() as tx:
+        part = store.get_department(HR_DEPARTMENT, tx=tx)
+        if part is None:
+            return None
+        fields = {key: value for key, value in hr_defaults().items() if value and not part.get(key)}
+        return store.update_department(HR_DEPARTMENT, tx=tx, **fields) if fields else None
+
+
+def _free_name(store: StudioStore, tx: Any, name: str) -> str:
+    """`name`, or `name 2`, `name 3` … — the first no employee has. A retired employee's name is taken (§3.5)."""
+    taken = {row["name"] for row in store.list_employees(include_retired=True, tx=tx)}
+    pick, number = name, 1
+    while pick in taken:
+        number += 1
+        pick = f"{name} {number}"
+    return pick
+
+
+def ensure_hr(store: StudioStore, studio_dir: Path | str) -> dict | None:
+    """Make the HR employee — the folder with its four files, the row (not placed), the 1:1 room — in a DB
+    that has no row of the HR part at all, whatever other employees it has. Retired ones count, so an HR that
+    was retired does not come back, and a second call makes nothing: a name or a file that was changed stays as
+    it is. The name is HR_NAME, or the next free one when an employee has it. As `seed`: a folder left by a
+    start that broke off is used with the files it has, and a folder made here goes when its files cannot be
+    written or the row is not made. Returns the row, or None when nothing was made."""
+    if store.list_employees(department_id=HR_DEPARTMENT, include_retired=True):
+        return None
+    target = folder(studio_dir, HR_ID)
+    fresh = not target.exists()
+    employee = None
+    try:
+        write_files(target, hr_texts(), keep=True)
+        with store.transaction() as tx:
+            if not store.list_employees(department_id=HR_DEPARTMENT, include_retired=True, tx=tx):
+                employee = _enroll(store, tx, HR_ID, _free_name(store, tx, HR_NAME), HR_DEPARTMENT)
+    except BaseException:
+        employee = None
+        raise
+    finally:
+        if employee is None and fresh:
+            shutil.rmtree(target, ignore_errors=True)
+    return employee
+
+
+def hr_guides_behind(store: StudioStore, studio_dir: Path | str) -> list[str]:
+    """The ids of the HR employees who are not retired and whose GUIDE.md does not name HIRING_TITLE: a guide
+    made before the section was, which tells HR nothing of where the ids and the models are. `ensure_hr` writes
+    over no file, so a start can only say so (api.py `ensure_hr`) — the owner brings it up to hr/GUIDE.md by
+    hand. A guide that is not there or cannot be read is left out: nothing in it is behind."""
+    behind = []
+    for row in store.list_employees(department_id=HR_DEPARTMENT):
+        text = _read(folder(studio_dir, row["id"]) / "GUIDE.md")
+        if text is not None and HIRING_TITLE not in text:
+            behind.append(row["id"])
+    return behind
