@@ -69,7 +69,7 @@ from starlette.requests import HTTPConnection
 
 from . import creator, devices, employees, files, guard, importer, jobs as create_jobs
 from . import editor as editor_control
-from . import machine as machine_info, review, sat, tools, work
+from . import machine as machine_info, review, sat, stats, tools, work
 from .inbox import Hooks, Inbox, InboxError
 from .store import StudioStore, StudioStoreError, Tx, now
 from .tasks import (OWNER, STATES, TERMINAL, TEXT_FIELDS, CampaignNotFound, Effects, TaskMachine, TaskNotFound,
@@ -154,6 +154,7 @@ _cutoff: Any = None  # cutoff.Cutoff: what follows the answer of a T4 (§8.3 '�
 _hooks: Hooks | None = None  # what a decision asks of the engine and the turns (interject, commit, chat turn)
 _models: Callable[[], list[dict]] | None = None  # the engine's ProviderRegistry.catalog; None = the config's own
 _run_view: Callable[[str], dict | None] | None = None  # run id -> {id, status, changes_status}; use_engine sets it
+_run_cost: Callable[[str], float] | None = None  # run id -> USD so far (`GET /studio/stats`); use_engine sets it
 _engine: Callable[[], Any] | None = None  # -> the server's RelayEngine as it is now (use_engine); None = no engine
 _tokens: Callable[[str], dict] | None = None  # run id -> the server's `GET /runs/{id}/tokens` (use_engine)
 _liveness: Callable[[str], dict] | None = None  # run id -> RelayEngine.liveness(run id); None = no engine connected
@@ -1075,19 +1076,12 @@ def _clean(value: str | None) -> str | None:
     return (value or "").strip() or None
 
 
-def _progress(counts: dict[str, int]) -> dict:
-    """`progress` of a campaign: every status of §4.1 is a key; done_ratio = done / total (provisional)."""
-    by_status = {status: counts.get(status, 0) for status in STATES}
-    total = sum(by_status.values())
-    return {"by_status": by_status, "total": total, "done_ratio": by_status["done"] / total if total else 0.0}
-
-
 @router.get("/campaigns")
 def list_campaigns(project_id: str | None = None, status: CampaignStatus | None = None,
                    store: StudioStore = Depends(get_store)) -> dict:
     counts = store.count_tasks_by_campaign()
     rows = store.list_campaigns(project_id=project_id, status=status)
-    return {"items": [{**row, "progress": _progress(counts.get(row["id"], {}))} for row in rows]}
+    return {"items": [{**row, "progress": stats.progress(counts.get(row["id"], {}))} for row in rows]}
 
 
 @router.post("/campaigns", status_code=201)
@@ -1300,9 +1294,10 @@ def use_engine(engine: Callable[[], Any] | None, *, tokens: Callable[[str], dict
     `package` of a final review and the alias of a run's patch. A function, not the object — the server's
     engine is a module variable (a test puts another one there), so it is asked for at every read. `tokens`
     is the server's own `GET /runs/{run_id}/tokens`, which the alias here answers with."""
-    global _engine, _tokens, _run_view
+    global _engine, _tokens, _run_view, _run_cost
     _engine, _tokens = engine, tokens
     _run_view = (lambda run_id: review.run_view(engine(), run_id)) if engine is not None else None
+    _run_cost = (lambda run_id: review.run_cost(engine(), run_id)) if engine is not None else None
 
 
 def use_jobs(*, reload: Callable[[], Any], local_file: Path | str, run: Callable[..., int] | None = None,
@@ -1441,6 +1436,26 @@ def decide_inbox(id: str, body: Decide, inbox: Inbox = Depends(get_inbox)) -> di
     """The one way a decision is made (§5.1): `{inbox, task}`. A second decision of the same item is 409
     `already_decided` with the item as it is now."""
     return inbox.decide(id, body.decision, comment=body.comment, data=body.data, via=body.via)
+
+
+# --- stats (S-13, studio/stats.py) ------------------------------------------------------------------------
+@router.get("/stats")
+def get_stats(project_id: str | None = None, campaign_id: str | None = None,
+              frm: str | None = Query(None, alias="from"), to: str | None = None,
+              store: StudioStore = Depends(get_store)) -> dict:
+    """Counted now from tasks, task_events, inbox and the runs — nothing is stored. A bad `from` · `to`: 422."""
+    try:
+        since, until = stats.bounds(frm, to)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    return stats.collect(store, project_id=project_id, campaign_id=campaign_id, since=since, until=until,
+                         cost_of=_run_cost)
+
+
+@router.get("/growth")
+def get_growth(store: StudioStore = Depends(get_store)) -> dict:
+    """Levels, experience, achievements and today's summary, counted now from task_events and inbox by the rule tables of §6.4 — nothing is stored."""
+    return stats.growth(store)
 
 
 # --- rooms ------------------------------------------------------------------------------------------------

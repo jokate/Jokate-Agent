@@ -85,6 +85,14 @@ class Config(BaseModel):
     # when it was made or last told of (N-2 — ARCHITECTURE.md §5.9 재알림). 0 or less = no reminder. Read at every
     # look at the waiting items (the server's start, then once a minute).
     studio_remind_after: float = 7200.0
+    # Katae Studio: the time of day ("HH:MM", this PC's clock) from which the daily report is written — once a
+    # day, in the system room, in the HR employee's name (S-13 — ARCHITECTURE.md §5.9 일일 보고). "" = no report.
+    # A server that starts after that time writes the day's report then; one that already has it writes none.
+    # Read at every look (the server's start, then once a minute).
+    studio_report_at: str = "18:00"
+    # Katae Studio: the light model that words the daily report, one call a day ("" = no AI: the three lines are
+    # made by rule). An answer that is not the three lines, or a call that fails, leaves the rule's lines too.
+    studio_report_model: str = "haiku"
     # Katae Studio: the folder a `source` of `studio_plugins` that is not an absolute path is taken from — the
     # MNYS project's folder, as an absolute path (M-4 — ARCHITECTURE.md §6.4). Each machine has its own, so it
     # goes in relay.config.local.yaml. "" = not set: such a plugin has no source and cannot be chosen.

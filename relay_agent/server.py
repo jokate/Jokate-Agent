@@ -1058,6 +1058,26 @@ def stop_push_reminders() -> None:
     pusher.unwatch()
 
 
+# The daily report (S-13; design/studio/ARCHITECTURE.md §5.9 일일 보고): once `cfg.studio_report_at` has come, the
+# three lines are written in the system room in the HR employee's name — once a day. Which days have their report
+# is read from the room itself, so a server that starts again writes no second one. Only the timer is here: the
+# counts, the wording and the rule of the day are studio/stats.py. Down here for the reasons given above.
+from .studio import stats as studio_stats  # noqa: E402
+
+reporter = studio_stats.Reporter(studio_api.get_store, at=lambda: cfg.studio_report_at,
+                                 model=lambda: cfg.studio_report_model)
+
+
+@app.on_event("startup")
+def start_daily_report() -> None:
+    reporter.watch()
+
+
+@app.on_event("shutdown")
+def stop_daily_report() -> None:
+    reporter.unwatch()
+
+
 # Making a new UE project (M-8; design/studio/ARCHITECTURE.md §6.4 · §7.4): the `register` step of a job writes the
 # repository in this machine's settings file and has the server read it again, on the job's thread. `_reload_repos`
 # answers None, so the step is given a function that answers the registry it left (studio/harness.py `_reloaded`).
@@ -1083,7 +1103,8 @@ def recover_studio_jobs() -> None:
 
 # The editor of a task's run (M-7; design/studio/ARCHITECTURE.md §4.3 T3 · §4.5 · §4.7): the check before a run
 # goes on is `task_runs.editor_ready`, which the queue calls with its slot and which waits `cfg.studio_editor_wait`
-# seconds for the editor. A run that passed is handed to this watch, which looks at the editor while the run is at
+# seconds for the editor, or until the owner's `stop` (the cancel event of the slot: no question about the editor
+# then). A run that passed is handed to this watch, which looks at the editor while the run is at
 # work and cuts the run of one that stops answering. No timer runs until a run that uses the editor has passed the
 # check. Down here for the reasons given above.
 from .studio import editor_watch as studio_editor_watch  # noqa: E402

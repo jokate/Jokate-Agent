@@ -102,6 +102,16 @@ def run_view(engine: Any, run_id: str | None) -> dict | None:
     return None if run is None else {"id": run.id, "status": run.status, "changes_status": run.changes_status}
 
 
+def run_cost(engine: Any, run_id: str | None) -> float:
+    """What that run has cost so far in USD (`RunState.cost_usd`), for `GET /studio/stats` (§6.4). 0.0 when
+    the engine cannot read the run."""
+    run = _load(engine, run_id)
+    try:
+        return float(run.cost_usd or 0.0) if run is not None else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
 # --- result.patch -> files[] ------------------------------------------------------------------------------------
 def _unquote(text: str) -> str:
     """A path as git writes it when it holds a quote, a control character or a byte outside ASCII: in double

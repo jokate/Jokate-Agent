@@ -1,6 +1,7 @@
 """The editor check of a task's run (M-7; §4.3 T3 · §4.5 · §4.7): before a run that uses the editor goes on, and
 while it is at work. The demo relay on the mock runner and an editor that is a list of processes and a port that
 answers or does not: no Unreal editor is run and no AI is called."""
+import dataclasses
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -150,6 +151,73 @@ def test_an_editor_that_cannot_be_started_is_asked_about_the_same_way(line, tmp_
     assert line.run_of(task).status == "pending"
 
 
+def test_a_stop_while_the_editor_is_waited_for_ends_the_wait_with_one_question(line, tmp_path, monkeypatch):  # noqa: F811
+    ed = wire(line, tmp_path)
+    ed.comes_up = False
+    monkeypatch.setattr(line.cfg, "studio_editor_wait", 60.0)
+    passed = []
+    line.fx.watch = lambda task_id, run_id: passed.append((task_id, run_id))
+    task = line.backlog()
+
+    def sleep(seconds):  # the owner stops the task during the second wait
+        ed.sleep(seconds)
+        if len(ed.slept) == 2:
+            line.q.stop(task["id"])
+
+    line.fx.editor_tools = dataclasses.replace(line.fx.editor_tools, sleep=sleep)
+    line.gate.go.set()
+    ok(line.ask(task))
+    wait(lambda: line.row(task)["status"] == "blocked", 30)
+    line.settled(task)
+    assert reasons(line, task) == ["run_cancelled"]  # the one item of a stop: nothing is asked about the editor
+    assert len(ed.slept) == 2 and len(ed.spawned) == 1  # the wait ended there, 4 of its 60 seconds in
+    assert line.run_of(task).status == "cancelled" and line.stages() == [] and passed == []
+    run_id = line.row(task)["run_id"]
+
+    ed.comes_up = True  # `retry`: the check again, and the same run goes on
+    item, = questions(line, task)
+    ok(line.lab.decide(item, "answer", **RETRY))
+    line.settled(task)
+    assert line.row(task)["run_id"] == run_id and line.run_of(task).status == "done" and line.stages() == [*STAGES]
+    assert passed == [(task["id"], run_id)] and len(ed.spawned) == 1
+    assert work.EDITOR_EVENT not in reasons(line, task)
+
+
+def test_the_check_asks_nothing_about_the_editor_of_a_task_that_was_stopped(line, tmp_path, monkeypatch):  # noqa: F811
+    ed = wire(line, tmp_path)
+    ed.comes_up = False
+    passed, seen = [], []
+    line.fx.watch = lambda task_id, run_id: passed.append((task_id, run_id))
+    line.limit = 0  # the queue gives no slot: T3 and the check are this test's
+    task = line.backlog()
+    ok(line.ask(task))
+    row, run = line.start(task)
+    inbox = api.run_inbox()
+    assert (row["status"], run.status) == ("working", "pending")
+
+    assert line.fx.editor_ready(inbox, row, run.id, stopped=lambda: True) is False  # stopped before the look
+    assert not ed.spawned and ed.asked == 0 and questions(line, task) == []
+
+    def healthy(port):  # the owner stops while the port is asked
+        seen.append(port)
+        return ed.healthy(port)
+
+    line.fx.editor_healthy = healthy
+    monkeypatch.setattr(line.cfg, "studio_editor_wait", 0)
+    assert line.fx.editor_ready(inbox, row, run.id, stopped=lambda: bool(seen)) is False  # no answer, and stopped
+    assert len(ed.spawned) == 1 and not ed.slept and questions(line, task) == []
+    ed.answers = True
+    assert line.fx.editor_ready(inbox, row, run.id, stopped=lambda: bool(seen)) is False  # it answers, and stopped
+    assert passed == [] and questions(line, task) == [] and line.row(task)["status"] == "working"
+
+    assert line.fx.editor_ready(inbox, row, run.id, stopped=lambda: False) is True  # not stopped: as with no `stopped`
+    assert passed == [(task["id"], run.id)]
+    ed.answers = False
+    assert line.fx.editor_ready(inbox, row, run.id, stopped=lambda: False) is False
+    assert reasons(line, task) == ["editor_unresponsive"] and line.row(task)["status"] == "blocked"
+    assert line.run_of(task).status == "pending" and len(ed.spawned) == 1
+
+
 def test_a_task_that_does_not_use_the_editor_is_not_checked(line, tmp_path):  # noqa: F811
     ed = wire(line, tmp_path, port=None)  # the repository names the editor's server, the project has no port
     passed = []
@@ -285,6 +353,38 @@ def test_a_task_that_waits_already_gets_no_second_question_when_its_editor_is_lo
     assert len(run_rows(line, task)) == 1
 
 
+def test_a_run_that_ended_before_the_cut_keeps_its_question_and_gets_a_row(line, tmp_path, monkeypatch):  # noqa: F811
+    ed = wire(line, tmp_path)
+    ed.running = ed.answers = True
+    task = line.backlog()
+    ok(line.ask(task))
+    wait(lambda: line.gate.now == 1)
+    inbox, run_id = api.run_inbox(), line.row(task)["run_id"]
+
+    def ended(run_id):  # the run ended between the look at it and the cut
+        raise ValueError(f"run {run_id} is already done")
+
+    with monkeypatch.context() as patch:  # not `undo()`: that would take the patches of `line` with it
+        patch.setattr(line.engine, "cancel", ended)
+        assert work.editor_lost(line.engine, inbox, task["id"], run_id) is False  # not cut
+    assert line.row(task)["status"] == "blocked" and reasons(line, task) == ["editor_unresponsive"]
+    last = run_rows(line, task)[-1]  # the question stays, and the row says what became of the run
+    assert last["reason"] == work.EDITOR_ENDED != work.EDITOR_CUT
+    assert last["detail"] == {"run_id": run_id, "event": "editor_unresponsive"}
+
+    line.gate.go.set()  # the run ends by itself: the task waits already, nothing is asked besides
+    line.settled(task)
+    assert line.run_of(task).status == "done" and reasons(line, task) == ["editor_unresponsive"]
+    assert len(run_rows(line, task)) == 1
+
+    item, = questions(line, task)  # `retry`: the editor is checked and the same run is taken up again
+    asked = ed.asked
+    ok(line.lab.decide(item, "answer", **RETRY))
+    line.settled(task)
+    assert ed.asked > asked and line.row(task)["run_id"] == run_id and line.run_of(task).status == "done"
+    assert work.EDITOR_EVENT not in reasons(line, task)
+
+
 def test_a_watch_ends_when_there_is_nothing_left_to_watch():
     task = {"id": "tsk_1", "run_id": "run_1", "status": "working", "project_id": "prj_1"}
     state = {"task": task, "holds": True, "alive": True, "store": True}
@@ -343,5 +443,8 @@ def test_the_documents_say_what_was_settled():
     assert "| `relay_agent/studio/editor_watch.py` |" in text and "`Config.studio_editor_wait`(기본 300초)" in text
     assert "`pipeline.py` 1107–1137, 호출 1677–1679" in text and "`uses_editor`" in text
     assert "`editor` 는 `null` 로 확정한다" in text
+    assert "기다리는 동안 owner 가 `stop` 하면" in text and "결재는 `run_cancelled` 하나다" in text
+    assert "런이 이미 끝나 있으면 끊지 않는다" in text and "| M-7 | 확정 (MCP 전송 형식은 잠정) |" in text
+    assert "| `RelayEngine._advance` | `pipeline.py` 1620–1679 |" in text and "1510–1565" not in text
     manual = (DESIGN / "VERIFICATION.md").read_text(encoding="utf-8")
     assert "M-7 작업 시작 전 에디터 검사와 무응답 결재" in manual and "M-7 꺼진 상태에서 스크린샷 요청 → 이미지" in manual

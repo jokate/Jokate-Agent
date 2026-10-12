@@ -36,6 +36,7 @@ without a project context `studio` and the registry servers the employee picked 
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import os
 import re
@@ -84,8 +85,14 @@ EDITOR_DOWN = ("작업 런을 진행하기 전에 에디터가 응답하지 않�
 EDITOR_LOST = ("작업 런이 도는 동안 에디터가 응답하지 않아 런을 끊었다 (모달 창 · 크래시일 수 있다).\n"
                "에디터를 확인한 뒤 다시 시도한다 — 에디터를 다시 검사하고 런을 잇는다.")
 EDITOR_CUT = "에디터가 응답하지 않아 런을 끊었다"
+# the `run` row of `editor_lost` when the question was filed and the run had ended before it could be cut
+EDITOR_ENDED = "에디터가 응답하지 않았지만 런은 끊기 전에 이미 끝나 있었다"
 
 log = logging.getLogger(__name__)
+
+
+class _Stopped(Exception):
+    """`WorkEffects.editor_ready` only: the owner's `stop` came while the editor was waited for."""
 
 
 def _problem(code: str, stage: str | None, message: str) -> dict:
@@ -284,7 +291,9 @@ class WorkEffects(Effects):
     The editor check (M-7; §4.3 T3 · §4.7) is `editor_ready`, which the queue calls with its slot, after T3 and
     before a run is taken up again: a run that uses the editor (`uses_editor`) in a project with an `mcp_port`
     goes on only once that editor answers — one that is off is started and waited for, `cfg.studio_editor_wait`
-    seconds —, else the system asks `editor_unresponsive` (T4) and the run stays as it was. `editor_engines` ·
+    seconds —, else the system asks `editor_unresponsive` (T4) and the run stays as it was. The queue also gives
+    it the cancel event of the slot (`stopped`): an owner's `stop` ends the wait at its next look and nothing is
+    asked about the editor — the queue files `run_cancelled`. `editor_engines` ·
     `editor_processes` · `editor_healthy` · `editor_tools` are where it reads the computer and how it starts the
     editor; a test replaces them. `watch` (server.py sets it: `editor_watch.EditorWatch.begin`) is told of each
     run that passed and looks at the editor while the run is at work. None = nobody looks."""
@@ -380,17 +389,37 @@ class WorkEffects(Effects):
                 spec = None
         return project if uses_editor(run, spec) else None
 
-    def editor_ready(self, inbox, task: dict, run_id: str) -> bool:
+    def editor_ready(self, inbox, task: dict, run_id: str, stopped: Callable[[], bool] | None = None) -> bool:
         """§4.3 T3 '에디터 검사' · §4.7 '런을 이을 때': may that run go on? True for a run that is not checked
         (`_editor_project`) and once the project's editor answers — `watch` is told then. An editor that cannot
         be started or does not answer within `cfg.studio_editor_wait` seconds: the system asks
         `editor_unresponsive` (T4, the task ends in blocked) and the answer is False — the run is not advanced
         and stays as it was. A task that left `working` meanwhile gets no question. Called on the thread of the
-        task's slot, which it holds for as long as the wait."""
+        task's slot, which it holds for as long as the wait.
+
+        `stopped` (the queue: the cancel event of that slot) says the owner stopped the task. It is asked before
+        the editor is started, before and after each wait of `bring_up`, and before the question or the watch:
+        once it says so the answer is False with no question and no watch — an editor is not what stopped that
+        run, and the queue files `run_cancelled` for it (`_settle`). The wait ends within one `poll`."""
         store = inbox.store
         project = self._editor_project(store, task, run_id)
         if project is None:
             return True
+        gone = stopped or (lambda: False)
+        if gone():
+            return False  # no editor is started for a run that will not go on
+        tools = self.editor_tools
+        if stopped is not None:
+            nap = tools.sleep
+
+            def sleep(seconds: float) -> None:
+                if gone():
+                    raise _Stopped
+                nap(seconds)
+                if gone():
+                    raise _Stopped
+
+            tools = dataclasses.replace(tools, sleep=sleep)  # `bring_up` itself knows nothing of a stop
         try:
             engines = list(self.editor_engines())
         except Exception:  # noqa: BLE001 - no list of engines is an editor that cannot be started
@@ -399,14 +428,21 @@ class WorkEffects(Effects):
         wait = float(getattr(self.cfg, "studio_editor_wait", editor_control.START_TIMEOUT))
         try:
             editor_control.bring_up(project, store.list_projects(), engines, processes=self.editor_processes,
-                                    healthy=self.editor_healthy, tools=self.editor_tools, timeout=wait)
+                                    healthy=self.editor_healthy, tools=tools, timeout=wait)
+        except _Stopped:
+            log.info("studio: 작업 %s 이 중지돼 에디터를 더 기다리지 않는다 (런 %s)", task["id"], run_id)
+            return False
         except editor_control.Refused as e:
             log.info("studio: 작업 %s 의 런 %s 을 진행하지 않는다 — %s", task["id"], run_id, e.message)
+            if gone():
+                return False  # stopped meanwhile: the owner is not asked about the editor of a task they stopped
             try:
                 ask(inbox, task["id"], EDITOR_EVENT, EDITOR_DOWN.format(why=e.message), error=e.message)
             except TransitionError as t:
                 log.info("studio: 작업 %s 에 에디터 무응답을 묻지 못했다: %s", task["id"], t.detail)
             return False
+        if gone():
+            return False  # it answers, and the run does not go on: nothing to watch
         if self.watch is not None:
             self.watch(task["id"], run_id)
         return True
@@ -629,21 +665,30 @@ def editor_lost(engine, inbox, task_id: str, run_id: str) -> bool:
     is asked first (`editor_unresponsive`, T4): a cut that came first would have the thread of the slot find a
     `cancelled` run of a working task and ask `run_cancelled` besides (§4.7 의 표). In blocked · review, and
     working in the line, no question is filed — the item of the T4 or T6 is there already, or the check before
-    the run is taken up again asks. A run that ended meanwhile (`OSError` · `ValueError`) was not cut."""
+    the run is taken up again asks. A run that ended meanwhile (`OSError` · `ValueError`) was not cut: False.
+    If the question was filed by then it stays — the editor did not answer, and `retry` checks it again and
+    takes the run up as it is — and a `run` row (`EDITOR_ENDED`, the same detail) says the run was not cut, so
+    the blocked task is not left with a question and no row."""
     task = inbox.store.get_task(task_id)
     if task is None or task["run_id"] != run_id:
         return False
     if getattr(_load(engine, run_id), "status", None) != "running":
         return False
+    asked = False
     if task["status"] == "working" and task["queued_at"] is None:
         try:
             ask(inbox, task_id, EDITOR_EVENT, EDITOR_LOST)
+            asked = True
         except TransitionError as e:  # it left working since that look: its own item is there
             log.info("studio: 작업 %s 에 에디터 무응답을 묻지 못했다: %s", task_id, e.detail)
     try:
         engine.cancel(run_id)
-    except (OSError, ValueError):
-        return False  # ended or closed already
+    except (OSError, ValueError):  # ended or closed already
+        if asked:
+            log.info("studio: 작업 %s 의 런 %s 은 끊기 전에 끝나 있었다 — 결재는 그대로 둔다", task_id, run_id)
+            inbox.machine.record(task_id, SYSTEM, "run", EDITOR_ENDED,
+                                 detail={"run_id": run_id, "event": EDITOR_EVENT})
+        return False
     log.info("studio: 작업 %s 의 런 %s 을 에디터 무응답으로 끊었다", task_id, run_id)
     inbox.machine.record(task_id, SYSTEM, "run", EDITOR_CUT, detail={"run_id": run_id, "event": EDITOR_EVENT})
     return True

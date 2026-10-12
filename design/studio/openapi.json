@@ -2037,6 +2037,30 @@
         ]
       }
     },
+    "/studio/growth": {
+      "get": {
+        "description": "Levels, experience, achievements and today's summary, counted now from task_events and inbox by the rule tables of §6.4 — nothing is stored.",
+        "operationId": "get_growth_studio_growth_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Growth Studio Growth Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Growth",
+        "tags": [
+          "studio"
+        ]
+      }
+    },
     "/studio/guard/check": {
       "post": {
         "description": "The guard hook asks about a command of the ask list (§10.4). `{decision, message, inbox_id, end_turn}`.",
@@ -4150,6 +4174,106 @@
           }
         },
         "summary": "Get Run Tokens",
+        "tags": [
+          "studio"
+        ]
+      }
+    },
+    "/studio/stats": {
+      "get": {
+        "description": "Counted now from tasks, task_events, inbox and the runs — nothing is stored. A bad `from` · `to`: 422.",
+        "operationId": "get_stats_studio_stats_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "project_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Project Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "campaign_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Campaign Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "from",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "From"
+            }
+          },
+          {
+            "in": "query",
+            "name": "to",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "To"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Stats Studio Stats Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Stats",
         "tags": [
           "studio"
         ]

@@ -32,7 +32,8 @@ and the table — is studio/work.py's (`stopped`), and so is the recovery at the
 whose step 3 is this queue's `kick`. A run that stops for approval is filed by `runs.RunSink` before `advance`
 is back; the table files it only when the sink did not. The editor check (M-7) is `editor_ready`: the effects'
 own (`WorkEffects.editor_ready` — it starts the editor, waits for it and files the T4 itself); effects that have
-none let every run go on.
+none let every run go on. It is given the cancel event of the slot: an owner's `stop` ends the wait and no
+`editor_unresponsive` is filed — `_settle` files `run_cancelled`, the one item of a task that was stopped.
 """
 
 from __future__ import annotations
@@ -268,16 +269,17 @@ class TaskQueue:
             return False
 
     # --- the thread of a slot (§4.7) ------------------------------------------------------------------------
-    def editor_ready(self, task: dict, run_id: str) -> bool:
+    def editor_ready(self, task: dict, run_id: str, stopped=None) -> bool:
         """The editor check before a run that uses MCP goes on (§4.3 T3 · §4.7), after T3 and before a run is
-        taken up again: the effects' `editor_ready(inbox, task, run_id)` (work.py), which has filed the T4 when
-        it says no. Effects without one, or no store: every run goes on. False: the run is not advanced and the
-        slot is let go."""
+        taken up again: the effects' `editor_ready(inbox, task, run_id, stopped=)` (work.py), which has filed
+        the T4 when it says no. Effects without one, or no store: every run goes on. False: the run is not
+        advanced and the slot is let go. `stopped` (`_go`: `is_set` of the slot's cancel event) lets an owner's
+        `stop` end the wait for the editor: False then too, with no T4 of the check — `_settle` files it."""
         check = getattr(self.effects, "editor_ready", None)
         inbox = self.inbox()
         if check is None or inbox is None:
             return True
-        return bool(check(inbox, task, run_id))
+        return bool(check(inbox, task, run_id, stopped=stopped))
 
     def _work(self, task_id: str) -> None:
         """What a slot is for: T3 or leaving the line, the run until it stops, and then the steps of §4.7 —
@@ -325,8 +327,8 @@ class TaskQueue:
             slot = self._slots.get(task_id)
             if slot is not None:
                 slot.run_id = run_id
-        if not run_id or not self.editor_ready(row, run_id):
-            return
+        if not run_id or not self.editor_ready(row, run_id, slot.cancel.is_set if slot is not None else None):
+            return  # no run, an editor that does not answer (its T4 is filed), or a `stop` during the wait
         with self._lock:
             if slot is None or slot.stopped:
                 return  # `stop` came first: the run is not advanced, and _settle files the T4

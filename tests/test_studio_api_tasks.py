@@ -215,7 +215,7 @@ def test_campaigns_list_filters_and_adds_progress(world):
     assert {k: v for k, v in items[0].items() if k != "progress"} == world.store.get_campaign(a["id"])
     progress = items[0]["progress"]
     assert progress["by_status"] == {**dict.fromkeys(tasks.STATES, 0), "backlog": 1, "done": 1, "cancelled": 1}
-    assert progress["total"] == 3 and progress["done_ratio"] == pytest.approx(1 / 3)
+    assert progress["total"] == 3 and progress["done_ratio"] == pytest.approx(1 / 2)  # the cancelled one is left out
     assert items[1]["progress"] == {"by_status": dict.fromkeys(tasks.STATES, 0), "total": 0, "done_ratio": 0.0}
 
     def only(query):

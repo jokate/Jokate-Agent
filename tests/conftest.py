@@ -53,6 +53,16 @@ def no_chat_turn_on_the_servers_engine(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def no_daily_report_from_a_tests_server(monkeypatch):
+    """A test that starts the server app must not have the daily report written into its studio DB — whether
+    it is would follow the time of day the test runs at — nor the light model asked to word it (S-13). The
+    timer is not started; tests/test_studio_stats.py keeps the real `watch` and calls it with timers of its own."""
+    from relay_agent.studio import stats
+
+    monkeypatch.setattr(stats.Reporter, "watch", lambda self, *args, **kwargs: None)
+
+
+@pytest.fixture(autouse=True)
 def no_push_with_this_pcs_key(monkeypatch):
     """The server module's FCM sender (N-1, studio/push.py) reads the key file `Config.studio_fcm_key` names. On a
     PC that has one, every test that files an inbox item through the server would send a real push — so no key

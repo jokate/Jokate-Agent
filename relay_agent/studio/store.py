@@ -47,6 +47,12 @@ def now() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
+def _narrow(pairs: tuple[tuple[str, Any], ...]) -> tuple[str, tuple]:
+    """` AND <condition>` for every (condition with one `?`, value) whose value is not None, and those values."""
+    kept = [(cond, value) for cond, value in pairs if value is not None]
+    return "".join(f" AND {cond}" for cond, _ in kept), tuple(value for _, value in kept)
+
+
 # --- row <-> column conversion ------------------------------------------------------------------------
 _BOOL = frozenset({"builtin", "muted", "is_milestone", "upstream_rejected"})
 _JSON_KEY = {"decision_json": "decision_data"}  # the one key that is not "suffix removed"
@@ -524,9 +530,13 @@ class StudioStore:
                                 order="closed_at DESC, rowid DESC", limit=limit)
         return self._select(INBOX, filters, tx, order="created_at, rowid", limit=limit)
 
-    def count_inbox(self, *, status: str | None = None, tx: Tx | None = None) -> int:
-        sql = "SELECT COUNT(*) AS n FROM inbox" + (" WHERE status = ?" if status is not None else "")
-        return self._all(sql, (status,) if status is not None else (), tx)[0]["n"]
+    def count_inbox(self, *, status: str | None = None, project_id: str | None = None,
+                    campaign_id: str | None = None, tx: Tx | None = None) -> int:
+        """`campaign_id`: only the items of that campaign's tasks (an item without a task is in no campaign)."""
+        where, args = _narrow((("i.status = ?", status), ("i.project_id = ?", project_id),
+                               ("t.campaign_id = ?", campaign_id)))
+        sql = "SELECT COUNT(*) AS n FROM inbox i LEFT JOIN tasks t ON t.id = i.task_id WHERE 1 = 1" + where
+        return self._all(sql, args, tx)[0]["n"]
 
     def update_inbox_item(self, inbox_id: str, *, tx: Tx | None = None, **fields) -> dict | None:
         return self._update(INBOX, {"id": inbox_id}, fields, tx)
@@ -556,15 +566,70 @@ class StudioStore:
         found = {r["status"]: r["n"] for r in self._all(sql, (project_id,), tx)}
         return {status: found.get(status, 0) for status in STATES}
 
-    def count_tasks_by_campaign(self, *, tx: Tx | None = None) -> dict[str, dict[str, int]]:
+    def count_tasks_by_campaign(self, *, project_id: str | None = None, campaign_id: str | None = None,
+                                tx: Tx | None = None) -> dict[str, dict[str, int]]:
         """Campaign id -> {status: count}, only the statuses that occur (`progress` of §6.4 fills the zeros).
-        A campaign without tasks is not a key."""
-        sql = ("SELECT campaign_id, status, COUNT(*) AS n FROM tasks WHERE campaign_id IS NOT NULL"
-               " GROUP BY campaign_id, status")
+        A campaign without tasks is not a key. `project_id` · `campaign_id`: only the tasks of that one."""
+        where, args = _narrow((("project_id = ?", project_id), ("campaign_id = ?", campaign_id)))
+        sql = ("SELECT campaign_id, status, COUNT(*) AS n FROM tasks WHERE campaign_id IS NOT NULL" + where
+               + " GROUP BY campaign_id, status")
         out: dict[str, dict[str, int]] = {}
-        for r in self._all(sql, (), tx):
+        for r in self._all(sql, args, tx):
             out.setdefault(r["campaign_id"], {})[r["status"]] = r["n"]
         return out
+
+    # --- read models of `GET /studio/stats` and the daily report (S-13, studio/stats.py) ------------------
+    # The shared filters: `project_id` · `campaign_id` are the task's; `since <= time < until` in the form of
+    # now() (local, no zone — compared as text). A None filter is not applied.
+    def list_done_tasks(self, *, project_id: str | None = None, campaign_id: str | None = None,
+                        since: str | None = None, until: str | None = None, tx: Tx | None = None) -> list[dict]:
+        """`{id, title, assignee_id, at}` of the tasks that became `done` in the period, the earliest first.
+        The time is the `at` of the task_events row — `done` is final, so a task has one such row. The assignee
+        is the task's of now."""
+        where, args = _narrow((("t.project_id = ?", project_id), ("t.campaign_id = ?", campaign_id),
+                               ("e.at >= ?", since), ("e.at < ?", until)))
+        sql = ("SELECT t.id AS id, t.title AS title, t.assignee_id AS assignee_id, e.at AS at FROM task_events e"
+               " JOIN tasks t ON t.id = e.task_id WHERE e.to_status = 'done'" + where + " ORDER BY e.id")
+        return self._all(sql, args, tx)
+
+    def list_run_starts(self, *, project_id: str | None = None, campaign_id: str | None = None,
+                        since: str | None = None, until: str | None = None, tx: Tx | None = None) -> list[dict]:
+        """`{task_id, assignee_id, run_id, at}` of the task runs started in the period: the T3 rows of
+        task_events, whose `detail.run_id` is the run made for that start (tasks.py `_commit`). `tasks.run_id`
+        would not do — it is NULL once a task is rejected or cancelled, and holds only the last run. The
+        assignee is the task's of now: the T3 row has no assignee in it (actor system, detail `run_id` alone)."""
+        where, args = _narrow((("t.project_id = ?", project_id), ("t.campaign_id = ?", campaign_id),
+                               ("e.at >= ?", since), ("e.at < ?", until)))
+        sql = ("SELECT e.task_id AS task_id, t.assignee_id AS assignee_id, e.at AS at, e.detail_json AS detail_json"
+               " FROM task_events e JOIN tasks t ON t.id = e.task_id WHERE e.rule = 'T3'" + where + " ORDER BY e.id")
+        out = []
+        for r in self._all(sql, args, tx):
+            run_id = (r["detail"] or {}).get("run_id")
+            if run_id:
+                out.append({"task_id": r["task_id"], "assignee_id": r["assignee_id"], "run_id": run_id, "at": r["at"]})
+        return out
+
+    def list_inbox_waits(self, *, project_id: str | None = None, campaign_id: str | None = None,
+                         since: str | None = None, until: str | None = None, tx: Tx | None = None) -> list[dict]:
+        """`{id, created_at, closed_at}` of the items decided in the period (by `closed_at`), the earliest
+        first. A cancelled item was not decided and is left out. `project_id` is the item's own; `campaign_id`
+        is that of its task."""
+        where, args = _narrow((("i.project_id = ?", project_id), ("t.campaign_id = ?", campaign_id),
+                               ("i.closed_at >= ?", since), ("i.closed_at < ?", until)))
+        sql = ("SELECT i.id AS id, i.created_at AS created_at, i.closed_at AS closed_at FROM inbox i"
+               " LEFT JOIN tasks t ON t.id = i.task_id WHERE i.status = 'decided'" + where
+               + " ORDER BY i.closed_at, i.rowid")
+        return self._all(sql, args, tx)
+
+    def list_passes(self, *, tx: Tx | None = None) -> list[dict]:
+        """`{id, title, assignee_id, at, reworked}` of every task the owner passed — the T7 rows of task_events,
+        the earliest first (`GET /studio/growth`, §6.4). `reworked`: that task has a T8 (rework) or T9 (taken
+        back) row, so it was not passed at its first review; `done` is final, so the value does not change
+        once the row is there. The assignee is the task's of now. No filter: growth is the whole studio's."""
+        sql = ("SELECT t.id AS id, t.title AS title, t.assignee_id AS assignee_id, e.at AS at, EXISTS (SELECT 1"
+               " FROM task_events r WHERE r.task_id = e.task_id AND r.rule IN ('T8', 'T9')) AS reworked"
+               " FROM task_events e JOIN tasks t ON t.id = e.task_id WHERE e.rule = 'T7' ORDER BY e.id")
+        return [{**row, "reworked": bool(row["reworked"])} for row in self._all(sql, (), tx)]
 
     def count_unread(self, room_id: str | None = None, *, tx: Tx | None = None) -> dict[str, int]:
         """`unread` per room: messages after rooms.owner_read_id that the owner did not write.
