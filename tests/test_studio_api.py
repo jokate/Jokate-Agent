@@ -221,7 +221,7 @@ def test_routes_are_the_s3_rows_of_the_document():
     for line in section.splitlines():
         cells = [c.strip() for c in line.strip().strip("|").split("|")]
         row = re.fullmatch(r"`(GET|POST|PATCH|PUT|DELETE) (/studio/[^`]+)`", cells[0]) if len(cells) == 5 else None
-        if row and re.search(r"S-3|M-6", cells[4]):
+        if row and re.search(r"S-3|M-6|M-8", cells[4]):
             doc.add((row.group(1), row.group(2)))
     scope = ("/studio/projects", "/studio/jobs", "/studio/departments", "/studio/employees", "/studio/rooms",
              "/studio/attachments")
@@ -232,7 +232,17 @@ def test_routes_are_the_s3_rows_of_the_document():
     # S-3's 14 and M-6's one, and the members of a task room (S-9); nothing else of M-* · H-* · S-7 and later
     muted = {("PATCH", "/studio/rooms/{id}")}  # N-2: a room is muted (tests/test_studio_push.py)
     assert "| `PATCH /studio/rooms/{id}` | `{muted}` |" in section
-    assert len(doc) == 15 and not doc & (members | muted) and built == doc | members | muted
+    made = {("POST", "/studio/projects/create"), ("GET", "/studio/projects/create/options"),
+            ("GET", "/studio/jobs/{id}")}  # M-8: making a project as a job (tests/test_studio_jobs.py)
+    assert made <= doc and "| `POST /studio/jobs/{id}/retry` · `/cleanup` |" in section  # one row for the two
+    failed = {("POST", f"/studio/jobs/{{id}}/{what}") for what in ("retry", "cleanup")}  # M-8: a job that failed
+    editor = {("GET", "/studio/projects/{id}/editor"), *(("POST", f"/studio/projects/{{id}}/editor/{what}")
+                                                         for what in ("start", "stop", "screenshot"))}  # M-7
+    assert "| `POST /studio/projects/{id}/editor/start` · `/stop` |" in section  # one row for the two
+    assert "| `GET /studio/projects/{id}/editor` |" in section  # (tests/test_studio_editor.py)
+    assert "| `POST /studio/projects/{id}/editor/screenshot` |" in section
+    others = members | muted | failed | editor
+    assert len(doc) == 18 and not doc & others and built == doc | others
 
 
 def test_studio_error_carries_the_fields_of_its_code():

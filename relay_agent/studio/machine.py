@@ -7,6 +7,9 @@ Nothing here imports api, cli or server. What is slow to ask or belongs to the s
 read calls only — nothing is ever written to it), the list of processes, the port of an editor's MCP, the disk.
 A source that fails empties its own field and nothing else: the screen that shows what is wrong must not be the
 thing that fails.
+
+The talk with an editor's MCP port is here too (M-7): `mcp_send` — one command, one answer — and `health_check`,
+what `healthy` means in the report and in studio/editor.py, which starts, stops and photographs an editor.
 """
 
 from __future__ import annotations
@@ -19,6 +22,7 @@ import re
 import shutil
 import socket
 import subprocess
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -38,6 +42,9 @@ EDITOR_QUERY = ("[Console]::OutputEncoding = [Text.Encoding]::UTF8; "
                 "Select-Object ProcessId, Name, CommandLine | ConvertTo-Json -Compress")
 QUERY_TIMEOUT = 8.0  # seconds PowerShell has to answer
 PORT_TIMEOUT = 0.3   # seconds a connection to an editor's MCP port may take
+HEALTH_COMMAND = "health_check"    # the MCP command an editor is asked (provisional: the plugin's source was not read)
+HEALTH_TIMEOUT = 3.0               # seconds an editor has to answer it
+MCP_MAX_BYTES = 8 * 1024 * 1024    # an answer longer than this is not read on
 
 
 def is_windows() -> bool:
@@ -143,11 +150,55 @@ def uproject_of(cmdline: str) -> str | None:
 
 
 def port_open(port: Any, host: str = "127.0.0.1", timeout: float = PORT_TIMEOUT) -> bool:
-    """Does something on this computer listen on `port`? What `healthy` means until M-7 has a health check."""
+    """Does something on this computer listen on `port`? What the port allocation asks (studio/plugins.py);
+    whether an editor answers is `health_check`."""
     try:
         with socket.create_connection((host, int(port)), timeout=timeout):
             return True
     except (OSError, TypeError, ValueError):
+        return False
+
+
+def mcp_send(port: Any, command: str, params: dict | None = None, *, timeout: float,
+             host: str = "127.0.0.1") -> dict:
+    """One command to the editor plugin that listens on `port`, and its answer (M-7). Provisional — the form of
+    the public unreal-mcp, not read from the plugin's source: `{"type": command, "params": {…}}` goes out once as
+    UTF-8 JSON (no newline, the sending side is not shut down), and the answer is read until the bytes are one
+    JSON object or the editor closes. `timeout` is for the whole exchange. OSError: nobody listens, or no answer
+    in time. ValueError: what came is not a JSON object."""
+    request = json.dumps({"type": command, "params": dict(params or {})}, ensure_ascii=False).encode("utf-8")
+    deadline = time.monotonic() + timeout
+    got = b""
+    with socket.create_connection((host, int(port)), timeout=timeout) as conn:
+        conn.sendall(request)
+        while len(got) <= MCP_MAX_BYTES:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise TimeoutError(f"MCP 포트 {port} 가 {timeout:g}초 안에 답하지 않았다")
+            conn.settimeout(left)
+            chunk = conn.recv(65536)
+            if not chunk:
+                break  # the editor closed: what came is the whole answer
+            got += chunk
+            try:
+                answer = json.loads(got.decode("utf-8"))
+            except ValueError:  # not whole yet (a cut multi-byte character is one too)
+                continue
+            if isinstance(answer, dict):
+                return answer
+    answer = json.loads(got.decode("utf-8"))  # ValueError when it is empty, cut or too long
+    if not isinstance(answer, dict):
+        raise ValueError(f"MCP 포트 {port} 의 응답이 JSON 객체가 아니다")
+    return answer
+
+
+def health_check(port: Any, *, timeout: float = HEALTH_TIMEOUT, send: Callable[..., dict] = mcp_send) -> bool:
+    """Does the editor on `port` answer `health_check` in time? What `healthy` means (§6.4, M-7). Any JSON object
+    counts, one that says `status: error` too: an editor that answers is not stuck. An editor behind a modal
+    window or one that crashed sends nothing, and that — like every other failure — is False."""
+    try:
+        return isinstance(send(port, HEALTH_COMMAND, timeout=timeout), dict)
+    except Exception:  # noqa: BLE001 — no port, nobody listening, no answer, not JSON
         return False
 
 
@@ -156,10 +207,12 @@ def _same(path: Any) -> str:
     return str(path or "").replace("\\", "/").rstrip("/").lower()
 
 
-def editors(processes: list[dict], projects: list[dict], healthy: Callable[[Any], bool] = port_open) -> list[dict]:
+def editors(processes: list[dict], projects: list[dict],
+            healthy: Callable[[Any], bool] = health_check) -> list[dict]:
     """`[{project_id, pid, mcp_port, healthy, uproject}]`, by pid. An editor belongs to the project whose
     folder (`path`) holds its .uproject — the deepest one when folders are nested. An editor of no registered
-    project has no `project_id` and no `mcp_port`, and is not healthy: there is no port to ask."""
+    project has no `project_id` and no `mcp_port`, and is not healthy: there is no port to ask. `healthy` is
+    the MCP `health_check` of that port (M-7)."""
     homes = sorted(((_same(p.get("path")), p) for p in projects if _same(p.get("path"))),
                    key=lambda home: len(home[0]), reverse=True)
     found = []
@@ -204,7 +257,7 @@ class Sources:
     (None = nobody gave one: an empty list, an empty version)."""
     engines: Callable[[], dict[str, str]] = read_engine_registry   # {version: folder}
     processes: Callable[[], list[dict]] = editor_processes         # [{pid, name, cmdline}]
-    healthy: Callable[[Any], bool] = port_open                     # mcp_port -> does it answer
+    healthy: Callable[[Any], bool] = health_check                  # mcp_port -> does the editor answer (M-7)
     usage: Callable[[Any], Any] = shutil.disk_usage                # folder -> (.total, .free)
     doctor: Callable[[], list[dict]] | None = None                 # cli.py `doctor_checks`
     providers: Callable[[], list[dict]] | None = None              # server.py `GET /providers`

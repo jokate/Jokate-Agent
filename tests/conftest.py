@@ -1,8 +1,29 @@
 import os
+from pathlib import Path
 
 import pytest
 
 from relay_agent.pipeline import RelayEngine
+
+
+@pytest.fixture(autouse=True)
+def no_recovery_of_this_pcs_jobs(monkeypatch, tmp_path_factory):
+    """A server that starts makes the job files a stopped server left open `failed` (studio/api.py
+    `recover_jobs`, the startup hook of server.py). With the real settings that is this PC's own
+    `runs/studio/jobs`: a test that opens a TestClient in a `with` would fail the jobs of a server that is
+    running here. The real one is called only when the studio folder is under pytest's tmp folder."""
+    from relay_agent.studio import api
+
+    real, base = api.recover_jobs, tmp_path_factory.getbasetemp().resolve()
+
+    def recover_jobs() -> list[dict]:
+        try:
+            ours = Path(api._config().studio_dir).resolve().is_relative_to(base)
+        except Exception:  # noqa: BLE001 - no settings: nothing to look at
+            ours = False
+        return real() if ours else []
+
+    monkeypatch.setattr(api, "recover_jobs", recover_jobs)
 
 
 @pytest.fixture(autouse=True)

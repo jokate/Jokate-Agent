@@ -312,7 +312,7 @@ def test_the_server_hands_over_its_doctor_providers_and_code_version(served):
     assert src.version() == served.RUNNING_CODE and re.fullmatch(r"[0-9a-f]{12}", src.version())
     assert src.providers is served.list_providers and src.doctor is served._doctor_checks
     assert src.engines is machine.read_engine_registry and src.processes is machine.editor_processes
-    assert src.healthy is machine.port_open
+    assert src.healthy is machine.health_check  # M-7: the MCP health_check, not a bare connection
     brief = api.machine_brief()  # what the stream's hello carries (§7.1)
     assert list(brief) == BRIEF and brief == {
         "name": platform.node(), "server_version": served.RUNNING_CODE, "schema_version": MIGRATIONS[-1][0],

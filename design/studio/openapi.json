@@ -229,6 +229,36 @@
         "title": "DeviceSettings",
         "type": "object"
       },
+      "EditorShot": {
+        "additionalProperties": false,
+        "properties": {
+          "room_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Room Id"
+          }
+        },
+        "title": "EditorShot",
+        "type": "object"
+      },
+      "EditorStop": {
+        "additionalProperties": false,
+        "properties": {
+          "force": {
+            "default": true,
+            "title": "Force",
+            "type": "boolean"
+          }
+        },
+        "title": "EditorStop",
+        "type": "object"
+      },
       "GuardCheck": {
         "additionalProperties": false,
         "properties": {
@@ -978,6 +1008,55 @@
           "name"
         ],
         "title": "Pair",
+        "type": "object"
+      },
+      "ProjectCreate": {
+        "additionalProperties": false,
+        "properties": {
+          "engine_version": {
+            "title": "Engine Version",
+            "type": "string"
+          },
+          "harness": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Harness"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "parent_dir": {
+            "title": "Parent Dir",
+            "type": "string"
+          },
+          "plugins": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Plugins"
+          }
+        },
+        "required": [
+          "name",
+          "engine_version",
+          "parent_dir"
+        ],
+        "title": "ProjectCreate",
         "type": "object"
       },
       "ProjectImport": {
@@ -2240,6 +2319,138 @@
         ]
       }
     },
+    "/studio/jobs/{id}": {
+      "get": {
+        "operationId": "read_job_studio_jobs__id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "title": "Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Read Job Studio Jobs  Id  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Read Job",
+        "tags": [
+          "studio"
+        ]
+      }
+    },
+    "/studio/jobs/{id}/cleanup": {
+      "post": {
+        "operationId": "cleanup_job_studio_jobs__id__cleanup_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "title": "Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Cleanup Job Studio Jobs  Id  Cleanup Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Cleanup Job",
+        "tags": [
+          "studio"
+        ]
+      }
+    },
+    "/studio/jobs/{id}/retry": {
+      "post": {
+        "operationId": "retry_job_studio_jobs__id__retry_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "title": "Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Retry Job Studio Jobs  Id  Retry Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Retry Job",
+        "tags": [
+          "studio"
+        ]
+      }
+    },
     "/studio/machine": {
       "get": {
         "operationId": "read_machine_studio_machine_get",
@@ -2906,6 +3117,101 @@
         ]
       }
     },
+    "/studio/projects/create": {
+      "post": {
+        "operationId": "create_new_project_studio_projects_create_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProjectCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Create New Project Studio Projects Create Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create New Project",
+        "tags": [
+          "studio"
+        ]
+      }
+    },
+    "/studio/projects/create/options": {
+      "get": {
+        "operationId": "project_create_options_studio_projects_create_options_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "engine_version",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 40,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Engine Version"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Project Create Options Studio Projects Create Options Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Project Create Options",
+        "tags": [
+          "studio"
+        ]
+      }
+    },
     "/studio/projects/{id}": {
       "get": {
         "operationId": "get_project_studio_projects__id__get",
@@ -3041,6 +3347,209 @@
           }
         },
         "summary": "Archive Project",
+        "tags": [
+          "studio"
+        ]
+      }
+    },
+    "/studio/projects/{id}/editor": {
+      "get": {
+        "operationId": "read_editor_studio_projects__id__editor_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "title": "Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Read Editor Studio Projects  Id  Editor Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Read Editor",
+        "tags": [
+          "studio"
+        ]
+      }
+    },
+    "/studio/projects/{id}/editor/screenshot": {
+      "post": {
+        "operationId": "shoot_editor_studio_projects__id__editor_screenshot_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "title": "Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EditorShot"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Shoot Editor Studio Projects  Id  Editor Screenshot Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Shoot Editor",
+        "tags": [
+          "studio"
+        ]
+      }
+    },
+    "/studio/projects/{id}/editor/start": {
+      "post": {
+        "operationId": "start_editor_studio_projects__id__editor_start_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "title": "Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Start Editor Studio Projects  Id  Editor Start Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Start Editor",
+        "tags": [
+          "studio"
+        ]
+      }
+    },
+    "/studio/projects/{id}/editor/stop": {
+      "post": {
+        "operationId": "stop_editor_studio_projects__id__editor_stop_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "title": "Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/EditorStop"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Stop Editor Studio Projects  Id  Editor Stop Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Stop Editor",
         "tags": [
           "studio"
         ]

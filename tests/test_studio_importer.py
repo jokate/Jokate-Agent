@@ -364,6 +364,22 @@ def test_detect_reads_a_folder_without_a_project_too(tmp_path):
     assert importer.detect(tmp_path, [])["harness"] == {"claude_md": False, "docs": False}
 
 
+def test_any_rules_file_a_relay_run_reads_counts_as_the_rules_of_the_harness(tmp_path):
+    for index, name in enumerate(("CLAUDE.local.md", ".claude/CLAUDE.md")):  # what bootstrap.bat may leave (M-5)
+        folder = tmp_path / f"project{index}"
+        file = folder.joinpath(*name.split("/"))
+        file.mkdir(parents=True)  # a folder of that name is not the file
+        assert importer.rules(folder) == [] and importer.detect(folder, [])["harness"]["claude_md"] is False
+        file.rmdir()
+        file.write_text("rules", encoding="utf-8")
+        found = importer.detect(folder, [])
+        assert importer.rules(folder) == [name]
+        assert found["harness"] == {"claude_md": True, "docs": False}
+        assert found["missing"] == ["mcp", "harness"]  # the Docs folder is still asked for
+        (folder / "Docs").mkdir()
+        assert importer.detect(folder, [])["missing"] == ["mcp"]
+
+
 # --- the document -------------------------------------------------------------------------------------------
 def documented(name):
     """The keys the §6.4 paragraph of M-6 gives for `name`: "`name` 는 `{a, b[]}`" -> ['a', 'b']."""

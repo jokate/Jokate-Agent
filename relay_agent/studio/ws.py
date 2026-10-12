@@ -45,6 +45,7 @@ LIVE_INTERVAL = 2.0   # seconds between two liveness reads of the running runs (
 LIVE_MIN_GAP = 0.5    # the least seconds between two liveness reads, however many commits ask for one (§7.4)
 PAGE = 500           # stream_events rows per read
 LIVE_BACKLOG = 100    # run.live waiting for a slow connection; older ones are dropped — the next one covers them
+SAID_BACKLOG = 100    # the same for what `Hub.say` sends (`job.log`): a queue of its own, so neither drops the other
 UNAUTHORIZED, FORBIDDEN, TRY_LATER = 4401, 4403, 1013  # close codes: §7.1, and RFC 6455 "try again later"
 ENVELOPE = ("id", "type", "at", "project_id", "room_id", "task_id", "data")  # §7.3
 
@@ -60,6 +61,7 @@ class Conn:
         self.cursor = 0               # the last stream_events id sent
         self.kick: int | None = None  # close code asked for from outside (a revoked device)
         self.live: deque[dict] = deque(maxlen=LIVE_BACKLOG)  # run.live envelopes waiting to be sent
+        self.said: deque[dict] = deque(maxlen=SAID_BACKLOG)  # what `Hub.say` sent (`job.log`), apart from run.live
 
     def poke(self) -> bool:
         """Wake the sender, from any thread. False when the connection's loop is gone."""
@@ -122,6 +124,20 @@ class Hub:
             conn.kick = UNAUTHORIZED
             conn.poke()
         return len(conns)
+
+    def say(self, type: str, data: dict, *, project_id: str | None = None) -> None:
+        """Send an event that is not stored (§7.2: `job.log`, M-8) to every connection, from any thread: the
+        envelope of §7.3 with `id` null, put in a queue of its own beside the one `run.live` waits in (a burst
+        of one does not drop the other). Nobody connected: nobody is told — the next one covers it. Against the
+        stored events its place is not kept: a sender reads the rows first."""
+        event = {"id": None, "type": type, "at": now(), "project_id": project_id, "room_id": None,
+                 "task_id": None, "data": data}
+        with self._lock:
+            conns = list(self._conns)
+        for conn in conns:
+            conn.said.append(event)
+            if not conn.poke():
+                self.detach(conn)
 
     # --- run.live (§7.4) ------------------------------------------------------------------------------------
     def _run_ticker(self) -> None:
@@ -197,6 +213,7 @@ def install(app: FastAPI, *, network_allowed: Callable[[str], bool]) -> None:
     app.add_api_websocket_route("/studio/ws", stream)
     api.on_commit(hub.notify)
     api.on_revoke(hub.drop_device)  # api.py does not import this module: it is told whom to call
+    api.on_live(hub.say)  # the events nobody stores: `job.log` of a project being made (M-8)
 
 
 # --- one connection -------------------------------------------------------------------------------------------
@@ -333,7 +350,8 @@ async def _listen(ws: WebSocket) -> None:
 
 async def _pump(ws: WebSocket, conn: Conn) -> None:
     """Steps 2 and 3 (§7.1), one loop for both: the stored events after the cursor in id order, then the
-    waiting `run.live`, and a ping every PING_INTERVAL. Returns once it has closed the socket (a kick)."""
+    waiting `run.live`, then what `Hub.say` left (`job.log`, a queue of its own), and a ping every PING_INTERVAL.
+    Returns once it has closed the socket (a kick)."""
     loop = asyncio.get_running_loop()
     ping_at = loop.time() + PING_INTERVAL
     while True:
@@ -349,6 +367,8 @@ async def _pump(ws: WebSocket, conn: Conn) -> None:
                 break
         while conn.live:
             await _send(ws, conn.live.popleft())
+        while conn.said:
+            await _send(ws, conn.said.popleft())
         wait = ping_at - loop.time()
         if wait <= 0:
             await _send(ws, {"type": "ping"})

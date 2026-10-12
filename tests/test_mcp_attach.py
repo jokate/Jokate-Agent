@@ -75,3 +75,25 @@ def test_repo_default_and_run_pick_attach_global_and_other_folder_servers(tmp_pa
     engine.advance(engine.create(relay, "g", repo="game", mcp=[]).id)  # explicitly none of the optional ones
     assert runner.seen[2].mcp_servers == ["proj"]
 
+
+def test_the_projects_own_server_comes_before_the_registry_and_the_global_one_of_its_name(tmp_path, monkeypatch):
+    """A new UE project's `unreal` (studio M-5: the repository is registered with `mcp: [unreal]`) is the one
+    of its own `.mcp.json`, also when `mcp_registry` and the user's settings have an `unreal` — MNYS's."""
+    engine, relay, _, game = setup(tmp_path, monkeypatch, {"mcp": ["unreal"]})  # the global `unreal` is there
+    own = {"command": "uv", "args": ["run", "unreal_mcp_server.py"], "env": {"UNREAL_MCP_PORT": "55558"}}
+    (game / ".mcp.json").write_text(json.dumps({"mcpServers": {"unreal": own}}), encoding="utf-8")
+    engine.mcp_registry["unreal"] = {"command": "registry"}
+    run = engine.create(relay, "g", repo="game")
+    ctx = discover(game)
+    assert ctx.mcp["unreal"] == own and "unreal" not in ctx.optional_mcp
+    assert engine._attached_mcp(run, ctx, engine.repos.get("game"))["unreal"] == own
+    assert not any(e["kind"] == "mcp_missing" for e in engine.history.events(run.id))
+    # the one thing that comes before it: the entry of that folder in ~/.claude.json
+    settings = tmp_path / "home" / ".claude.json"
+    entry = {"command": "entry-of-the-folder"}
+    data = json.loads(settings.read_text(encoding="utf-8"))
+    data["projects"] = {game.resolve().as_posix(): {"mcpServers": {"unreal": entry}}}
+    settings.write_text(json.dumps(data), encoding="utf-8")
+    assert discover(game).mcp["unreal"] == entry
+    assert engine._attached_mcp(run, discover(game), engine.repos.get("game"))["unreal"] == entry
+

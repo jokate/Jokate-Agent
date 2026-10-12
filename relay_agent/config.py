@@ -61,6 +61,9 @@ class Config(BaseModel):
     # Katae Studio: seconds a task run may go on after the answer of a T4 (`ask_owner`, the guard) before the
     # server cuts it — 기다림 = 런 종료 (ARCHITECTURE.md §8.3 '서버의 뒤처리'). 0 = at once.
     studio_cut_after: float = 60.0
+    # Katae Studio: seconds the editor check of a task run waits for the project's editor to answer `health_check`
+    # before the system asks the owner (`editor_unresponsive`) — ARCHITECTURE.md §4.3 T3. Read at every check.
+    studio_editor_wait: float = 300.0
     # Katae Studio: the turns employees may put in for each other in one task (`room_post` mentions) before the
     # system asks the owner — 왕복 한도 (ARCHITECTURE.md §4.6). Read at every mention; T5 of that item counts anew.
     studio_max_exchanges: int = 20
@@ -82,6 +85,31 @@ class Config(BaseModel):
     # when it was made or last told of (N-2 — ARCHITECTURE.md §5.9 재알림). 0 or less = no reminder. Read at every
     # look at the waiting items (the server's start, then once a minute).
     studio_remind_after: float = 7200.0
+    # Katae Studio: the folder a `source` of `studio_plugins` that is not an absolute path is taken from — the
+    # MNYS project's folder, as an absolute path (M-4 — ARCHITECTURE.md §6.4). Each machine has its own, so it
+    # goes in relay.config.local.yaml. "" = not set: such a plugin has no source and cannot be chosen.
+    studio_plugin_root: str = ""
+    # Katae Studio: the folder of the game-harness repository, as an absolute path — where `bootstrap.bat` and
+    # `index_build.bat` are (M-5 — ARCHITECTURE.md §6.4, studio/harness.py). Each machine has its own, so it goes
+    # in relay.config.local.yaml. "" = not set: the `harness` step of a new project fails unless it is turned off.
+    studio_harness_root: str = ""
+    # Katae Studio: the plugins a new UE project may be given, in the order the making screen lists them (M-4 —
+    # ARCHITECTURE.md §6.4, studio/plugins.py). `id`: what `plugins[]` of the request names. `name`: what the
+    # screen shows. `source`: the plugin's folder, absolute or from `studio_plugin_root`; it is only read.
+    # `folder` (may be left out): the folder's name under the project's `Plugins/` — the last part of `source`
+    # when not given. `engines`: the engine versions it is confirmed on, as quoted strings ("5.7"); [] = all. On
+    # another engine it is listed unchecked with a warning, and may still be chosen. `mcp` (the MCP plugin only):
+    # the server put in the project's `.mcp.json` — `server` (its name; "unreal" when left out), `command` and
+    # `args`, in which `{plugin}` and `{project}` become the absolute paths of the copied plugin's folder and of
+    # the project. A project given a plugin with `mcp` gets an MCP port of its own (55558 and up). The `mcp` of
+    # unreal_mcp is tentative — MNYS's own entry could not be read (design/studio/VERIFICATION.md): correct it
+    # here or in relay.config.yaml, not in the code.
+    studio_plugins: list[dict] = [
+        {"id": "unreal_mcp", "name": "Unreal MCP", "source": "Plugins/Unreal-MCP-main", "engines": [],
+         "mcp": {"server": "unreal", "command": "uv",
+                 "args": ["--directory", "{plugin}/Python", "run", "unreal_mcp_server.py"]}},
+        {"id": "ys_tag_usage", "name": "YSTagUsage", "source": "Plugins/YSTagUsage", "engines": ["5.7"]},
+    ]
 
     @classmethod
     def load(cls, path: Path | None = None) -> "Config":

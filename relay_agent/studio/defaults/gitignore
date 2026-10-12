@@ -1,0 +1,22 @@
+# 잠정 — MNYS 의 .gitignore 와 대조하기 전이다 (relay-agent 의 design/studio/VERIFICATION.md, M-5).
+
+# 빌드와 에디터가 만드는 것
+Binaries/
+Intermediate/
+Saved/
+DerivedDataCache/
+Plugins/*/Binaries/
+Plugins/*/Intermediate/
+
+# IDE
+.vs/
+.idea/
+*.sln
+*.suo
+*.VC.db
+*.opensdf
+*.sdf
+
+# 이 PC 의 절대 경로와 포트가 들어 있다
+.mcp.json
+.claude/settings.local.json

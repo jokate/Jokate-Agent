@@ -368,12 +368,19 @@ class RepoIn(BaseModel):
     mcp: list[str] = []  # servers attached to every run in this repo (e.g. ["unreal"])
 
 
+# One reload at a time: a request thread (`/repos`) and a job's thread (the `register` step, M-8) both call it. Without
+# the lock the one that read the settings first could assign last, and a repository just registered would be gone
+# from the server until the next reload. Not an RLock: nothing calls it from inside itself.
+_repos_lock = threading.Lock()
+
+
 def _reload_repos() -> None:
     from .repos import RepoRegistry
 
-    fresh = Config.load()
-    cfg.repos = fresh.repos
-    engine.repos = RepoRegistry(fresh.repos)
+    with _repos_lock:
+        fresh = Config.load()
+        cfg.repos = fresh.repos
+        engine.repos = RepoRegistry(fresh.repos)
 
 
 @app.post("/repos")
@@ -1042,3 +1049,37 @@ def start_push_reminders() -> None:
 @app.on_event("shutdown")
 def stop_push_reminders() -> None:
     pusher.unwatch()
+
+
+# Making a new UE project (M-8; design/studio/ARCHITECTURE.md §6.4 · §7.4): the `register` step of a job writes the
+# repository in this machine's settings file and has the server read it again, on the job's thread. `_reload_repos`
+# answers None, so the step is given a function that answers the registry it left (studio/harness.py `_reloaded`).
+# The reload itself is under `_repos_lock`; `engine.repos` is read after it, so it is that reload's or a later one's.
+# Down here for the reasons given above.
+from .config import ROOT  # noqa: E402
+
+
+def _reloaded_repos():
+    _reload_repos()
+    return engine.repos
+
+
+studio_api.use_jobs(reload=_reloaded_repos, local_file=ROOT / "relay.config.local.yaml")
+
+
+@app.on_event("startup")
+def recover_studio_jobs() -> None:
+    """A job file left `pending` or `running` by a server that stopped is `failed` from here on (§6.4): it can
+    be retried or cleaned. Not at import, and not in `Jobs.__init__`: only a server that starts may say so."""
+    studio_api.recover_jobs()
+
+
+# The editor of a task's run (M-7; design/studio/ARCHITECTURE.md §4.3 T3 · §4.5 · §4.7): the check before a run
+# goes on is `task_runs.editor_ready`, which the queue calls with its slot and which waits `cfg.studio_editor_wait`
+# seconds for the editor. A run that passed is handed to this watch, which looks at the editor while the run is at
+# work and cuts the run of one that stops answering. No timer runs until a run that uses the editor has passed the
+# check. Down here for the reasons given above.
+from .studio import editor_watch as studio_editor_watch  # noqa: E402
+
+task_editor_watch = studio_editor_watch.EditorWatch(engine, task_runs, studio_api.run_inbox, task_queue.holds)
+task_runs.watch = task_editor_watch.begin

@@ -47,7 +47,9 @@ import yaml
 
 from ..config import ROOT
 from ..pipeline import RelaySpec, cap_effort, cap_model
-from . import campaigns, cutoff, employees, review, runs
+from . import campaigns, cutoff, employees, plugins, review, runs
+from . import editor as editor_control
+from . import machine as machine_info
 from .inbox import SYSTEM_ROOM
 from .store import StudioStore
 from .tasks import PRE_EFFECT, STATE_INBOX, SYSTEM, Effects, TransitionError
@@ -74,6 +76,14 @@ SKIPPED = "stage_skipped"   # the engine's event of an `optional` stage no AI co
 WITH_RUN = ("working", "blocked", "review")  # the states whose run the recovery reads (§4.8 의 1)
 BROKEN = "작업 '{title}' ({id}) 이 {status} 인데 대기 중인 결재가 없다. 고치지 않고 알린다 — 작업 상태를 확인하라."
 FILED, REQUEUED = "filed", "requeued"  # what `table` did: the keys of what `recover` returns
+# the editor check of a run that uses the editor's MCP (M-7; §4.3 T3 · §4.5 · §4.7)
+EDITOR_MCP = plugins.DEFAULT_SERVER   # the MCP server whose name makes a run one that uses the editor
+EDITOR_EVENT = "editor_unresponsive"  # the reason of the question (§5.3), and `detail.event` of the `run` row
+EDITOR_DOWN = ("작업 런을 진행하기 전에 에디터가 응답하지 않았다: {why}\n"
+               "에디터를 확인한 뒤 다시 시도한다 — 에디터를 다시 검사하고 런을 잇는다.")
+EDITOR_LOST = ("작업 런이 도는 동안 에디터가 응답하지 않아 런을 끊었다 (모달 창 · 크래시일 수 있다).\n"
+               "에디터를 확인한 뒤 다시 시도한다 — 에디터를 다시 검사하고 런을 잇는다.")
+EDITOR_CUT = "에디터가 응답하지 않아 런을 끊었다"
 
 log = logging.getLogger(__name__)
 
@@ -238,6 +248,20 @@ def holds_server_code(*paths: Any, root: Path | str | None = None) -> bool:
     return False
 
 
+def uses_editor(run, repo_spec=None) -> bool:
+    """Does that run work through the editor (M-7)? `EDITOR_MCP` is among the servers picked for the run
+    (`run.mcp`), the repository's own (`repo_spec.mcp`) or those of a stage the relay has still to run
+    (`stages[run.index:]`). A relay file that cannot be read adds nothing."""
+    names = [*(getattr(run, "mcp", None) or []), *(getattr(repo_spec, "mcp", None) or [])]
+    try:
+        spec, _ = RelaySpec.load(Path(run.relay))
+        for stage in spec.stages[int(getattr(run, "index", 0) or 0):]:
+            names += list(getattr(stage, "mcp", None) or [])
+    except RELAY_ERRORS:
+        pass
+    return EDITOR_MCP in names
+
+
 # --- the effects of the task machine ------------------------------------------------------------------------
 class WorkEffects(Effects):
     """What T3 does outside the studio DB, on one engine. `store` gives the StudioStore (`api.get_store`),
@@ -255,17 +279,30 @@ class WorkEffects(Effects):
 
     `campaign` is the look at the studio's campaigns (S-14; `CampaignRunner.advance_studio`, server.py sets it):
     `after` calls it when a change may have made a task of a running campaign ready, or ended the campaign
-    (`campaigns.LOOKS`, §4.10). None = no campaign goes on by itself."""
+    (`campaigns.LOOKS`, §4.10). None = no campaign goes on by itself.
+
+    The editor check (M-7; §4.3 T3 · §4.7) is `editor_ready`, which the queue calls with its slot, after T3 and
+    before a run is taken up again: a run that uses the editor (`uses_editor`) in a project with an `mcp_port`
+    goes on only once that editor answers — one that is off is started and waited for, `cfg.studio_editor_wait`
+    seconds —, else the system asks `editor_unresponsive` (T4) and the run stays as it was. `editor_engines` ·
+    `editor_processes` · `editor_healthy` · `editor_tools` are where it reads the computer and how it starts the
+    editor; a test replaces them. `watch` (server.py sets it: `editor_watch.EditorWatch.begin`) is told of each
+    run that passed and looks at the editor while the run is at work. None = nobody looks."""
 
     kick: Callable[[], Any] | None = None
     holds: Callable[[str], bool] | None = None
     campaign: Callable[..., Any] | None = None  # (campaign id or None), and `again=True` after a start · resume
+    watch: Callable[[str, str], Any] | None = None  # (task id, run id): the run passed the editor check
 
     def __init__(self, engine, cfg, store: Callable[[], StudioStore],
                  catalog: Callable[[], list[dict]] | None = None, server_root: Path | str | None = None):
         self.engine, self.cfg, self.store = engine, cfg, store
         self._catalog, self.server_root = catalog, server_root
         self._guard, self._deciding = threading.Lock(), {}  # task id -> the lock of its pass · revert · cancel
+        self.editor_engines: Callable[[], list[dict]] = machine_info.engines
+        self.editor_processes: Callable[[], list[dict]] = machine_info.editor_processes
+        self.editor_healthy: Callable[[Any], bool] = machine_info.health_check
+        self.editor_tools = editor_control.Tools()
 
     def folder(self, task: dict) -> Path | None:
         """The folder that task's run works in: what the queue asks `RelayEngine.folder_holder` about before it
@@ -323,6 +360,69 @@ class WorkEffects(Effects):
             self.engine.cancel(run_id)
         except (OSError, ValueError):
             pass
+
+    # --- the editor check (M-7) ---------------------------------------------------------------------------
+    def _editor_project(self, store: StudioStore, task: dict, run_id: str | None) -> dict | None:
+        """The project whose editor that run needs, None when the run is not checked: the project has no
+        `mcp_port` — studio has nowhere to ask, and the engine's own `_check_mcp_ready` is what looks then —,
+        the engine has no such run, or the run does not use the editor (`uses_editor`)."""
+        project = store.get_project(task["project_id"]) if task.get("project_id") else None
+        if project is None or not project.get("mcp_port"):
+            return None
+        run = _load(self.engine, run_id)
+        if run is None:
+            return None
+        spec = None
+        if project.get("repo"):
+            try:
+                spec = self.engine.repos.get(project["repo"])
+            except KeyError:
+                spec = None
+        return project if uses_editor(run, spec) else None
+
+    def editor_ready(self, inbox, task: dict, run_id: str) -> bool:
+        """§4.3 T3 '에디터 검사' · §4.7 '런을 이을 때': may that run go on? True for a run that is not checked
+        (`_editor_project`) and once the project's editor answers — `watch` is told then. An editor that cannot
+        be started or does not answer within `cfg.studio_editor_wait` seconds: the system asks
+        `editor_unresponsive` (T4, the task ends in blocked) and the answer is False — the run is not advanced
+        and stays as it was. A task that left `working` meanwhile gets no question. Called on the thread of the
+        task's slot, which it holds for as long as the wait."""
+        store = inbox.store
+        project = self._editor_project(store, task, run_id)
+        if project is None:
+            return True
+        try:
+            engines = list(self.editor_engines())
+        except Exception:  # noqa: BLE001 - no list of engines is an editor that cannot be started
+            log.exception("studio: 설치된 엔진 목록을 읽지 못했다")
+            engines = []
+        wait = float(getattr(self.cfg, "studio_editor_wait", editor_control.START_TIMEOUT))
+        try:
+            editor_control.bring_up(project, store.list_projects(), engines, processes=self.editor_processes,
+                                    healthy=self.editor_healthy, tools=self.editor_tools, timeout=wait)
+        except editor_control.Refused as e:
+            log.info("studio: 작업 %s 의 런 %s 을 진행하지 않는다 — %s", task["id"], run_id, e.message)
+            try:
+                ask(inbox, task["id"], EDITOR_EVENT, EDITOR_DOWN.format(why=e.message), error=e.message)
+            except TransitionError as t:
+                log.info("studio: 작업 %s 에 에디터 무응답을 묻지 못했다: %s", task["id"], t.detail)
+            return False
+        if self.watch is not None:
+            self.watch(task["id"], run_id)
+        return True
+
+    def editor_alive(self, store: StudioStore, task: dict) -> bool | None:
+        """Does the editor of that task's project answer now? One `health_check` of the project's port; None
+        when the project has no port — there is nothing to look at. The processes are not read."""
+        project = store.get_project(task["project_id"]) if task.get("project_id") else None
+        port = (project or {}).get("mcp_port")
+        if not port:
+            return None
+        try:
+            return bool(self.editor_healthy(port))
+        except Exception:  # noqa: BLE001 - a check that fails is an editor that did not answer
+            log.exception("studio: 에디터의 health_check 를 하지 못했다 (포트 %s)", port)
+            return False
 
     def _judge(self, rule: str, task: dict) -> Any:
         """`review.gate` for that rule on the task's run as it is now: the run (None when the task has none
@@ -519,6 +619,34 @@ class WorkEffects(Effects):
 def ask(inbox, task_id: str, reason: str, body: str, **extra: Any) -> dict:
     """T4 by the system: a `question` of that reason (§5.3), and the task ends in blocked. The item."""
     return inbox.create("question", SYSTEM, task_id=task_id, payload={"reason": reason, "body": body, **extra})
+
+
+def editor_lost(engine, inbox, task_id: str, run_id: str) -> bool:
+    """§4.5 '에디터 무응답을 감지': the editor stopped answering while that run was at work — the server cuts
+    the run and writes a `run` row (`{run_id, event}`). True when the run was cut.
+
+    Only while the task's run is still that run and it is `running`. A task that is working and out of the line
+    is asked first (`editor_unresponsive`, T4): a cut that came first would have the thread of the slot find a
+    `cancelled` run of a working task and ask `run_cancelled` besides (§4.7 의 표). In blocked · review, and
+    working in the line, no question is filed — the item of the T4 or T6 is there already, or the check before
+    the run is taken up again asks. A run that ended meanwhile (`OSError` · `ValueError`) was not cut."""
+    task = inbox.store.get_task(task_id)
+    if task is None or task["run_id"] != run_id:
+        return False
+    if getattr(_load(engine, run_id), "status", None) != "running":
+        return False
+    if task["status"] == "working" and task["queued_at"] is None:
+        try:
+            ask(inbox, task_id, EDITOR_EVENT, EDITOR_LOST)
+        except TransitionError as e:  # it left working since that look: its own item is there
+            log.info("studio: 작업 %s 에 에디터 무응답을 묻지 못했다: %s", task_id, e.detail)
+    try:
+        engine.cancel(run_id)
+    except (OSError, ValueError):
+        return False  # ended or closed already
+    log.info("studio: 작업 %s 의 런 %s 을 에디터 무응답으로 끊었다", task_id, run_id)
+    inbox.machine.record(task_id, SYSTEM, "run", EDITOR_CUT, detail={"run_id": run_id, "event": EDITOR_EVENT})
+    return True
 
 
 def resumes(run) -> bool:

@@ -1,0 +1,6 @@
+# 잠정 — MNYS 의 .gitattributes 와 대조하기 전이다 (relay-agent 의 design/studio/VERIFICATION.md, M-5).
+# 에셋은 줄 끝을 바꾸지 않고 diff · 병합하지 않는다. Git LFS 는 쓰지 않는다.
+*.uasset binary
+*.umap binary
+*.ubulk binary
+*.uexp binary

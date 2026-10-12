@@ -26,6 +26,17 @@ Campaigns (S-14): made, changed and driven by path — `start` · `pause` · `re
 machine does the change; what follows it (the look at the campaign) is studio/campaigns.py's, through
 `Effects.after`.
 
+Making a new project (M-8): `POST /studio/projects/create` has studio/jobs.py check the request and start a job —
+a file under runs/studio/jobs, run on a thread of its own — `GET /studio/jobs/{id}` reads it, and
+`GET /studio/projects/create/options` is what the making screen offers. `use_jobs` is the server's connection (the
+settings file and the reload `register` needs); `on_live` is how ws.py hears the `job.log` nobody stores.
+
+A project's editor (M-7): `GET /studio/projects/{id}/editor` and `POST …/editor/start` · `/stop` · `/screenshot`
+hand the project to studio/editor.py with the processes and the health check of `_machine` — what
+`GET /studio/machine` reads from — and the `_editor` tools. A screenshot is saved under the attachments folder
+(`shot_<hex12>/`) and, with a `room_id`, posted in that room as a message of `system`; a `shot_` folder that was
+not posted is removed a day later, when the next picture is taken. `stop` may carry `{force}` (left out: true).
+
 Not here yet, on purpose: an owner's message is stored and announced; the turns it starts belong to
 S-7 · S-9. Tasks are not started or stopped here (S-8).
 """
@@ -56,7 +67,9 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 from starlette.concurrency import run_in_threadpool
 from starlette.requests import HTTPConnection
 
-from . import devices, employees, files, guard, importer, machine as machine_info, review, sat, tools, work
+from . import creator, devices, employees, files, guard, importer, jobs as create_jobs
+from . import editor as editor_control
+from . import machine as machine_info, review, sat, tools, work
 from .inbox import Hooks, Inbox, InboxError
 from .store import StudioStore, StudioStoreError, Tx, now
 from .tasks import (OWNER, STATES, TERMINAL, TEXT_FIELDS, CampaignNotFound, Effects, TaskMachine, TaskNotFound,
@@ -148,6 +161,9 @@ _workdir: Callable[[str], Path | None] | None = None  # run id -> the folder tha
 _repos: Callable[[], Any] | None = None  # -> the server's RepoRegistry as it is now (§3.3); None = no registry
 _commit_listeners: list[Callable[[tuple[int, ...]], None]] = []  # see on_commit
 _revoke_listeners: list[Callable[[str], Any]] = []  # see on_revoke
+_live_listeners: list[Callable[..., Any]] = []  # see on_live
+_job_parts: dict[str, Any] | None = None  # what use_jobs was given; None = no project can be made here
+_jobs: Any = None  # jobs.Jobs, made on first use from _job_parts (see _job_runner)
 _pruned_at = 0.0  # time.monotonic() of the last look at the retention of stream_events
 PRUNE_EVERY = 24 * 3600.0  # §7.2: at the start and once a day
 
@@ -188,6 +204,22 @@ def on_revoke(listener: Callable[[str], Any]) -> None:
     closes the device's connections with it (§7.1). On the revoking thread. It stays through `close_store()`."""
     if listener not in _revoke_listeners:
         _revoke_listeners.append(listener)
+
+
+def on_live(listener: Callable[..., Any]) -> None:
+    """Have `listener(type, data, project_id=)` called for every event that is not stored and is not `run.live`
+    (§7.2: `job.log`): ws.py sends it to the connections. On the thread that has it. It stays through
+    `close_store()`."""
+    if listener not in _live_listeners:
+        _live_listeners.append(listener)
+
+
+def _say(type: str, data: dict, *, project_id: str | None = None) -> None:
+    for listener in tuple(_live_listeners):
+        try:
+            listener(type, data, project_id=project_id)
+        except Exception:  # noqa: BLE001 - one listener must not silence the others, nor stop who is telling
+            log.exception("studio: a live listener failed (%s)", type)
 
 
 def _prune(store: StudioStore) -> None:
@@ -613,19 +645,11 @@ def import_project(body: ProjectImport, store: StudioStore = Depends(get_store))
         engines = []
     found = importer.detect(folder, engines, top=spec.resolved)
     name = name or Path(found["uproject"] or folder.name).stem
-    same = machine_info._same  # paths as two of them are compared: slashes, case, the slash at the end
     with store.transaction() as tx:
         others = store.list_projects(include_archived=True, tx=tx)  # an archived one keeps its name and repo
-        for field, taken, detail in (
-                ("path", lambda p: same(p["path"]) == same(folder),
-                 f"이 폴더는 이미 프로젝트로 등록돼 있습니다: {folder}"),
-                ("name", lambda p: p["name"] == name, f"이름 '{name}' 은(는) 다른 프로젝트가 쓰고 있습니다"),
-                ("repo", lambda p: p["repo"] == spec.name,
-                 f"저장소 '{spec.name}' 은(는) 다른 프로젝트가 쓰고 있습니다")):
-            held = [p for p in others if taken(p)]
-            if held:  # the list does not show an archived project (`archived=1` does): the refusal says it is one
-                note = " (보관된 프로젝트입니다)" if all(p["archived_at"] is not None for p in held) else ""
-                raise StudioError("conflict", detail + note, field=field)
+        clash = importer.conflict(others, name=name, folder=folder, repo=spec.name)
+        if clash is not None:  # (field, detail): path, name, repo — the first of them, in this order
+            raise StudioError("conflict", clash[1], field=clash[0])
         port = found["mcp"]["port"]
         holder = next((p["id"] for p in others
                        if port is not None and p["mcp_port"] == port and p["archived_at"] is None), None)
@@ -641,12 +665,171 @@ def import_project(body: ProjectImport, store: StudioStore = Depends(get_store))
     return {**row, "detected": found}
 
 
+# §6.4 (M-8): make a new UE project. The request is checked here (studio/jobs.py `admit`) and nothing else is done:
+# the five steps run on the job's thread, told of by `job.step` · `job.log` · `job.finished` (§7.4). `plugins` and
+# `harness` may be left out — then they are what the options below have checked. No docstrings: the saved contract
+# would carry them as descriptions.
+class ProjectCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    engine_version: str
+    parent_dir: str                    # the folder the project's folder is made in, absolute
+    plugins: list[str] | None = None   # ids of the options; left out: the checked ones, []: none
+    harness: bool | None = None        # left out: on when the harness folder of the settings can be used
+
+
+def _engines() -> list[dict]:
+    try:
+        return machine_info.engines(_machine.engines)
+    except Exception:  # noqa: BLE001 — a registry that cannot be read is a computer without engines
+        log.exception("studio: 설치된 엔진 목록을 읽지 못했다")
+        return []
+
+
+def _refused(e: creator.Refused) -> StudioError:
+    return StudioError(e.code, e.message, field=e.field, reason=e.reason)
+
+
+@router.get("/projects/create/options")
+def project_create_options(engine_version: str | None = Query(None, max_length=40)) -> dict:
+    cfg = _config()
+    try:
+        return create_jobs.options(engine_version, engines=_engines(), entries=cfg.studio_plugins,
+                                   plugin_root=cfg.studio_plugin_root, harness_root=cfg.studio_harness_root)
+    except creator.Refused as e:
+        raise _refused(e) from e
+
+
+@router.post("/projects/create", status_code=202)
+def create_new_project(body: ProjectCreate, store: StudioStore = Depends(get_store)) -> dict:
+    cfg, runner = _config(), _job_runner()
+    try:
+        admitted = create_jobs.admit(
+            body.name, body.engine_version, body.parent_dir, body.plugins, body.harness, engines=_engines(),
+            entries=cfg.studio_plugins, plugin_root=cfg.studio_plugin_root, harness_root=cfg.studio_harness_root,
+            registry=_repos() if _repos is not None else None,
+            projects=store.list_projects(include_archived=True))
+        return {"job": runner.create(store, admitted)}
+    except creator.Refused as e:
+        raise _refused(e) from e
+
+
+@router.get("/jobs/{id}")
+def read_job(id: str) -> dict:
+    return _need(create_jobs.load(_config().studio_dir, id), "생성 작업", id)
+
+
+@router.post("/jobs/{id}/retry", status_code=202)
+def retry_job(id: str, store: StudioStore = Depends(get_store)) -> dict:
+    cfg, runner = _config(), _job_runner()
+    try:
+        job = runner.retry(store, id, entries=cfg.studio_plugins, plugin_root=cfg.studio_plugin_root)
+    except creator.Refused as e:
+        raise _refused(e) from e
+    return {"job": _need(job, "생성 작업", id)}
+
+
+@router.post("/jobs/{id}/cleanup", status_code=202)
+def cleanup_job(id: str, store: StudioStore = Depends(get_store)) -> dict:
+    runner = _job_runner()
+    try:
+        job = runner.cleanup(store, id)
+    except creator.Refused as e:
+        raise _refused(e) from e
+    return {"job": _need(job, "생성 작업", id)}
+
+
 @router.get("/projects/{id}")
 def get_project(id: str, store: StudioStore = Depends(get_store)) -> dict:
     row = _need(store.get_project(id), "프로젝트", id)
     employees = _with_dm_room(store, store.list_employees(project_id=id))
-    # `editor` is filled by M-7; the key is there so the shape does not change then
+    # `editor` stays null (M-7, §6.4): the status is `GET …/editor`'s — here it would read the processes each time
     return {**row, "employees": employees, "task_counts": store.count_tasks_by_status(id), "editor": None}
+
+
+# §6.4 · §6.6 (M-7): the project's Unreal editor — how it is, start it, stop it, a picture of its viewport. The
+# work is studio/editor.py's; the processes and the health check are those `GET /studio/machine` reads from
+# (`_machine`), so the two answers agree. `start` answers at once (an editor takes minutes to come up); `stop`
+# asks the editor to close and ends it by force after a wait — not with `{force: false}`, and its body may be
+# left out; `screenshot` starts an editor that is off and waits for it — the request stays open that long. No
+# docstrings: the saved contract would carry them.
+class EditorShot(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    room_id: str | None = None  # the room the picture is posted in; left out: the attachment alone
+
+
+class EditorStop(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    force: bool = True  # false: the editor is only asked to close, and may still run when the answer comes
+
+
+_editor = editor_control.Tools()  # how an editor is started, ended and asked; a test replaces parts of it
+
+
+def _editor_refused(e: editor_control.Refused) -> StudioError:
+    return StudioError(e.code, e.message, failed=list(e.failed))
+
+
+def _editor_sources() -> dict:
+    return {"processes": _machine.processes, "healthy": _machine.healthy}
+
+
+@router.get("/projects/{id}/editor")
+def read_editor(id: str, store: StudioStore = Depends(get_store)) -> dict:
+    project = _need(store.get_project(id), "프로젝트", id)
+    return editor_control.status(project, store.list_projects(), **_editor_sources())
+
+
+@router.post("/projects/{id}/editor/start")
+def start_editor(id: str, store: StudioStore = Depends(get_store)) -> dict:
+    project = _need(store.get_project(id), "프로젝트", id)
+    try:
+        return editor_control.start(project, store.list_projects(), _engines(), tools=_editor, **_editor_sources())
+    except editor_control.Refused as e:
+        raise _editor_refused(e) from e
+
+
+@router.post("/projects/{id}/editor/stop")
+def stop_editor(id: str, body: EditorStop | None = None, store: StudioStore = Depends(get_store)) -> dict:
+    project = _need(store.get_project(id), "프로젝트", id)
+    return editor_control.stop(project, store.list_projects(), tools=_editor, **_editor_sources(),
+                               force=True if body is None else body.force)
+
+
+@router.post("/projects/{id}/editor/screenshot", status_code=201)
+def shoot_editor(id: str, body: EditorShot, store: StudioStore = Depends(get_store)) -> dict:
+    project = _need(store.get_project(id), "프로젝트", id)
+    if body.room_id is not None:  # before anything is started: an editor is not launched for a room that is not there
+        _need(store.get_room(body.room_id), "방", body.room_id)
+    try:
+        shot = editor_control.screenshot(project, store.list_projects(), _engines(), _attachment_root(),
+                                         tools=_editor, **_editor_sources())
+    except editor_control.Refused as e:
+        raise _editor_refused(e) from e
+    if body.room_id is None:  # the picture stays in its `shot_` folder: that is the address it is fetched from
+        return {"attachment": {"name": shot.name, "path": f"{shot.parent.name}/{shot.name}",
+                               "mime": _mime(shot.name), "size": shot.stat().st_size}, "message": None}
+    copied: Path | None = None
+    try:
+        with store.transaction() as tx:  # the row, its file and `message.created` together, like post_message
+            room = _need(store.get_room(body.room_id, tx=tx), "방", body.room_id)
+            message = store.create_message(room["id"], "system", tx=tx, body=f"{project['name']} 에디터 뷰포트",
+                                           meta={"event": "editor.screenshot", "project_id": id})
+            copied = _attachment_root() / str(message["id"])  # named after the message id, known only now
+            refs = files.copy([(shot, shot.name)], copied)
+            message = store.set_message_attachments(tx, message["id"], refs)
+            store.emit(tx, "message.created", {"message": message}, room_id=room["id"], task_id=room["task_id"],
+                       project_id=_room_project(store, room, tx))
+    except BaseException:
+        if copied is not None:  # rolled back: the id may be handed out again, so its folder must not stay
+            shutil.rmtree(copied, ignore_errors=True)
+        raise
+    finally:
+        shutil.rmtree(shot.parent, ignore_errors=True)  # the message's folder has the picture now
+    return {"attachment": refs[0], "message": message}
 
 
 def _unique_field(message: str) -> str:
@@ -1068,6 +1251,49 @@ def use_engine(engine: Callable[[], Any] | None, *, tokens: Callable[[str], dict
     global _engine, _tokens, _run_view
     _engine, _tokens = engine, tokens
     _run_view = (lambda run_id: review.run_view(engine(), run_id)) if engine is not None else None
+
+
+def use_jobs(*, reload: Callable[[], Any], local_file: Path | str, run: Callable[..., int] | None = None,
+             is_open: Callable[[int], bool] | None = None) -> None:
+    """Set what making a project needs of the server (studio/jobs.py `Jobs`), after install(): `local_file` —
+    the settings file the `register` step writes the repository in — and `reload`, which makes the server read
+    its settings again and gives its RepoRegistry. `run` and `is_open` stand in for the process runner and the
+    port check (tests); left out, they are the real ones. The `Jobs` made from an earlier call is forgotten."""
+    global _job_parts, _jobs
+    parts: dict[str, Any] = {"reload": reload, "local_file": Path(local_file)}
+    if run is not None:
+        parts["run"] = run
+    if is_open is not None:
+        parts["is_open"] = is_open
+    with _lock:
+        _job_parts, _jobs = parts, None
+
+
+def _job_runner() -> Any:
+    """The `Jobs` of this server, made on first use — and again when the studio folder is another one (a test
+    moves `runs_dir`). 503 `unavailable` while nobody called `use_jobs`."""
+    global _jobs
+    cfg = _config()
+    with _lock:
+        if _job_parts is None:
+            raise StudioError("unavailable", "프로젝트 생성이 서버에 연결되지 않았습니다 (use_jobs 가 불리지 않았습니다)")
+        if _jobs is None or _jobs.studio_dir != cfg.studio_dir:
+            _jobs = create_jobs.Jobs(cfg.studio_dir, harness_root=lambda: _config().studio_harness_root,
+                                     live=_say, **_job_parts)
+        return _jobs
+
+
+def recover_jobs() -> list[dict]:
+    """What server.py does once when it starts: the job files a server that stopped left `pending` or
+    `running` are made `failed`, so they can be retried or cleaned (`Jobs.recover`); the answer is those jobs.
+    The store is opened only when there is such a file. Never raises: a start that could not look is logged."""
+    try:
+        return _job_runner().recover(get_store)
+    except StudioError:  # nobody called use_jobs: no job was ever made here
+        return []
+    except Exception:  # noqa: BLE001 - the server starts all the same
+        log.exception("studio: 중단된 생성 작업을 확인하지 못했다")
+        return []
 
 
 def held_runs() -> set[str]:
@@ -1784,7 +2010,7 @@ MAX_ATTACHMENT_MB = files.MAX_ATTACHMENT_MB                              # the l
 STAGED = "_staged"                                  # uploads not attached to a message yet
 STAGED_ID = re.compile(r"att_[0-9a-f]{12}")
 TAKEN = ".taken"                                    # suffix of a staged folder that a message has claimed
-ATTACHED_ID = re.compile(r"\d+|inb_[0-9a-f]{8}")    # a folder is a message id or an inbox id
+ATTACHED_ID = re.compile(r"\d+|inb_[0-9a-f]{8}|shot_[0-9a-f]{12}")  # a message id, an inbox id, a screenshot (M-7)
 UNSAFE_NAME = files.UNSAFE_NAME  # the cleaning of POST /attachments (server.py)
 
 

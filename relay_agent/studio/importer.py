@@ -13,14 +13,17 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
+
+from ..projctx import INSTRUCTION_FILES  # the rules files a relay run reads; projctx imports nothing of studio
+from .machine import _same  # paths as two of them are compared: slashes, case, the slash at the end
 
 INI = ("Config", "DefaultEngine.ini")
 INI_SECTION = "[unrealmcp]"  # compared in lower case
 INI_KEY = "port"
 MCP_JSON = ".mcp.json"
 PORT_ENV = "UNREAL_MCP_PORT"
-HARNESS_FILE, HARNESS_FOLDER = "CLAUDE.md", "Docs"
+HARNESS_FOLDER = "Docs"
 
 
 # --- reading ----------------------------------------------------------------------------------------------
@@ -123,13 +126,41 @@ def in_git(folder: Path, top: Path | None = None) -> bool:
         at = at.parent
 
 
+# --- the projects that are already there ------------------------------------------------------------------
+def conflict(others: Iterable[dict], *, name: str, folder: Path | str, repo: str) -> tuple[str, str] | None:
+    """Would a project of this folder, name and repository clash with one of `others` (the `projects` rows, the
+    archived ones too — they keep their name and repository)? `(field, detail)` of the first that does, in the
+    order `path` · `name` · `repo` (§6.4); None when none does. The list of projects does not show an archived
+    one, so the detail says when all that hold it are archived. Asked by `POST /studio/projects` and by M-5's
+    `register` — one rule for a project brought in and one made."""
+    rows = list(others)
+    for field, taken, detail in (
+            ("path", lambda p: _same(p["path"]) == _same(folder), f"이 폴더는 이미 프로젝트로 등록돼 있습니다: {folder}"),
+            ("name", lambda p: p["name"] == name, f"이름 '{name}' 은(는) 다른 프로젝트가 쓰고 있습니다"),
+            ("repo", lambda p: p["repo"] == repo, f"저장소 '{repo}' 은(는) 다른 프로젝트가 쓰고 있습니다")):
+        held = [p for p in rows if taken(p)]
+        if held:
+            note = " (보관된 프로젝트입니다)" if all(p["archived_at"] is not None for p in held) else ""
+            return field, detail + note
+    return None
+
+
 # --- the whole answer -------------------------------------------------------------------------------------
+def rules(folder: Path | str) -> list[str]:
+    """The instruction files a relay run reads (`projctx.INSTRUCTION_FILES`) that are in `folder`, in that
+    order. The one judgement of "the harness's rules are here": the `harness` step of a new project (M-5) and
+    `detect` both ask this, so that a project the step passed is not reported as lacking them when brought in."""
+    return [name for name in INSTRUCTION_FILES if (Path(folder) / name).is_file()]
+
+
 def detect(folder: Path, engines: list[dict], top: Path | None = None) -> dict:
     """What `POST /studio/projects` answers as `detected` (§6.4): `{uproject, engine, mcp, harness, git,
     missing}`. `engines` is `machine.engines()` — `[{version, path, exists}]`; `top` the root of the repository
     the folder lies in. `mcp.port` is the ini's, and `.mcp.json`'s only when the ini names none: the ini is
     what the plugin in the editor reads. `mcp.in_use_by` is left None for the caller, who knows the other
-    projects. `missing` names what M-4 (`mcp`) and M-5 (`harness`) would fill in."""
+    projects. `harness.claude_md` keeps its name (the key is the contract) and means: one of the rules files a
+    relay run reads is there (`rules` — `CLAUDE.md`, `CLAUDE.local.md` or `.claude/CLAUDE.md`); `harness.docs`
+    is the `Docs` folder. `missing` names what M-4 (`mcp`) and M-5 (`harness`) would fill in."""
     folder = Path(folder)
     uproject = find_uproject(folder)
     association = engine_association(uproject) if uproject is not None else ""
@@ -137,7 +168,7 @@ def detect(folder: Path, engines: list[dict], top: Path | None = None) -> dict:
         e.get("version") == association and bool(e.get("exists")) for e in engines)
     ini, listed = ini_port(folder), mcp_json_port(folder)
     port = ini if ini is not None else listed
-    harness = {"claude_md": (folder / HARNESS_FILE).is_file(), "docs": (folder / HARNESS_FOLDER).is_dir()}
+    harness = {"claude_md": bool(rules(folder)), "docs": (folder / HARNESS_FOLDER).is_dir()}
     missing = [name for name, gone in (("mcp", port is None), ("harness", not all(harness.values()))) if gone]
     return {"uproject": uproject.name if uproject is not None else None,
             "engine": {"association": association, "installed": installed},

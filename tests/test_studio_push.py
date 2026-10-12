@@ -561,6 +561,50 @@ def test_each_trigger_goes_out_with_the_grade_of_the_table(studio, http, monkeyp
     ]
 
 
+def test_a_job_is_pushed_as_it_ends_and_not_when_it_is_cleaned(studio, http, tmp_path, monkeypatch):
+    """The `job.finished` that jobs.py itself writes (M-8), as far as the line that is sent: the steps are
+    stand-ins, the job's file, its events and the store's commit are the real ones."""
+    from relay_agent.repos import RepoRegistry
+    from relay_agent.studio import harness, jobs
+    from relay_agent.studio.creator import Spec, StepResult
+
+    studio.device(1, "fcm-1")
+    ends = {"build": "빌드 실패\n로그 300줄"}
+
+    def step(self, name, store, job, admitted, hear):
+        if name == "register":
+            row = store.create_project(admitted.spec.name, str(admitted.spec.root), admitted.spec.name)
+            return harness.RegisterResult(name, repo=row["repo"], project=row)
+        return StepResult(name, error=ends.get(name, ""))
+
+    monkeypatch.setattr(jobs.Jobs, "_step", step)
+    runner = jobs.Jobs(tmp_path / "studio", local_file=tmp_path / "relay.config.local.yaml",
+                       reload=lambda: RepoRegistry({}), harness_root=lambda: "")
+    request = {"name": "Sample", "engine_version": "5.7", "parent_dir": str(tmp_path / "Projects"), "plugins": [],
+               "harness": False}
+    admitted = jobs.Admitted(Spec("Sample", "5.7", tmp_path / "UE_5.7", tmp_path / "Projects"), [], False, request)
+
+    def ended(job):
+        assert runner.wait(job["id"], 30.0) and studio.pusher.drain()
+        return runner.get(job["id"])
+
+    failed = ended(runner.create(studio.store, admitted))
+    assert (failed["status"], failed["error"]) == ("failed", "build: 빌드 실패\n로그 300줄")
+    cleaned = runner.cleanup(studio.store, failed["id"])
+    assert cleaned["status"] == "cleaned" and studio.pusher.drain()
+    ends.clear()
+    done = ended(runner.create(studio.store, admitted))
+    assert done["status"] == "done" and studio.store.get_project(done["project_id"])["name"] == "Sample"
+
+    told = [(row["data"]["job_id"], row["data"]["status"]) for row in studio.store.list_stream_events(limit=1000)
+            if row["type"] == "job.finished"]
+    assert told == [(failed["id"], "failed"), (failed["id"], "cleaned"), (done["id"], "done")]
+    assert http.messages() == [
+        fcm("fcm-1", "프로젝트 생성 실패", "build: 빌드 실패", ("job", failed["id"])),
+        fcm("fcm-1", "프로젝트 생성 완료", "", ("project", done["project_id"])),
+    ]  # the cleanup is not told of: the owner asked for it
+
+
 def test_a_muted_room_keeps_its_employees_words_and_nothing_else(studio, http):
     studio.device(1, "fcm-1")
     minsu, dm = studio.employee()

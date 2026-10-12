@@ -350,6 +350,13 @@ class StudioStore:
     def update_project(self, project_id: str, *, tx: Tx | None = None, **fields) -> dict | None:
         return self._update(PROJECTS, {"id": project_id}, fields, tx)
 
+    def delete_project(self, project_id: str, *, tx: Tx | None = None) -> bool:
+        """Take a project's row out; False when there is none. Nothing that names it goes with it: while an
+        employee, a task or a room does, this is `sqlite3.IntegrityError` and the row stays (the cleanup of a
+        failed job, M-8 — the one place a project is deleted; everywhere else it is archived)."""
+        cur = self._run("DELETE FROM projects WHERE id = ?", (project_id,), tx)
+        return cur.rowcount == 1
+
     # --- departments --------------------------------------------------------------------------------------
     def create_department(self, name: str, *, tx: Tx | None = None, **fields) -> dict:
         return self._insert(DEPARTMENTS, dict(fields, name=name), tx)

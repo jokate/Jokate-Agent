@@ -30,8 +30,9 @@ Chat and read turns do not come here and are not counted (§4.6): chat.py advanc
 What follows when the run of a slot has stopped — step 2 of §4.7 (the decision texts), the `stage_skipped` rows
 and the table — is studio/work.py's (`stopped`), and so is the recovery at the server's start (`recover`, §4.8),
 whose step 3 is this queue's `kick`. A run that stops for approval is filed by `runs.RunSink` before `advance`
-is back; the table files it only when the sink did not. The editor check (M-7) is `editor_ready`, which lets
-every run go on.
+is back; the table files it only when the sink did not. The editor check (M-7) is `editor_ready`: the effects'
+own (`WorkEffects.editor_ready` — it starts the editor, waits for it and files the T4 itself); effects that have
+none let every run go on.
 """
 
 from __future__ import annotations
@@ -268,9 +269,15 @@ class TaskQueue:
 
     # --- the thread of a slot (§4.7) ------------------------------------------------------------------------
     def editor_ready(self, task: dict, run_id: str) -> bool:
-        """The editor check before a run that uses MCP goes on (§4.3 T3 · §4.7). M-7 puts it here; until then
-        every run goes on. False: the run is not advanced and the slot is let go."""
-        return True
+        """The editor check before a run that uses MCP goes on (§4.3 T3 · §4.7), after T3 and before a run is
+        taken up again: the effects' `editor_ready(inbox, task, run_id)` (work.py), which has filed the T4 when
+        it says no. Effects without one, or no store: every run goes on. False: the run is not advanced and the
+        slot is let go."""
+        check = getattr(self.effects, "editor_ready", None)
+        inbox = self.inbox()
+        if check is None or inbox is None:
+            return True
+        return bool(check(inbox, task, run_id))
 
     def _work(self, task_id: str) -> None:
         """What a slot is for: T3 or leaving the line, the run until it stops, and then the steps of §4.7 —
