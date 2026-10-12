@@ -865,6 +865,25 @@ def test_a_hire_that_cannot_be_made_stays_pending_and_leaves_no_folder(world):
     assert hello["body"] == inbox.GREETING.replace("{name}", "서연")
 
 
+def test_a_hire_into_a_part_archived_since_stays_pending(world):
+    part = world.owner.post("/studio/departments", json={"name": "사운드", "default_relay": "quick"}).json()
+    draft = {**DRAFT, "department_id": part["id"], "employee_yaml": f"version: 1\ndepartment: {part['id']}\n"}
+    first, late = world.hire(draft=draft), world.hire(draft_id="drf_2", draft={**draft, "name": "하람"})
+    ok(world.decide(first, "approve"))  # while the part is there it takes a hire
+    staff, = world.store.list_employees(department_id=part["id"])
+    world.store.update_employee(staff["id"], retired_at=now())  # nobody in service: the part can be archived
+    ok(world.owner.post(f"/studio/departments/{part['id']}/archive"))  # a hire that waits does not keep it
+    assert world.store.get_department(part["id"])["archived_at"] and world.item(late)["status"] == "pending"
+    commits = len(world.hk.calls)
+
+    why = refused(world.decide(late, "approve"), 409, "precondition_failed")  # looked at again at the approval (§5.5)
+    assert why["failed"] == [] and "파트가 없다" in why["detail"]
+    assert world.item(late)["status"] == "pending" and len(world.hk.calls) == commits
+    assert [folder.name for folder in (world.dir / "employees").iterdir()] == [staff["id"]]  # no folder for it
+    assert [row["name"] for row in world.store.list_employees(include_retired=True)
+            if row["department_id"] == part["id"]] == ["서연"]
+
+
 def test_a_hire_decided_in_between_is_already_decided(world, monkeypatch):
     item = world.hire()
     real = world.box._name_taken

@@ -57,6 +57,9 @@ HR_DIR = Path(__file__).with_name("hr")  # the HR employee's own files (H-1 · H
 HR_NAME = "인사"  # the title of hr/PERSONA.md; the HR employee's row takes this name
 HR_ID = "emp_68720001"  # the HR employee a start makes (§3.15); fixed, as the seed's
 HR_DEPARTMENT = "hr"
+PARTS_DIR = Path(__file__).with_name("parts")  # the originals of the three other parts (H-1): <id>.md · defaults.yaml
+PART_IDS = ("design_doc", "program", "design_setup")  # the parts `fill_parts` fills, in the order of the seed
+MODEL_KEYS = ("chat", "work", "cap")  # the keys of `departments.default_models` (§9.2)
 
 
 def _problem(code: str, message: str) -> dict:
@@ -500,7 +503,10 @@ def hiring_notes(store: StudioStore, checks: Checks, catalog: Iterable[dict] | N
     owner's (§8.4 인사 전용): the projects that are not archived, the parts but HR's own with the `chat` default
     of each, and of `catalog` (`ProviderRegistry.catalog()`) the models of the Claude Code runners with the
     efforts each takes. A catalog that is empty or not given leaves the models out. One section, titled the way
-    `assemble` titles its own; it is no part of `assemble` — a task's run does not get it."""
+    `assemble` titles its own; it is no part of `assemble` — a task's run does not get it.
+
+    H-1: for each of those parts, also what a key that is not written takes (the relay, the MCP, `work`, `cap`)
+    and the body of its `guide_template` — the frame HR fills for `guide_md`. A part without one says so."""
     lines: list[str] = []
     projects = store.list_projects()
     if projects:
@@ -509,12 +515,13 @@ def hiring_notes(store: StudioStore, checks: Checks, catalog: Iterable[dict] | N
     else:
         lines.append("프로젝트: 아직 없다. `project_id` 를 비운다.")
     lines.append("파트 — `department_id` 와 `employee_yaml` 의 `department` 에 id 를 적는다:")
-    for part in store.list_departments():
-        if part["id"] == HR_DEPARTMENT:
-            continue
+    parts = [part for part in store.list_departments() if part["id"] != HR_DEPARTMENT]
+    for part in parts:
         slot = _mapping(_mapping(part.get("default_models")).get("chat"))
         default = " · ".join(str(slot[key]) for key in CAP_KEYS if slot.get(key)) or "기본값 없음"
         lines.append(f"- `{part['id']}` {part['name']} (chat 기본값: {default})")
+    lines.append("파트 기본값 — `employee_yaml` 에 적지 않은 키가 따르는 값이다. owner 가 다르게 정했을 때만 적는다:")
+    lines += [_defaults_line(part) for part in parts]
     models: dict[str, list] = {}
     for item in catalog or ():
         if not (isinstance(item, dict) and item.get("provider") and checks.guarded(item["provider"])):
@@ -527,7 +534,93 @@ def hiring_notes(store: StudioStore, checks: Checks, catalog: Iterable[dict] | N
         lines.append("모델 — `employee_yaml` 의 `chat` 에 적는다 (지금 이 PC 에서 쓸 수 있는 것):")
         lines += [f"- `{name}` 노력치 {' · '.join(map(str, efforts))}" if efforts
                   else f"- `{name}` 노력치 없음 — `effort` 를 적지 않는다" for name, efforts in models.items()]
+    lines.append("GUIDE 틀 — `guide_md` 는 그 파트의 틀을 면담 내용으로 채운다. 틀이 없는 파트는 범용 틀을 쓴다:")
+    for part in parts:
+        frame = part.get("guide_template").strip() if isinstance(part.get("guide_template"), str) else ""
+        lines.append(f"--- `{part['id']}` {part['name']} 의 틀 ---")
+        lines.append(frame or "(틀 없음 — 범용 틀)")
     return f"===== {HIRING_TITLE} =====\n" + "\n".join(lines)
+
+
+def _slot_text(slot: Any) -> str:
+    """`opus/high`: the model and the effort of a slot or a cap, whichever is written."""
+    return "/".join(str(slot[key]) for key in CAP_KEYS if _mapping(slot).get(key))
+
+
+def _defaults_line(part: dict) -> str:
+    """One line of `hiring_notes`: what an employee.yaml of this part takes for the keys it does not write."""
+    models = _mapping(part.get("default_models"))
+    work = ", ".join(f"{stage}={_slot_text(slot)}" for stage, slot in _mapping(models.get("work")).items()
+                     if _slot_text(slot))
+    values = (("relay", part.get("default_relay")), ("mcp", ", ".join(_name_list(part.get("default_mcp")))),
+              ("work", work), ("cap", _slot_text(models.get("cap"))))
+    return f"- `{part['id']}` " + " · ".join(f"{key} {value or '없음'}" for key, value in values)
+
+
+# --- the three other parts (H-1; §3.4 · §3.15) --------------------------------------------------------------
+def part_defaults() -> dict[str, dict]:
+    """What the rows of PART_IDS take where they have nothing, from relay_agent/studio/parts/: `guide_template`
+    is `<id>.md`, `default_mcp` and `default_models` (`{chat, work, cap}`) are that part's entry of
+    `defaults.yaml`. The files are the original a person reads and changes; the relay is the seed's (schema.py)."""
+    data, _ = parse((PARTS_DIR / "defaults.yaml").read_text(encoding="utf-8"))
+    out: dict[str, dict] = {}
+    for part_id in PART_IDS:
+        entry = _mapping(_mapping(data).get(part_id))
+        out[part_id] = {
+            "guide_template": (PARTS_DIR / f"{part_id}.md").read_text(encoding="utf-8"),
+            "default_mcp": _name_list(entry.get("mcp")),
+            "default_models": {key: entry[key] for key in MODEL_KEYS if isinstance(entry.get(key), dict) and entry[key]},
+        }
+    return out
+
+
+def defaults_problems(department_id: str, *, relay: Any, mcp: Any, models: Any, checks: Checks) -> list[dict]:
+    """The checks of §9.4 on a part's defaults: `[{code, message}]`, [] when an employee.yaml that writes none of
+    its keys would pass with them. The defaults are read as the keys of the same name of an employee.yaml of that
+    part and handed to `check`. `relay` · `mcp` of None are left out (not looked at); `models` takes `chat` ·
+    `work` · `cap` only — another key is `unknown_key`, and what is no mapping is `yaml_invalid`."""
+    if not isinstance(models, dict):
+        return [_problem("yaml_invalid", "default_models 는 {chat, work, cap} 이어야 한다")]
+    extra = [str(key) for key in models if key not in MODEL_KEYS]
+    body: dict[str, Any] = {"version": VERSION, "department": department_id}
+    body.update({key: models[key] for key in MODEL_KEYS if key in models})
+    if relay is not None:
+        body["relay"] = relay
+    if mcp is not None:
+        body["mcp"] = mcp
+    found = check(yaml.safe_dump(body, allow_unicode=True), department_id=department_id,
+                  department={"id": department_id, "default_mcp": mcp if _names(mcp) else []}, checks=checks)
+    if not extra:
+        return found
+    message = f"default_models 에 모르는 키가 있다: {', '.join(extra)}"
+    known = [p for p in found if p["code"] == "unknown_key"]
+    for problem in known:
+        problem["message"] = f"{message} / {problem['message']}"
+    found = found if known else [_problem("unknown_key", message), *found]
+    return [p for code in CODES for p in found if p["code"] == code]
+
+
+def fill_parts(store: StudioStore) -> list[dict]:
+    """Fill `guide_template` · `default_mcp` · `default_models` of the rows of PART_IDS from `part_defaults()`,
+    each cell on its own and only while it is empty ('' · [] · {}): a value that is there is never written over,
+    so a DB that already runs gets the originals and keeps what its owner changed. `default_relay` is not
+    touched — NULL says "no relay", and the seed has the three. One transaction, no event. Returns the rows
+    that were written, in the order of PART_IDS; [] when nothing was empty.
+
+    `default_models` is one cell: it is filled only while the whole of it is empty, and `chat` · `work` · `cap`
+    are not merged key by key — the owner's `chat` under the original's `cap` is a pair no check has seen. A
+    cell emptied on purpose is filled again at the next start: nothing remembers that it was emptied."""
+    written: list[dict] = []
+    defaults = part_defaults()
+    with store.transaction() as tx:
+        for part_id, values in defaults.items():
+            part = store.get_department(part_id, tx=tx)
+            if part is None:
+                continue
+            fields = {key: value for key, value in values.items() if value and not part.get(key)}
+            if fields:
+                written.append(store.update_department(part_id, tx=tx, **fields))
+    return written
 
 
 def fill_hr_part(store: StudioStore) -> dict | None:

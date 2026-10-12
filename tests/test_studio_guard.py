@@ -312,6 +312,52 @@ ALLOW = [
 ]
 
 
+# git writes files itself (H-3): in a repository under protected[] only what reads passes, and elsewhere a path
+# it would overwrite is a write target (§10.3 의 6)
+EMP = "D:/relay/runs/studio/employees/emp_1"
+EMP_WIN = EMP.replace("/", "\\")
+BLOCK += [(B, command, "protected_write") for command in (
+    f"cd {EMP} && git checkout abc1234 -- employee.yaml",
+    f"git -C {EMP} restore --source=abc1234 employee.yaml",
+    f"git --git-dir={EMP}/.git --work-tree={EMP} reset abc1234",
+    f"git --work-tree {EMP} checkout-index -a -f",
+    f"git -C {EMP} -c alias.co=checkout co abc1234 -- employee.yaml",
+    f"git -C {EMP} stash", f"git -C {EMP} commit --amend -m x", f"git -C {EMP} update-ref -d HEAD",
+    f"git -C {EMP} reset --hard abc1234", f"git -C {EMP} diff --output=employee.yaml",
+    f"git -C {EMP} -c core.fsmonitor=x status", f"git -C {EMP} grep -Ovim x", f"git -C {EMP} branch -D main",
+    "cd D:/relay && git checkout HEAD~3 -- relay_agent/studio_guard.py",
+    "cd D:/relay && git checkout HEAD~3 -- .",
+    "cd D:/relay/tests && git checkout HEAD~3 -- :/relay_agent/studio_guard.py",
+    "cd D:/relay && git co HEAD~3 -- relay_agent/studio_guard.py",  # an alias of the global settings
+    "git -C D:/relay restore --source=HEAD~1 relay_agent",
+    "git clone https://github.com/a/b D:/relay/runs/studio/b",
+    "git diff --output=D:/relay/relay.config.yaml",
+    "git config -f D:/relay/relay.config.yaml a.b c",
+    'cmd /c "cd /d ' + EMP_WIN + ' && git restore --source=abc1234 employee.yaml"',
+)] + [(P, f"git -C {EMP_WIN} restore --source=abc1234 employee.yaml", "protected_write")]
+UNPARSED += [(B, "git -C $d checkout x"), (B, "cd D:/relay && git checkout HEAD~3 -- $f"),
+             (B, "cd $DIR && git checkout abc1234 -- employee.yaml"), (B, "git diff --output=$OUT")]
+ALLOW += [(B, f"git -C {EMP} log --oneline -- employee.yaml"), (B, f"git -C {EMP} status"),
+          (B, f"git -C {EMP} show abc1234:employee.yaml"), (B, f"git -C {EMP} branch --show-current"),
+          (B, f"cd {EMP} && git diff HEAD~1 -- GUIDE.md"), (P, f"git -C {EMP_WIN} log -3"),
+          (B, "git checkout HEAD~1 -- src/a.c"), (B, "git restore ."), (B, "git stash"), (B, "git checkout main"),
+          (B, "cd D:/relay && git log -- relay_agent"), (B, "cd D:/relay && git add relay_agent/x.py"),
+          (B, "git -C $d log --oneline")]
+
+
+def test_git_in_an_employee_folder_reads_the_history_and_writes_nothing():
+    """The chat turn of an unplaced employee or of HR works in the employee's own folder (§9.5)."""
+    for command in ("git checkout abc1234 -- employee.yaml", "git restore --source=abc1234 employee.yaml",
+                    "git restore .", "git stash", "git commit -am x", "git reset abc1234", "git co abc1234"):
+        assert rule(command, cwd=EMP) == "protected_write", command
+        assert rule(command, P, cwd=EMP_WIN) == "protected_write", command
+    for command in ("git log --oneline -- employee.yaml", "git status", "git diff HEAD~1", "git show HEAD:GUIDE.md",
+                    "git branch", "git blame GUIDE.md"):
+        assert rule(command, cwd=EMP) is None, command
+    assert rule("git log -n $N", cwd=EMP) == "unparsed"  # what the variable holds is not seen
+    assert rule("git checkout abc1234 -- employee.yaml") is None  # the same line in a project's folder
+
+
 @pytest.mark.parametrize("tool,command,expected", BLOCK)
 def test_block_list(tool, command, expected):
     asked = []

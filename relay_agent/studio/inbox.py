@@ -38,7 +38,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable
 
-from . import employees
+from . import employee_git, employees
 from .store import StudioStore, Tx, now
 from .tasks import DECISIONS as TASK_DECISIONS
 from .tasks import (BLOCKING_KINDS, EDITABLE, OWNER, STARTED, TASK_TYPES, TEXT_FIELDS, Actor, TaskMachine,
@@ -326,7 +326,10 @@ class Hooks:
         return False
 
     def commit(self, folder: Path, message: str) -> None:
-        """git commit of the folder a hire approval wrote into (H-3)."""
+        """git commit of the employee's folder a `hire` · `guide_amend` approval wrote into (H-3; §9.6). Called
+        after the decision is committed: an exception is logged and the decision stays (`_safely`). The server's
+        is `runs.EngineHooks.commit` -> `employee_git.commit`; the default does nothing. The lock is not this
+        hook's to take: `_amend` · `_replace_file` hold `employee_git.lock` themselves, whatever the hooks are."""
 
     def chat_turn(self, employee_id: str, room_id: str) -> None:
         """Start that employee's chat turn in that room, so it reads the system message just written (S-7)."""
@@ -907,9 +910,10 @@ class Inbox:
                             project_id=target["project_id"])
             return fresh
 
-        fresh = self._replace_file(path, payload, commit)
-        self._safely("지침 수정의 커밋", self.hooks.commit, path.parent,
-                     f"guide_amend: {payload['file']} ({item['id']})")
+        with employee_git.lock:  # from the base check to the commit, as the REST writes hold it (§9.6)
+            fresh = self._replace_file(path, payload, commit)
+            self._safely("지침 수정의 커밋", self.hooks.commit, path.parent,
+                         f"guide_amend: {payload['file']} ({item['id']})")
         return fresh
 
     def _policy(self, item: dict, payload: dict, comment: str, stored: dict) -> dict:
@@ -929,7 +933,13 @@ class Inbox:
     def _replace_file(self, path: Path, payload: dict, commit: Callable[[Tx], dict]) -> dict:
         """Write `new_text` over the file if it is still the one the draft was made from (`base_sha256`; "" =
         no file yet), then `commit(tx)` — the decision. If that fails the file goes back to what it was, so
-        the item stays pending with nothing changed (§5.5)."""
+        the item stays pending with nothing changed (§5.5). All of it is done under `employee_git.lock`, the lock
+        the REST writes of an employee's folder hold (§9.6): of an approval and a direct write made from one
+        base, the later one finds the file changed and is refused."""
+        with employee_git.lock:
+            return self._replace_locked(path, payload, commit)
+
+    def _replace_locked(self, path: Path, payload: dict, commit: Callable[[Tx], dict]) -> dict:
         try:
             old = path.read_bytes() if path.is_file() else None
         except OSError as e:

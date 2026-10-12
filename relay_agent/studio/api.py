@@ -37,6 +37,10 @@ hand the project to studio/editor.py with the processes and the health check of 
 (`shot_<hex12>/`) and, with a `room_id`, posted in that room as a message of `system`; a `shot_` folder that was
 not posted is removed a day later, when the next picture is taken. `stop` may carry `{force}` (left out: true).
 
+An employee's files (H-3, part 1): `PUT /studio/employees/{id}/files/{name}`, `GET …/history` and `POST …/revert`
+write, list and put back the four files of the folder, each write a commit of the folder's own git
+(studio/employee_git.py; §9.6). `commit_folders()` is the start's part: a folder that has no `.git` yet gets one.
+
 Not here yet, on purpose: an owner's message is stored and announced; the turns it starts belong to
 S-7 · S-9. Tasks are not started or stopped here (S-8).
 """
@@ -67,7 +71,7 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 from starlette.concurrency import run_in_threadpool
 from starlette.requests import HTTPConnection
 
-from . import creator, devices, employees, files, guard, importer, jobs as create_jobs
+from . import creator, devices, employee_git, employees, files, guard, importer, jobs as create_jobs
 from . import editor as editor_control
 from . import machine as machine_info, review, sat, stats, tools, work
 from .inbox import Hooks, Inbox, InboxError
@@ -321,6 +325,49 @@ def ensure_hr() -> dict | None:
     except Exception:  # noqa: BLE001 - a start must not depend on this look at a file
         log.exception("studio: 인사의 GUIDE.md 를 살피지 못했다")
     return made
+
+
+def fill_parts() -> list[dict]:
+    """Fill the empty defaults of the three other parts from relay_agent/studio/parts/ (H-1; §3.4 · §3.15;
+    studio/employees.py `fill_parts`): a cell that has a value is never written over. Called once at the server's
+    start, after `ensure_hr()` and apart from it. Returns the rows that were written; [] when nothing was empty,
+    the store is not open, or it failed (logged — the server starts without it)."""
+    with _lock:
+        store = _store
+    if store is None or _cfg is None:
+        return []
+    try:
+        return employees.fill_parts(store)
+    except Exception:  # noqa: BLE001 - a start must not depend on the parts' defaults
+        log.exception("studio: 파트의 기본값을 채우지 못했다")
+        return []
+
+
+def commit_folders() -> list[str]:
+    """The first commit of every employee's folder that is no git repository yet (H-3; §2.2 · §9.6): the folders
+    made before H-3, and the ones the start itself makes (the seed, HR). The files are committed as they are —
+    nothing in them is written. A folder that has a `.git` is left alone, whatever is uncommitted there: the next
+    write takes it along. Called once at the server's start, after the folders of the start are made. Returns the
+    ids that got their first commit; a folder that fails is logged and the server starts without it."""
+    with _lock:
+        store = _store
+    if store is None or _cfg is None:
+        return []
+    try:
+        rows = store.list_employees(include_retired=True)
+    except Exception:  # noqa: BLE001 - a start must not depend on the folders' history
+        log.exception("studio: 직원 폴더의 첫 커밋을 위해 직원 목록을 읽지 못했다")
+        return []
+    done = []
+    for row in rows:
+        folder = employees.folder(_cfg.studio_dir, row["id"])
+        try:
+            if folder.is_dir() and not employee_git.is_repo(folder):
+                if employee_git.commit(folder, f"adopt: {row['id']}"):
+                    done.append(row["id"])
+        except Exception:  # noqa: BLE001 - one folder must not keep the others, or the start, from going on
+            log.exception("studio: 직원 폴더의 첫 커밋을 만들지 못했다 (%s)", folder)
+    return done
 
 
 def close_store() -> None:
@@ -935,6 +982,131 @@ def list_departments(store: StudioStore = Depends(get_store)) -> dict:
     return {"items": store.list_departments()}
 
 
+class DepartmentCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    default_relay: str | None = None            # null · '' = no relay of its own (§3.4)
+    default_mcp: list[str] | None = None
+    default_models: dict[str, Any] | None = None  # {chat, work, cap} of §9.2
+    guide_template: str | None = None
+
+
+class DepartmentPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = None
+    default_relay: str | None = None            # null · '' clears the relay
+    default_mcp: list[str] | None = None        # null is stored as []
+    default_models: dict[str, Any] | None = None  # null is stored as {}
+    guide_template: str | None = None           # null is stored as ''
+
+
+def _department_fields(fields: dict, department_id: str) -> dict:
+    """The keys a part's POST · PATCH was given, as the columns take them and checked (§3.4): the name is not
+    empty, `default_mcp` is names without `studio`, and `default_relay` · `default_models` pass the checks of
+    §9.4 as the keys of an employee.yaml (`employees.defaults_problems`) — the codes go out in `failed[]`."""
+    if "name" in fields:
+        fields["name"] = (fields["name"] or "").strip()
+        if not fields["name"]:
+            raise StudioError("missing_fields", "name 은 비울 수 없습니다", fields=["name"])
+    if "default_relay" in fields:
+        fields["default_relay"] = (fields["default_relay"] or "").strip() or None
+    if "default_mcp" in fields:
+        names = [name.strip() for name in fields["default_mcp"] or []]
+        if not all(names) or employees.STUDIO_MCP in names:
+            raise StudioError("precondition_failed", "default_mcp 는 MCP 서버 이름의 목록입니다. studio 는 서버가 "
+                              "항상 붙이므로 적지 않습니다.", failed=["mcp_unknown"])
+        fields["default_mcp"] = list(dict.fromkeys(names))
+    if "default_models" in fields:
+        fields["default_models"] = fields["default_models"] or {}
+    if "guide_template" in fields:
+        fields["guide_template"] = fields["guide_template"] or ""
+    if fields.get("default_relay") is not None or fields.get("default_models"):
+        problems = employees.defaults_problems(
+            department_id, relay=fields.get("default_relay"), mcp=None, models=fields.get("default_models") or {},
+            checks=employees.context(_config()))
+        if problems:
+            raise StudioError("precondition_failed", "파트 기본값이 employee.yaml 의 검사에 걸립니다: "
+                              + " / ".join(p["message"] for p in problems), failed=[p["code"] for p in problems])
+    return fields
+
+
+def _name_taken(name: str) -> StudioError:
+    return StudioError("conflict", f"이름 '{name}' 은(는) 다른 파트가 쓰고 있습니다 (보관된 파트 포함)", field="name")
+
+
+# H-1 (§3.4 · §3.6): a part of the owner's comes with its room, in the one transaction; the room's `room.updated`
+# is the only event (§7.4 has none of a part). Comments, not docstrings, on the three below: the saved contract
+# (openapi.json) would carry a docstring as the path's description.
+@router.post("/departments", status_code=201)
+def create_department(body: DepartmentCreate, store: StudioStore = Depends(get_store)) -> dict:
+    fields = _department_fields(body.model_dump(exclude_unset=True), "new")
+    name = fields.pop("name")
+    fields = {key: value for key, value in fields.items() if value is not None}
+    with store.transaction() as tx:
+        parts = store.list_departments(include_archived=True, tx=tx)
+        if any(part["name"] == name for part in parts):
+            raise _name_taken(name)
+        order = max((part["sort_order"] for part in parts), default=-1) + 1
+        try:
+            row = store.create_department(name, tx=tx, sort_order=order, **fields)
+            room = store.create_room("department", title=name, department_id=row["id"], tx=tx)
+        except sqlite3.IntegrityError as e:
+            raise _name_taken(name) from e
+        store.emit(tx, "room.updated", {"room": room, "members": []}, room_id=room["id"])
+    return row
+
+
+# A builtin part is patched as any other: only its id and `builtin` cannot change. A new name goes to the part's
+# room as well. Nothing changes: no write, no event.
+@router.patch("/departments/{id}")
+def patch_department(id: str, body: DepartmentPatch, store: StudioStore = Depends(get_store)) -> dict:
+    with store.transaction() as tx:
+        row = _need(store.get_department(id, tx=tx), "파트", id)
+        fields = _department_fields(body.model_dump(exclude_unset=True), id)
+        fields = {key: value for key, value in fields.items() if row[key] != value}
+        if not fields:
+            return row
+        name = fields.get("name")
+        if name is not None and any(part["name"] == name and part["id"] != id
+                                    for part in store.list_departments(include_archived=True, tx=tx)):
+            raise _name_taken(name)
+        try:
+            row = store.update_department(id, tx=tx, **fields)
+        except sqlite3.IntegrityError as e:
+            raise _name_taken(name or row["name"]) from e
+        if name is not None:
+            for room in store.list_rooms(kind="department", department_id=id, include_archived=True, tx=tx)[:1]:
+                room = store.update_room(room["id"], tx=tx, title=name)
+                members = store.list_room_members(room_id=room["id"], tx=tx)
+                store.emit(tx, "room.updated", {"room": room, "members": members}, room_id=room["id"])
+    return row
+
+
+# Refused for a builtin part and for one that has an employee in service (not retired). The part's room is
+# archived with it. Already archived: the same row, no second event. Its name stays taken.
+@router.post("/departments/{id}/archive")
+def archive_department(id: str, store: StudioStore = Depends(get_store)) -> dict:
+    with store.transaction() as tx:
+        row = _need(store.get_department(id, tx=tx), "파트", id)
+        if row["archived_at"] is not None:
+            return row
+        if row["builtin"]:
+            raise StudioError("precondition_failed", "기본 파트는 보관할 수 없습니다.")
+        staff = store.list_employees(department_id=id, tx=tx)
+        if staff:
+            raise StudioError("precondition_failed",
+                              f"재직 중인 직원이 {len(staff)}명 있습니다. 퇴사시키거나 다른 파트로 옮긴 뒤에 보관하세요.")
+        stamp = now()
+        row = store.update_department(id, tx=tx, archived_at=stamp)
+        for room in store.list_rooms(kind="department", department_id=id, tx=tx)[:1]:
+            room = store.update_room(room["id"], tx=tx, archived_at=stamp)
+            members = store.list_room_members(room_id=room["id"], tx=tx)
+            store.emit(tx, "room.updated", {"room": room, "members": members}, room_id=room["id"])
+    return row
+
+
 # §6.4: the alias of `GET /models`, narrowed to the providers a guard hook can be put on — Claude Code. The
 # values an `employee.yaml` slot and a `start` override may name (§9.4 의 8, §9.5 의 5). No docstring: the
 # saved contract (openapi.json) would carry it as the path's description.
@@ -966,6 +1138,172 @@ def get_employee(id: str, store: StudioStore = Depends(get_store)) -> dict:
     tasks = [t for t in store.list_tasks(assignee_id=id) if t["status"] not in TERMINAL]
     # `runs` (the employee's studio runs going on now) is filled by S-7 · S-8
     return {**row, "files": _employee_files(id), "tasks": tasks, "runs": []}
+
+
+# --- an employee's files and their history (H-3, part 1; §6.4 · §9.6) ---------------------------------------
+# The owner's direct write and the revert: check -> write -> commit of the folder's own git -> `employee.updated`
+# (`change = file`). `employee_git.lock` is held from the read to the commit, so of two writes made from one
+# base only the first passes. A commit that fails leaves the file written and answers `commit: null` (logged):
+# the next commit takes the change along, as the approvals' `Inbox._safely` does. Comments, not docstrings,
+# where the saved contract (openapi.json) would carry more than a line.
+EmployeeFileName = Literal["PERSONA.md", "GUIDE.md", "MEMORY.md", "employee.yaml"]  # employees.FILES
+
+
+class EmployeeFileBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    text: str
+    base_sha256: str  # of the file the text was made from; "" = there was no file
+
+
+class EmployeeRevert(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    commit: str  # a sha of the folder's history, or the start of one (7–40 hex digits)
+
+
+def _file_bytes(path: Path) -> bytes | None:
+    try:
+        return path.read_bytes() if path.is_file() else None
+    except OSError as e:
+        raise StudioError("precondition_failed", f"파일을 읽지 못했습니다: {e}") from e
+
+
+def _file_restore(path: Path, old: bytes | None) -> None:
+    try:
+        if old is None:
+            path.unlink(missing_ok=True)
+        else:
+            path.write_bytes(old)
+    except OSError:
+        log.exception("studio: %s 를 되돌리지 못했다", path)
+
+
+def _yaml_checked(store: StudioStore, employee: dict, text: object) -> None:
+    """§9.6: the checks of §9.4, the same on every way an `employee.yaml` is written."""
+    problems = employees.check(text, department_id=employee["department_id"],
+                               department=store.get_department(employee["department_id"]),
+                               checks=employees.context(_config()))
+    if problems:
+        raise StudioError("precondition_failed", "employee.yaml 이 검사에 걸립니다: "
+                          + " / ".join(p["message"] for p in problems), failed=[p["code"] for p in problems])
+
+
+def _folder_head(folder: Path) -> str | None:
+    try:
+        return employee_git.head(folder)
+    except Exception:  # noqa: BLE001 - the answer of a write must not depend on reading the history
+        log.exception("studio: 직원 폴더의 마지막 커밋을 읽지 못했다 (%s)", folder)
+        return None
+
+
+def _folder_commit(folder: Path, message: str) -> str | None:
+    """Commit the folder and give the sha it is at now. None when git failed: logged, the files stay written."""
+    try:
+        return employee_git.commit(folder, message) or employee_git.head(folder)
+    except Exception:  # noqa: BLE001 - the file is written: what follows must not hide or undo that
+        log.exception("studio: 직원 폴더를 커밋하지 못했다 (%s, '%s') — 파일은 그대로다", folder, message)
+        return None
+
+
+def _file_changed(store: StudioStore, employee: dict) -> None:
+    with store.transaction() as tx:
+        store.emit(tx, "employee.updated", {"employee": employee, "change": "file"},
+                   project_id=employee["project_id"])
+
+
+@router.put("/employees/{id}/files/{name}")
+def put_employee_file(id: str, name: EmployeeFileName, body: EmployeeFileBody,
+                      store: StudioStore = Depends(get_store)) -> dict:
+    """Write the file if it is still the one `base_sha256` names ("" = no file yet), and commit the folder."""
+    with employee_git.lock:
+        employee = _need(store.get_employee(id), "직원", id)
+        if name == "employee.yaml":
+            _yaml_checked(store, employee, body.text)
+        elif name == "MEMORY.md":
+            problems = employees.memory_problems(body.text)
+            if problems:
+                raise StudioError("precondition_failed", " / ".join(p["message"] for p in problems),
+                                  failed=[p["code"] for p in problems])
+        folder = employees.folder(_config().studio_dir, id)
+        path = folder / name
+        old = _file_bytes(path)
+        if (hashlib.sha256(old).hexdigest() if old is not None else "") != body.base_sha256.strip().lower():
+            raise StudioError("precondition_failed", "읽은 뒤에 파일이 바뀌었습니다. 지금 파일을 다시 읽고 고쳐 보냅니다.",
+                              failed=["base_mismatch"])
+        new = body.text.encode("utf-8")
+        digest = hashlib.sha256(new).hexdigest()
+        if new == old:  # nothing to write: no commit and no event
+            return {"name": name, "sha256": digest, "commit": _folder_head(folder)}
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(new)
+        except OSError as e:
+            _file_restore(path, old)
+            raise StudioError("precondition_failed", f"파일을 쓰지 못했습니다: {e}") from e
+        commit = _folder_commit(folder, f"edit: {name}")
+        _file_changed(store, employee)
+        return {"name": name, "sha256": digest, "commit": commit}
+
+
+# The newest first, 200 at most; `files` are all the files that commit changed. [] while the folder has no
+# history. A git that cannot be read is `engine_error`, as the refusals of git are elsewhere (§4.3 T7).
+@router.get("/employees/{id}/history")
+def employee_history(id: str, file: EmployeeFileName | None = None,
+                     store: StudioStore = Depends(get_store)) -> list[dict]:
+    """`file` keeps the commits that changed that file."""
+    _need(store.get_employee(id), "직원", id)
+    try:
+        return employee_git.history(employees.folder(_config().studio_dir, id), file)
+    except employee_git.GitError as e:
+        raise StudioError("engine_error", f"직원 폴더의 이력을 읽지 못했습니다: {e}") from e
+
+
+# The four files go back to what that commit has, in a new commit: nothing of the history is taken away, and a
+# file that commit does not have is left as it is. The `employee.yaml` it would bring back is checked first —
+# nothing is written when it fails (§9.6). What is uncommitted in the folder is committed before (`keep:`), so
+# a change made by hand is not lost to the revert.
+@router.post("/employees/{id}/revert")
+def revert_employee(id: str, body: EmployeeRevert, store: StudioStore = Depends(get_store)) -> dict:
+    """Put the four files back to what that commit has, as a new commit."""
+    with employee_git.lock:
+        employee = _need(store.get_employee(id), "직원", id)
+        folder = employees.folder(_config().studio_dir, id)
+        try:
+            sha = employee_git.resolve(folder, body.commit)
+            then = {name: employee_git.show(folder, sha, name) for name in employees.FILES} if sha else {}
+        except employee_git.GitError as e:
+            raise StudioError("engine_error", f"직원 폴더의 이력을 읽지 못했습니다: {e}") from e
+        if sha is None:
+            raise StudioError("precondition_failed", "이 직원 폴더의 이력에 없는 커밋입니다. sha(7–40자)로 적습니다.",
+                              failed=["commit_unknown"])
+        then = {name: data for name, data in then.items() if data is not None}
+        if "employee.yaml" in then:
+            try:
+                text: object = then["employee.yaml"].decode("utf-8")
+            except UnicodeDecodeError:
+                text = None  # not a text: check 1 says so
+            _yaml_checked(store, employee, text)
+        changed = {}
+        for name, data in then.items():
+            old = _file_bytes(folder / name)
+            if old != data:
+                changed[name] = (old, data)
+        if not changed:  # already as that commit has it: no commit and no event
+            return {"commit": _folder_head(folder)}
+        _folder_commit(folder, "keep: before revert")  # nothing to commit, unless the folder was changed by hand
+        written = []
+        try:
+            for name, (old, data) in changed.items():
+                written.append(name)
+                (folder / name).write_bytes(data)
+        except OSError as e:
+            for name in written:
+                _file_restore(folder / name, changed[name][0])
+            raise StudioError("precondition_failed", f"파일을 쓰지 못했습니다: {e}") from e
+        commit = _folder_commit(folder, f"revert: {sha[:7]}")
+        _file_changed(store, employee)
+        return {"commit": commit}
 
 
 # --- campaigns · tasks (§6.4) -----------------------------------------------------------------------------

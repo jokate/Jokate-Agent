@@ -960,6 +960,22 @@ def ensure_studio_hr() -> None:
     studio_api.ensure_hr()
 
 
+# The three other parts (H-1; design/studio/ARCHITECTURE.md §3.4 · §3.15): the empty cells of their rows take the
+# originals of relay_agent/studio/parts/ — a DB that already runs as well, and a value that is there is kept. A
+# startup function of its own, right after the HR one: neither waits on the other.
+@app.on_event("startup")
+def fill_studio_parts() -> None:
+    studio_api.fill_parts()
+
+
+# The employees' folders (H-3; design/studio/ARCHITECTURE.md §2.2 · §9.6): one that has no `.git` yet — made
+# before H-3, or by the seed · HR startups above — gets its first commit, with its files as they are. After the
+# startups that make folders; a folder that fails is logged and the server starts.
+@app.on_event("startup")
+def commit_studio_folders() -> None:
+    studio_api.commit_folders()
+
+
 # Task runs (S-8, part 1; design/studio/ARCHITECTURE.md §9.5 · §11.2): what T3 makes a task's run with on this
 # engine, and the models `GET /studio/models` lists — this engine's registry, which knows the benched ones. Down
 # here for the reasons given above.

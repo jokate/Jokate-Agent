@@ -1161,7 +1161,129 @@ def _write_targets(cmd: Cmd, c: Ctx) -> list:
     return out
 
 
+# git writes files itself (§10.3 의 6): where it works, what only reads, what overwrites the work tree by a path
+GIT_VALUED = ("-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env", "--super-prefix",
+              "--attr-source")
+GIT_READ = {"status", "log", "show", "diff", "rev-parse", "rev-list", "ls-files", "ls-tree", "cat-file", "blame",
+            "grep", "describe", "shortlog", "merge-base", "name-rev", "for-each-ref", "show-ref", "diff-tree",
+            "diff-index", "diff-files", "check-ignore", "check-attr", "count-objects", "version", "help"}
+GIT_LISTS = {"branch", "tag", "remote"}  # read only while they list
+GIT_LIST_FLAGS = {"--show-current", "-a", "-r", "-v", "-vv", "-l", "--list"}
+GIT_TREE = {"checkout", "restore", "reset", "rm", "mv", "clean", "stash", "checkout-index", "read-tree", "worktree",
+            "clone", "init", "bundle", "sparse-checkout", "submodule"}
+GIT_ANYWHERE = {"clone", "init", "worktree", "bundle", "submodule"}  # their path need not lie in the work tree
+GIT_PLAIN = {"add", "commit", "push", "fetch", "pull", "merge", "rebase", "switch", "cherry-pick", "revert",
+             "config", "gc", "reflog", "notes", "bisect", "apply", "am", "format-patch", "archive", "fsck", "prune",
+             "repack", "update-index", "update-ref", "symbolic-ref", "maintenance", "ls-remote", "range-diff",
+             "whatchanged", "var", "verify-commit", "verify-tag", "difftool", "mergetool", "gui", "lfs"}
+
+
+@dataclass
+class GitCall:
+    sub: str             # the subcommand, lower case
+    rest: list           # the tokens after it
+    cwd: object          # the folder git works in (the command's cwd, then every `-C`); None = cannot be told
+    trees: list          # `--work-tree` · `--git-dir` as paths; None for one that cannot be told
+    conf: bool           # `-c` · `--config-env` · `--exec-path`: settings (an alias, a pager, a helper) on the line
+
+
+def _git_at(c: Ctx, base, tok: Tok | None) -> str | None:
+    """A folder named on git's line, read from `base`. None when it cannot be told."""
+    if tok is None or tok.dyn or base is None and _is_relative(tok.text):
+        return None
+    return norm_path(tok.text, base or c.cwd, c.env, c.resolve, c.dialect_now, c.local)
+
+
+def _git_call(cmd: Cmd, c: Ctx) -> GitCall | None:
+    """`git <global options> <subcommand> …` taken apart. None when it is not git or names no subcommand."""
+    if cmd.name != "git":
+        return None
+    args, i = cmd.args, 0
+    cwd, named, conf = None if c.cwd_now is BROKEN_CWD else c.cwd_now, [], False
+    while i < len(args) and args[i].text.startswith("-"):
+        key, eq, tail = args[i].text.partition("=")
+        if args[i].text in GIT_VALUED:
+            value, step = args[i + 1] if i + 1 < len(args) else None, 2
+        else:
+            value, step = Tok(tail, args[i].dyn) if eq else None, 1
+        if key == "-C":
+            cwd = _git_at(c, cwd, value)
+        elif key in ("--git-dir", "--work-tree"):
+            named.append(value)
+        elif key in ("-c", "--config-env", "--exec-path"):
+            conf = True
+        i += step
+    rest = args[i:]
+    if not rest:
+        return None
+    if rest[0].dyn:
+        raise Unparsed("the git subcommand is a variable")
+    return GitCall(rest[0].text.lower(), rest[1:], cwd, [_git_at(c, cwd, v) for v in named], conf)
+
+
+def _git_output(sub: str, rest: list) -> list:
+    """The file an option tells git to write: `--output` of any subcommand, `-o` of archive · format-patch,
+    `-f` · `--file` of config."""
+    names = {"--output", "--output-directory"}
+    names |= {"-o"} if sub in ("archive", "format-patch") else {"-f", "--file"} if sub == "config" else set()
+    out = []
+    for i, a in enumerate(rest):
+        key, eq, tail = a.text.partition("=")
+        if key in names and (eq or i + 1 < len(rest)):
+            out.append(Tok(tail, a.dyn) if eq else rest[i + 1])
+    return out
+
+
+def _git_paths(c: Ctx, base: str, tok: Tok) -> list:
+    """An argument of git as the paths it may name: read from `base`, and a pathspec from the top of the
+    repository (`:/x` · `:(top)x`) from every folder above it too — the top is not looked up on the disk."""
+    top = re.match(r"^:(?:\([^)]*\)|[/!^]+)(.*)$", tok.text)
+    text, bases = tok.text, [base]
+    if top:
+        parts = base.rstrip("\\").split("\\")
+        text, bases = top.group(1) or ".", ["\\".join(parts[:n]) + ("\\" if n == 1 else "")
+                                            for n in range(len(parts), 0, -1)]
+    return [p for p in (norm_path(text, b, c.env, c.resolve, c.dialect_now, c.local) for b in bases) if p]
+
+
+def _git_protected(cmd: Cmd, c: Ctx) -> bool:
+    """git as a writer of a protected path (§10.3 의 6). (가) In a repository under `protected[]` — by the cwd,
+    `-C`, `--work-tree` or `--git-dir` — only what reads passes: an allow list, so an alias, a new subcommand
+    and the rewriting of history (`commit --amend`, `update-ref`) are refused by the one rule. (나) Elsewhere
+    the arguments of a subcommand that overwrites the work tree by a path, and of a name that is no builtin
+    (an alias), are paths of that folder. (다) `--output` and its like is a write wherever it is."""
+    call = _git_call(cmd, c)
+    if call is None:
+        return False
+    sub, rest, protected = call.sub, call.rest, c.data["protected"]
+    out = _git_output(sub, rest)
+    pager = sub == "grep" and any(re.match(r"-O|--open-files-in-pager", t.text) for t in rest)
+    reads = ((sub in GIT_READ or sub in GIT_LISTS and all(t.text in GIT_LIST_FLAGS for t in rest))
+             and not (call.conf or out or pager))
+    hidden = any(t.dyn for t in rest)
+    places = [call.cwd, *call.trees]
+    if any(p is None for p in places):
+        if reads and not hidden:
+            return False
+        raise Unparsed("the folder git works in is a variable")
+    if any(under(p, e) for p in places for e in protected):
+        if reads and hidden:
+            raise Unparsed("an argument of git in a protected folder is a variable")
+        return not reads
+    tree = sub in GIT_TREE or sub not in GIT_READ | GIT_LISTS | GIT_PLAIN
+    named = [t for t in rest if not t.text.startswith("-")] if tree else []
+    over = any(above(call.cwd, e) for e in protected)  # the work tree may hold a protected path
+    if any(t.dyn for t in out) or any(t.dyn for t in named) and (over or sub in GIT_ANYWHERE):
+        raise Unparsed("a path git would write is a variable")
+    if tree and over and any(t.text.startswith("--pathspec-from-file") for t in rest):
+        return True
+    paths = [p for t in out + named for p in _git_paths(c, call.cwd, t)]
+    return any(under(p, e) or above(p, e) for p in paths for e in protected)
+
+
 def r_protected_write(cmd: Cmd, c: Ctx) -> bool:
+    if _git_protected(cmd, c):
+        return True
     targets, protected = _write_targets(cmd, c), c.data["protected"]
     if any(under(t, p) for t in targets for p in protected):
         return True
@@ -1180,17 +1302,10 @@ def r_payment_account(cmd: Cmd, c: Ctx) -> bool:
 
 
 def r_git_risky(cmd: Cmd, c: Ctx) -> bool:
-    if cmd.name != "git":
+    call = _git_call(cmd, c)
+    if call is None:
         return False
-    rest, i = cmd.args, 0
-    while i < len(rest) and rest[i].text.startswith("-"):
-        i += 2 if rest[i].text in ("-C", "-c", "--git-dir", "--work-tree", "--namespace") else 1
-    rest = rest[i:]
-    if not rest:
-        return False
-    if rest[0].dyn:
-        raise Unparsed("the git subcommand is a variable")
-    sub, o = rest[0].text.lower(), [t.text for t in rest[1:] if t.text.startswith("-")]
+    sub, o = call.sub, [t.text for t in call.rest if t.text.startswith("-")]
     short = [x[1:] for x in o if re.fullmatch(r"-[A-Za-z]+", x)]
     if sub == "clean":
         return ("--force" in o or any("f" in x for x in short)) and not (

@@ -241,7 +241,13 @@ def test_routes_are_the_s3_rows_of_the_document():
     assert "| `POST /studio/projects/{id}/editor/start` · `/stop` |" in section  # one row for the two
     assert "| `GET /studio/projects/{id}/editor` |" in section  # (tests/test_studio_editor.py)
     assert "| `POST /studio/projects/{id}/editor/screenshot` |" in section
-    others = members | muted | failed | editor
+    parts = {("POST", "/studio/departments"), ("PATCH", "/studio/departments/{id}"),
+             ("POST", "/studio/departments/{id}/archive")}  # H-1: a part of the owner's (tests/test_studio_parts.py)
+    assert all(f"| `{method} {path}` |" in section for method, path in parts)
+    history = {("PUT", "/studio/employees/{id}/files/{name}"), ("GET", "/studio/employees/{id}/history"),
+               ("POST", "/studio/employees/{id}/revert")}  # H-3: the files (tests/test_studio_employee_git.py)
+    assert all(f"| `{method} {path}` |" in section for method, path in history)
+    others = members | muted | failed | editor | parts | history
     assert len(doc) == 18 and not doc & others and built == doc | others
 
 

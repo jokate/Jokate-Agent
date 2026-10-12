@@ -318,7 +318,8 @@ class ChatTurns:
             self.engine.save(run)
             files = "".join(f"\n- `{path}`" for path in run.baton.attachments)
             said = text + (f"\n첨부 파일 (필요하면 Read 로 읽는다):{files}" if files else "")
-            # HR's values are made anew every turn: a project made since the conversation began is in this one
+            # HR's values are made anew every turn: a project made since the conversation began is in this one,
+            # and so are the frames of the parts (`hiring_notes`) — a part made or a frame changed meanwhile
             self.engine.interject(run.id, f"{said}\n\n{hiring}" if hiring else said)
         return run
 

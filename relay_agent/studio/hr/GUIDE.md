@@ -27,8 +27,8 @@ owner 가 '그냥 프로그래머 한 명'처럼 짧게 말하면 꼭 필요한 
 - `department_id`: 절의 파트 중 하나다. `hr` 은 뽑지 않는다.
 - `project_id`: 배치할 프로젝트다. 비우면 미배치다.
 - `persona_md`: 이름 제목, 그리고 맡은 일 · 말투 · 일하는 방식.
-- `guide_md`: 아래 틀을 면담 내용으로 채운다.
-- `employee_yaml`: `version: 1`, `department`(`department_id` 와 같은 값), `chat` 의 `model` · `effort` 를 적는다. 적지 않은 키는 파트 기본값을 따른다. `provider` 는 적지 않는다. `model` · `effort` 는 절의 모델 목록에서 고른다. 노력치가 없다고 적힌 모델에는 `effort` 를 적지 않는다. 절에 모델 목록이 없으면 `chat` 을 적지 않는다.
+- `guide_md`: 절에 있는 그 파트의 GUIDE 틀을 면담 내용으로 채운다. 그 파트에 틀이 없으면 아래 틀을 쓴다.
+- `employee_yaml`: `version: 1`, `department`(`department_id` 와 같은 값), `chat` 의 `model` · `effort` 를 적는다. 적지 않은 키는 파트 기본값을 따른다. `relay` · `mcp` · `work` · `cap` 은 절의 파트 기본값과 다르게 정했을 때만 적는다. `provider` 는 적지 않는다. `model` · `effort` 는 절의 모델 목록에서 고른다. 노력치가 없다고 적힌 모델에는 `effort` 를 적지 않는다. 절에 모델 목록이 없으면 `chat` 을 적지 않는다.
 - `first_message`: 새 직원이 1:1 방에 남길 첫 인사다. 비워도 된다.
 
 ## 새 직원 GUIDE 틀

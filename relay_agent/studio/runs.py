@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..notify import Fanout
+from . import employee_git
 from .inbox import RUN_KINDS, Hooks, Inbox
 from .tasks import SYSTEM
 
@@ -160,7 +161,10 @@ class EngineHooks(Hooks):
     it when the thread that advances it is back (`work.deliver`). A run that is `done` is opened again first
     (`RelayEngine.reopen`, S-12): the one connection point of a rework of a finished run, of an answer to
     `no_review_request`, of the progress thread coming back and of the restart recovery — all of them reach the
-    run through `Inbox.deliver`. `commit` stays the default: it comes with H-3."""
+    run through `Inbox.deliver`.
+
+    `commit` is the commit of an employee's folder after a `hire` · `guide_amend` approval (H-3; §5.5 · §9.6):
+    the folder's own git, `studio/employee_git.py`. It needs no engine."""
 
     def __init__(self, engine, advance: Callable[[str], Any] | None = None,
                  chat: Callable[[str, str], Any] | None = None, turns: Any = None):
@@ -188,6 +192,11 @@ class EngineHooks(Hooks):
             self.engine.reopen(run_id)
         self.engine.interject(run_id, text)
         return True
+
+    def commit(self, folder: Path, message: str) -> None:
+        """One commit of that employee's folder in its own git; the first one makes the repository. A GitError
+        goes up as it is: `Inbox._safely` logs it and the decision stays."""
+        employee_git.commit(folder, message)
 
     def chat_turn(self, employee_id: str, room_id: str) -> None:
         if self._chat is not None:
