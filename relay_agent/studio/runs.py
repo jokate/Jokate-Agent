@@ -208,6 +208,10 @@ class EngineHooks(Hooks):
     def room_turn(self, employee_id: str, room_id: str) -> bool:
         return bool(self._turns.put(employee_id, room_id)) if self._turns is not None else False
 
+    def group_turns(self, room_id: str, employee_ids: list[str], mentioned: bool = False) -> list[str]:
+        """The turns of a group room (§6.6): `ChatTurns.group` — the room's line, one turn at a time."""
+        return list(self._turns.group(room_id, employee_ids, mentioned)) if self._turns is not None else []
+
     def tell_run(self, run_id: str, text: str) -> bool:
         """Unlike `interject` above, a run at work is what this is for: the engine puts the text into the
         conversation that is going on, or hands it to the next stage. A run the engine does not have (OSError)

@@ -259,10 +259,15 @@ def test_disk_is_asked_of_the_nearest_folder_that_exists(tmp_path):
 
 
 def test_limits_come_from_the_config(tmp_path):
-    cfg = SimpleNamespace(runs_dir=tmp_path, studio_max_runs=2, studio_max_exchanges=20)
-    assert machine.report(cfg, [], fakes())["limits"] == {"max_concurrent_runs": 2, "max_exchanges": 20}
+    cfg = SimpleNamespace(runs_dir=tmp_path, studio_max_runs=2, studio_max_exchanges=20, studio_group_max_members=8,
+                          studio_group_max_exchanges=6)
+    assert machine.report(cfg, [], fakes())["limits"] == {"max_concurrent_runs": 2, "max_exchanges": 20,
+                                                          "group_max_members": 8, "group_max_exchanges": 6}
     cfg.studio_max_exchanges = 7  # `Config.studio_max_exchanges` (§3.16 · §4.6), read at every report
-    assert machine.report(cfg, [], fakes())["limits"] == {"max_concurrent_runs": 2, "max_exchanges": 7}
+    cfg.studio_group_max_members = 5  # `Config.studio_group_max_members` (§6.4): what the app holds an invitation to
+    cfg.studio_group_max_exchanges = 3  # `Config.studio_group_max_exchanges` (§4.6): the n of the app's n/limit
+    assert machine.report(cfg, [], fakes())["limits"] == {"max_concurrent_runs": 2, "max_exchanges": 7,
+                                                          "group_max_members": 5, "group_max_exchanges": 3}
 
 
 # --- GET /studio/machine ------------------------------------------------------------------------------------
@@ -285,7 +290,10 @@ def test_get_machine_answers_the_eleven_fields_of_the_document(served, monkeypat
     assert list(body["disk"]) == ["path", "free_bytes", "total_bytes"]
     assert body["disk"]["free_bytes"] == 600 and body["disk"]["total_bytes"] == 1000
     assert body["limits"] == {"max_concurrent_runs": served.cfg.studio_max_runs,
-                              "max_exchanges": served.cfg.studio_max_exchanges}
+                              "max_exchanges": served.cfg.studio_max_exchanges,
+                              "group_max_members": served.cfg.studio_group_max_members,
+                              "group_max_exchanges": served.cfg.studio_group_max_exchanges}
+    assert served.cfg.studio_group_max_exchanges == 6  # the default (§4.6)
     assert TestClient(served.app).get("/studio/machine").status_code == 401  # the owner's path, like the rest
 
 

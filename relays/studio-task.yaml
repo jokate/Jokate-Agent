@@ -1,18 +1,18 @@
 name: studio-task
-description: 스튜디오 작업 — 정찰 → 설계 → 구현 → 검토, 모든 단계 Opus · 설계 xhigh, 구현·정찰·검토 high (studio-campaign 이 쓰는 내부 릴레이)
+description: 스튜디오 작업 — 정찰 → 설계 → 구현 → 검토 · 정찰 Sonnet medium, 설계 Opus high, 구현 Sonnet high(되돌림은 Opus), 검토 Opus high (studio-campaign 이 쓰는 내부 릴레이)
 hidden: true
 workspace: inplace        # 저장소 등록값이 우선한다 (studio-server 는 copy)
 auto_apply: true          # copy 로 돌릴 때도 끝나면 자동 적용 (충돌 시에만 대기)
 max_run_cost_usd: 40      # 넘으면 다음 단계 전에 승인 대기(실패 아님). auto 방식은 4배까지 묻지 않고 늘린다
 
-# default.yaml 과 같은 단계·프롬프트. 다른 점: 모든 단계가 Opus 고정이고, 되돌림(retry)·대체(fallback)·
-# 다른 AI(alternates)로 모델이 바뀌지 않는다. 설계·구현은 xhigh, 정찰·검토는 high (2026-10-10 조정:
-# 전 단계 xhigh 로 문서 하나에 주간 사용 창 약 6%p 를 썼다). 예산과 시간 한도는 넉넉히 잡았다.
+# default.yaml 과 같은 단계·프롬프트. 다른 점: 단계마다 모델을 고정하고, 대체(fallback)·다른 AI(alternates)로
+# 모델이 바뀌지 않는다. 2026-10-12 owner 결정(주간 사용 창 76%): 정찰과 구현은 Sonnet, 설계와 검토는 Opus high.
+# 그 전의 비중은 구현 57% · 설계 21% · 검토 11% · 정찰 11% 였다. 예산과 시간 한도는 넉넉히 잡았다.
 stages:
   - name: scout
     provider: claude
-    model: opus
-    effort: high
+    model: sonnet
+    effort: medium
     prompt: ../prompts/scout.md
     tools: [Read, Grep, Glob]
     mcp: [digest]              # 여러 문서·큰 파일은 파일별 요약만 받는다(캐시)
@@ -24,7 +24,7 @@ stages:
   - name: plan
     provider: claude
     model: opus
-    effort: xhigh
+    effort: high
     prompt: ../prompts/plan.md
     tools: [Read, Grep, Glob]
     mcp: [digest]
@@ -37,10 +37,10 @@ stages:
 
   - name: build
     provider: claude
-    model: opus
-    effort: high               # 2026-10-12: xhigh -> high (owner 결정). 검토가 되돌려 보낸 재시도만 xhigh
+    model: sonnet
+    effort: high               # 2026-10-12: Opus -> Sonnet (owner 결정). 검토가 되돌려 보낸 재시도는 Opus high
     retry_model: opus
-    retry_effort: xhigh
+    retry_effort: high
     prompt: ../prompts/build.md
     tools: [Read, Edit, Write, Bash]
     mcp: [digest]

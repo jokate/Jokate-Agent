@@ -8,7 +8,7 @@ stages:
   - name: plan
     provider: claude
     model: opus
-    effort: xhigh
+    effort: high
     prompt: ../prompts/campaign-plan.md
     tools: [Read, Grep, Glob]
     mcp: [digest]              # 로드맵·문서가 여러 개면 파일별 요약만 받는다

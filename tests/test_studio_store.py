@@ -48,8 +48,8 @@ def test_empty_db_is_created_and_migrated(tmp_path):
     path = tmp_path / "runs" / "studio" / "studio.sqlite"
     store = StudioStore(path)
     try:
-        assert path.exists() and store.migrated == [1, 2]
-        assert store._exec("PRAGMA user_version").fetchone()[0] == MIGRATIONS[-1][0] == 2
+        assert path.exists() and store.migrated == [1, 2, 3]
+        assert store._exec("PRAGMA user_version").fetchone()[0] == MIGRATIONS[-1][0] == 3
         assert store._exec("PRAGMA foreign_keys").fetchone()[0] == 1
         master = store._rows("SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'")
         assert {r["name"] for r in master if r["type"] == "table"} == TABLES
@@ -74,8 +74,9 @@ def test_schema_is_the_documents_ddl():
     if not DOC.exists():
         pytest.skip("design/studio/ARCHITECTURE.md is not in this checkout")
     text = DOC.read_text(encoding="utf-8")
-    (v1, first), (v2, second) = MIGRATIONS
-    assert (v1, v2) == (1, 2) and len(first) == 42 and len(second) == 1
+    (v1, first), (v2, second), (v3, third) = MIGRATIONS
+    assert (v1, v2, v3) == (1, 2, 3) and len(first) == 42 and len(second) == 1 and len(third) == 7
+    assert [_norm(s) for s in third] == _doc_statements(text, "3.2", "3.3")  # rooms made again (the group rooms)
     ddl = _doc_statements(text, "3.3", "3.15")  # 12 tables + 21 indexes
     assert len(ddl) == 33
     assert [_norm(s) for s in first[:33]] == ddl
@@ -104,7 +105,7 @@ def test_opening_twice_migrates_and_seeds_once(tmp_path):
     path = tmp_path / "studio.sqlite"
     first, second = StudioStore(path), StudioStore(path)
     try:
-        assert first.migrated == [1, 2] and second.migrated == []
+        assert first.migrated == [1, 2, 3] and second.migrated == []
         assert len(second.list_departments()) == 4 and len(second.list_rooms()) == 5
         assert list(tmp_path.glob("*.bak-v*")) == []
         # the re-check under the write lock: a step that is already in is skipped, not run again
@@ -136,7 +137,7 @@ def test_two_servers_starting_together_migrate_once(tmp_path):
         t.join(60)
     try:
         assert not errors and len(stores) == 2
-        assert sorted(v for s in stores for v in s.migrated) == [1, 2]
+        assert sorted(v for s in stores for v in s.migrated) == [1, 2, 3]
         assert len(stores[0].list_departments()) == 4 and len(stores[1].list_rooms()) == 5
     finally:
         for s in stores:
@@ -168,14 +169,14 @@ def test_upgrade_backs_up_and_a_failed_step_leaves_the_version(tmp_path):
     assert backup.exists() and raw(backup, "PRAGMA user_version")[0][0] == 1
 
     store = StudioStore(path)
-    assert store.migrated == [2] and len(store.list_departments()) == 4
+    assert store.migrated == [2, 3] and len(store.list_departments()) == 4
     store.close()
     # what the design relies on: user_version set inside a transaction goes back with it
     conn = sqlite3.connect(path, isolation_level=None)
     conn.execute("BEGIN IMMEDIATE")
     conn.execute("PRAGMA user_version = 7")
     conn.execute("ROLLBACK")
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
     conn.close()
 
 
@@ -195,11 +196,111 @@ def test_a_late_server_does_not_overwrite_the_backup(tmp_path, monkeypatch):
     monkeypatch.setattr(StudioStore, "_user_version", stale_first)
     late = StudioStore(path)
     try:
-        assert late.migrated == [] and len(calls) == 2
+        assert late.migrated == [] and len(calls) == 3  # read once to plan, then once under the lock of each step
     finally:
         late.close()
     assert raw(backup, "PRAGMA user_version")[0][0] == 1  # not replaced by a copy of the upgraded file
     assert sorted(p.name for p in tmp_path.glob("*.bak-v*")) == ["studio.sqlite.bak-v1"]
+
+
+# --- version 3: rooms made again for the group rooms (§3.2) -------------------------------------------
+OLD_ROOM_COLUMNS = ("id, kind, title, employee_id, task_id, department_id, owner_read_id, muted,"
+                    " created_at, updated_at, archived_at")
+
+
+def _version_2_db(path):
+    """A version 2 DB with what points at rooms and what rooms point at: employees, a task, rooms the seed did
+    not make (one muted and read, one archived), members (one who left) and messages. (a 1:1 room, its employee)."""
+    old = StudioStore(path, migrations=MIGRATIONS[:2])
+    project = make_project(old, engine_version="5.7", mcp_port=8101)
+    one = old.create_employee("김기획", "design_doc", project_id=project["id"])
+    two = old.create_employee("이코드", "program")
+    dm = old.create_room("dm", title="김기획", employee_id=one["id"])
+    gone = old.create_room("dm", title="이코드", employee_id=two["id"])
+    work = old.create_room("task", title="2단 점프", task_id=make_task(old, project["id"])["id"])
+    for room, employee in ((dm, one), (gone, two), (work, one), (work, two)):
+        old.create_room_member(room["id"], employee["id"], session_id="s1", conversation_id="c1")
+    old.update_room_member(work["id"], two["id"], left_at=now())
+    for room_id in (dm["id"], work["id"], "room_system"):
+        old.create_message(room_id, "employee", author_id=one["id"], body="했어요")
+        old.create_message(room_id, "owner", body="볼게요")
+    old.update_room(dm["id"], muted=True, owner_read_id=2)
+    old.update_room(gone["id"], archived_at=now())
+    assert old.migrated == [1, 2]
+    old.close()
+    return dm["id"], one["id"]
+
+
+def _dump(path):
+    """The rows in the order they are kept, and everything of the schema but the text of the rooms table."""
+    tables = {"rooms": OLD_ROOM_COLUMNS, "room_members": "*", "messages": "*", "employees": "*", "tasks": "*"}
+    out = {name: raw(path, f"SELECT {columns} FROM {name} ORDER BY rowid") for name, columns in tables.items()}
+    out["schema"] = raw(path, "SELECT type, name, tbl_name, sql FROM sqlite_master"
+                              " WHERE NOT (type = 'table' AND name = 'rooms') ORDER BY type, name")
+    return out
+
+
+def test_version_3_makes_rooms_again_and_keeps_every_row_index_and_reference(tmp_path):
+    path = tmp_path / "studio.sqlite"
+    dm, employee = _version_2_db(path)
+    before = _dump(path)
+    assert [len(before[name]) for name in ("rooms", "room_members", "messages", "employees")] == [8, 4, 6, 2]
+    assert "'group'" not in raw(path, "SELECT sql FROM sqlite_master WHERE name = 'rooms'")[0][0]
+
+    store = StudioStore(path)
+    try:
+        assert store.migrated == [3] and _dump(path) == before
+        assert raw(tmp_path / "studio.sqlite.bak-v2", "PRAGMA user_version")[0][0] == 2
+        assert raw(path, "SELECT name FROM sqlite_master WHERE name = 'rooms_hold'") == []
+        indexes = [r for r in before["schema"] if r[0] == "index" and not r[1].startswith("sqlite_")]
+        assert len(indexes) == 21 and ("index", "rooms_one_system", "rooms") in [r[:3] for r in indexes]
+        # the references: none broken, the two tables still point at rooms, and they are checked again
+        assert store._exec("PRAGMA foreign_key_check").fetchall() == []
+        assert store._exec("PRAGMA foreign_keys").fetchone()[0] == 1
+        assert store._exec("PRAGMA defer_foreign_keys").fetchone()[0] == 0  # it was for the step's transaction
+        for child in ("messages", "room_members"):
+            assert "rooms" in [r[2] for r in store._exec(f"PRAGMA foreign_key_list({child})").fetchall()]
+        with pytest.raises(sqlite3.IntegrityError):
+            store.create_message("room_none", "owner", body="방이 없다")
+        with pytest.raises(sqlite3.IntegrityError):
+            store.create_room_member("room_none", employee)
+        # the rows as the store reads them, with the new column
+        rooms = store.list_rooms(include_archived=True)
+        assert len(rooms) == 8 and all(r["exchange_count"] == 0 for r in rooms)
+        assert (store.get_room(dm)["muted"], store.get_room(dm)["owner_read_id"]) == (True, 2)
+        assert store.count_unread() == {"room_system": 1, [r["id"] for r in rooms if r["kind"] == "task"][0]: 1}
+        assert len(store.list_room_members(room_id=dm)) == 1 and len(store.list_messages(dm)) == 2
+        # the CHECKs: a group room now, and what was refused before still is
+        first, second = store.create_room("group", title="셋"), store.create_room("group", title="셋")
+        assert first["kind"] == "group" and first["id"] != second["id"] and first["exchange_count"] == 0
+        assert store.update_room(first["id"], exchange_count=3)["exchange_count"] == 3
+        assert {r["id"] for r in store.list_rooms(kind="group")} == {first["id"], second["id"]}
+        fresh = store.create_employee("박신입", "program")["id"]
+        for kind, fields in (("group", {"employee_id": fresh}), ("dm", {}), ("party", {}), ("system", {})):
+            with pytest.raises(sqlite3.IntegrityError):
+                store.create_room(kind, **fields)
+        assert store.create_room("dm", employee_id=fresh)["employee_id"] == fresh
+    finally:
+        store.close()
+
+
+def test_a_rooms_step_that_loses_a_room_goes_back_as_a_whole(tmp_path):
+    """Why the step is safe with foreign keys on: what still points at a room that did not come back is found
+    at COMMIT, and the step's transaction goes back — the table, its rows and the version."""
+    path = tmp_path / "studio.sqlite"
+    _version_2_db(path)
+    before = _dump(path)
+    lossy = tuple(s.replace("FROM rooms_hold", "FROM rooms_hold WHERE kind <> 'dm'") for s in MIGRATIONS[2][1])
+    assert lossy != MIGRATIONS[2][1]
+    with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY"):
+        StudioStore(path, migrations=MIGRATIONS[:2] + ((3, lossy),))
+    assert raw(path, "PRAGMA user_version")[0][0] == 2 and _dump(path) == before
+    assert raw(path, "SELECT name FROM sqlite_master WHERE name = 'rooms_hold'") == []
+    assert "'group'" not in raw(path, "SELECT sql FROM sqlite_master WHERE name = 'rooms'")[0][0]
+
+    store = StudioStore(path)  # the step as it is written goes in
+    assert store.migrated == [3] and _dump(path) == before
+    store.close()
 
 
 def test_config_derives_studio_paths_from_runs_dir(tmp_path):

@@ -992,6 +992,39 @@
         "title": "NewMessage",
         "type": "object"
       },
+      "NewRoom": {
+        "additionalProperties": false,
+        "properties": {
+          "client_room_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Client Room Id"
+          },
+          "employee_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Employee Ids",
+            "type": "array"
+          },
+          "title": {
+            "default": "",
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "employee_ids"
+        ],
+        "title": "NewRoom",
+        "type": "object"
+      },
       "NewTask": {
         "additionalProperties": false,
         "description": "C2. The first six are required: an empty or missing one is 422 `missing_fields` naming all of them,\nso they carry defaults here instead of failing the request validation one by one.",
@@ -1358,6 +1391,20 @@
           "muted"
         ],
         "title": "RoomPatch",
+        "type": "object"
+      },
+      "RoomRename": {
+        "additionalProperties": false,
+        "properties": {
+          "title": {
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "title"
+        ],
+        "title": "RoomRename",
         "type": "object"
       },
       "Start": {
@@ -4090,7 +4137,8 @@
                     "dm",
                     "task",
                     "department",
-                    "system"
+                    "system",
+                    "group"
                   ],
                   "type": "string"
                 },
@@ -4139,6 +4187,47 @@
           }
         },
         "summary": "List Rooms",
+        "tags": [
+          "studio"
+        ]
+      },
+      "post": {
+        "operationId": "create_room_studio_rooms_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewRoom"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Create Room Studio Rooms Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Room",
         "tags": [
           "studio"
         ]
@@ -4240,9 +4329,97 @@
         ]
       }
     },
+    "/studio/rooms/{id}/archive": {
+      "post": {
+        "operationId": "archive_room_studio_rooms__id__archive_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "title": "Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Archive Room Studio Rooms  Id  Archive Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Archive Room",
+        "tags": [
+          "studio"
+        ]
+      }
+    },
+    "/studio/rooms/{id}/continue": {
+      "post": {
+        "operationId": "continue_room_studio_rooms__id__continue_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "title": "Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Continue Room Studio Rooms  Id  Continue Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Continue Room",
+        "tags": [
+          "studio"
+        ]
+      }
+    },
     "/studio/rooms/{id}/members/{employee_id}": {
       "delete": {
-        "description": "Takes a member out of the task room: `left_at` is set and the row stays (`_may_post` and the turns look at\n`left_at`; POST brings it back). One who is not in the room changes nothing. Where the employee is placed\nis not looked at: one who was moved away can still be taken out. The assignee stays — its run writes there;\n`/tasks/{id}/assign` is how the assignee changes.",
+        "description": "Takes a member out of the task room: `left_at` is set and the row stays (`_may_post` and the turns look at\n`left_at`; POST brings it back). One who is not in the room changes nothing. Where the employee is placed\nis not looked at: one who was moved away can still be taken out. The assignee stays — its run writes there;\n`/tasks/{id}/assign` is how the assignee changes.\n\nA group room (§3.6) has no assignee: anyone in it can be taken out, and the room says so (a system\nmessage).",
         "operationId": "remove_room_member_studio_rooms__id__members__employee_id__delete",
         "parameters": [
           {
@@ -4294,7 +4471,7 @@
         ]
       },
       "post": {
-        "description": "Seats an employee of the task's project in the task room (S-9; §6.4), so that the room's mentions reach\nit. One who is seated already changes nothing; one who left comes back to the row it had — the conversation\nit kept there —, as `TaskMachine._join_room` does for the assignee.",
+        "description": "Seats an employee of the task's project in the task room (S-9; §6.4), so that the room's mentions reach\nit. One who is seated already changes nothing; one who left comes back to the row it had — the conversation\nit kept there —, as `TaskMachine._join_room` does for the assignee.\n\nA group room (§3.6) takes any employee who has not retired, wherever it is placed, up to\n`studio_group_max_members`, and says so in the room (a system message).",
         "operationId": "add_room_member_studio_rooms__id__members__employee_id__post",
         "parameters": [
           {
@@ -4536,6 +4713,60 @@
           }
         },
         "summary": "Mark Room Read",
+        "tags": [
+          "studio"
+        ]
+      }
+    },
+    "/studio/rooms/{id}/rename": {
+      "post": {
+        "operationId": "rename_room_studio_rooms__id__rename_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "title": "Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RoomRename"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Rename Room Studio Rooms  Id  Rename Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Rename Room",
         "tags": [
           "studio"
         ]

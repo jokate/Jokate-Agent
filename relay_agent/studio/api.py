@@ -1797,7 +1797,7 @@ def get_growth(store: StudioStore = Depends(get_store)) -> dict:
 
 
 # --- rooms ------------------------------------------------------------------------------------------------
-RoomKind = Literal["dm", "task", "department", "system"]
+RoomKind = Literal["dm", "task", "department", "system", "group"]
 
 
 class ReadMark(BaseModel):
@@ -1808,6 +1808,20 @@ class RoomPatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     muted: bool
+
+
+class NewRoom(BaseModel):  # a group room (§3.6): who is invited, and its name (blank = the members' names)
+    model_config = ConfigDict(extra="forbid")
+
+    employee_ids: list[str]
+    title: str = ""
+    client_room_id: str | None = None  # the app's key of this making: a retry makes no second room (§6.4)
+
+
+class RoomRename(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    title: str
 
 
 @router.get("/rooms")
@@ -1855,14 +1869,211 @@ def mark_room_read(id: str, body: ReadMark, store: StudioStore = Depends(get_sto
     return room
 
 
-def _seat(store: StudioStore, id: str, employee_id: str, tx: Tx) -> tuple[dict, dict, dict]:
-    """What both calls on the members of a task room look at first, in this order: the room (404), that it is a
-    task room (`precondition_failed`), the employee (404). (the room, the employee, the room's task)."""
-    room = _need(store.get_room(id, tx=tx), "방", id)
-    if room["kind"] != "task":
-        raise StudioError("precondition_failed", f"작업방이 아닙니다: {id} ({room['kind']}). 구성원은 작업방에서만 "
-                          "넣고 뺍니다")
+# --- group rooms (§3.6 · §6.4) ----------------------------------------------------------------------------
+# A room the owner makes by inviting employees. Here is how it is kept, the REST of it and what its turns are
+# asked with: the owner's message asks every member's turn, or the ones it mentions (`post_message`), and the
+# turns themselves are studio/chat.py's (`ChatTurns.group`, one at a time for a room). Comments, not docstrings,
+# on the four paths: the saved contract (openapi.json) would carry a docstring as the path's description.
+GROUP_LIMIT, GROUP_CONTINUED = "group_exchange_limit", "group_continued"  # `meta.event` of the two notices (§7.6)
+
+
+def _group_limit() -> int:
+    return _config().studio_group_max_members  # read at every making and at every invitation (§3.16)
+
+
+def _group_max_exchanges() -> int | None:
+    """§4.6: the turns the members of a group room may put in for each other after one message of the owner's.
+    Read before every turn a mention asks for; None = the count is kept and never looked at."""
+    return _config().studio_group_max_exchanges
+
+
+def group_order(store: StudioStore, room_id: str, tx: Tx | None = None) -> list[str]:
+    """The order the members of a group room take their turns in (§6.6): who is seated and has not retired, by
+    `(joined_at, employee_id)` — what the rows of `members[]` give the app too."""
+    rows = sorted(store.list_room_members(room_id=room_id, tx=tx), key=lambda m: (m["joined_at"], m["employee_id"]))
+    staff = (store.get_employee(row["employee_id"], tx=tx) for row in rows)
+    return [employee["id"] for employee in staff if employee is not None and employee["retired_at"] is None]
+
+
+def group_halted(store: StudioStore, room_id: str, tx: Tx | None = None) -> bool:
+    """§4.6: is the room held at its limit? Told by its messages, the newest first: the notice of the limit
+    before any message of the owner's and any `group_continued` = held. No column: a restart changes nothing,
+    and a room that is held is told so once."""
+    for message in reversed(store.list_messages(room_id, limit=MAX_PAGE, tx=tx)):
+        event = (message["meta"] or {}).get("event") if message["author_kind"] == "system" else None
+        if message["author_kind"] == "owner" or event == GROUP_CONTINUED:
+            return False
+        if event == GROUP_LIMIT:
+            return True
+    return False
+
+
+def group_owed(store: StudioStore, room_id: str) -> list[str]:
+    """Whose turn a held room kept back (§4.6), in the room's order: a member an employee's message mentions
+    after what that member last read (`fed_message_id`). Read from the DB: the line of a room is memory only."""
+    owed = []
+    for employee_id in group_order(store, room_id):
+        member = store.get_room_member(room_id, employee_id)
+        unread = store.list_messages(room_id, after_id=member["fed_message_id"] or 0, limit=MAX_PAGE)
+        if any(m["author_kind"] == "employee" and m["author_id"] != employee_id and employee_id in (m["mentions"] or [])
+               for m in unread):
+            owed.append(employee_id)
+    return owed
+
+
+def _group_turns(room_id: str, employee_ids: list[str], mentioned: bool = False) -> list[str]:
+    """§6.6: ask for those members' turns in that group room, in that order (`Hooks.group_turns`; `ChatTurns.group`
+    behind it), and who is in the room's line for it. Like `_ask_turn` it never fails the call: what was
+    written is stored by now, and a hook that raises is logged here."""
+    if _hooks is None or not employee_ids:
+        return []
+    try:
+        return list(_hooks.group_turns(room_id, list(employee_ids), mentioned))
+    except Exception:  # noqa: BLE001
+        log.exception("studio: 단체방 %s 의 턴을 넣지 못했다", room_id)
+        return []
+
+
+def _group_guest(store: StudioStore, employee_id: str, tx: Tx) -> dict:
+    """One who can be invited: an employee that is there (404) and has not retired — the hr one and one placed
+    in no project too. `on_leave` is not looked at: nothing sets it yet."""
     employee = _need(store.get_employee(employee_id, tx=tx), "직원", employee_id)
+    if employee["retired_at"] is not None:
+        raise StudioError("precondition_failed", f"{employee['name']} 은(는) 퇴사한 직원입니다. 단체방에는 재직 중인 "
+                          "직원만 초대합니다")
+    return employee
+
+
+def _group_notice(store: StudioStore, tx: Tx, room: dict, event: str, body: str, **meta) -> dict:
+    """What the owner did to a group room, said in it: a system message (`meta.event`), then `room.updated` and
+    `message.created` — the room first, so that a room just made is known before its message. The room's row
+    as it is after.
+
+    It is the owner's own doing, so it is read: when nothing waited to be read `owner_read_id` goes up to the
+    notice (`count_unread` counts system messages). When something did, the mark stays where it is."""
+    waiting = store.count_unread(room["id"], tx=tx).get(room["id"], 0)
+    message = store.create_message(room["id"], "system", tx=tx, body=body, meta={"event": event, **meta})
+    if not waiting:
+        room = store.update_room(room["id"], tx=tx, owner_read_id=message["id"])
+    members = store.list_room_members(room_id=room["id"], tx=tx)
+    store.emit(tx, "room.updated", {"room": room, "members": members}, room_id=room["id"])
+    store.emit(tx, "message.created", {"message": message}, room_id=room["id"])
+    return room
+
+
+def _group_made_by(store: StudioStore, client_room_id: str, tx: Tx) -> dict | None:
+    """The group room a `client_room_id` made already, one the owner left too. The key is kept in `meta` of the
+    room's first message — the notice of its making —, as a message keeps its `client_msg_id`: one read per
+    group room."""
+    for room in store.list_rooms(kind="group", include_archived=True, tx=tx):
+        first = store.list_messages(room["id"], after_id=0, limit=1, tx=tx)
+        if first and first[0]["author_kind"] == "system" and \
+                (first[0]["meta"] or {}).get("client_room_id") == client_room_id:
+            return room
+    return None
+
+
+# What is looked at, in this order (§6.4): the key of a retry (200 with the room it made: nothing new, no
+# event, the rest of the body is not looked at), how many (under two, then over the limit), that every one is
+# there (404), that none retired (409). A blank key is no key.
+@router.post("/rooms", status_code=201)
+def create_room(body: NewRoom, store: StudioStore = Depends(get_store)) -> dict:
+    ids, limit, key = list(dict.fromkeys(body.employee_ids)), _group_limit(), body.client_room_id or None
+    with store.transaction() as tx:
+        made = _group_made_by(store, key, tx) if key else None
+        if made is not None:  # the same body as GET /rooms/{id}
+            members = store.list_room_members(room_id=made["id"], tx=tx)
+            unread = store.count_unread(made["id"], tx=tx).get(made["id"], 0)
+            return JSONResponse({**made, "members": members, "unread": unread}, 200)
+        if len(ids) < 2:
+            raise StudioError("precondition_failed", "단체방은 직원 2명 이상을 초대해 만듭니다")
+        if len(ids) > limit:
+            raise StudioError("precondition_failed",
+                              f"단체방의 직원은 {limit}명까지입니다 ({len(ids)}명을 골랐습니다)")
+        for employee_id in ids:  # every one first: one who is not there is told before one who retired
+            _need(store.get_employee(employee_id, tx=tx), "직원", employee_id)
+        guests = [_group_guest(store, employee_id, tx) for employee_id in ids]
+        names = ", ".join(guest["name"] for guest in guests)  # the default name, in the order they were named
+        room = store.create_room("group", title=body.title.strip() or names, tx=tx)
+        for employee_id in ids:
+            store.create_room_member(room["id"], employee_id, tx=tx)
+        kept = {"client_room_id": key} if key else {}
+        room = _group_notice(store, tx, room, "group_invited", f"{names} 님을 초대했습니다", employee_ids=ids,
+                             **kept)
+        members = store.list_room_members(room_id=room["id"], tx=tx)
+    return {**room, "members": members, "unread": 0}
+
+
+@router.post("/rooms/{id}/rename")
+def rename_room(id: str, body: RoomRename, store: StudioStore = Depends(get_store)) -> dict:
+    title = body.title.strip()
+    with store.transaction() as tx:
+        room = _need(store.get_room(id, tx=tx), "방", id)
+        if room["kind"] != "group":
+            raise StudioError("precondition_failed", f"단체방이 아닙니다: {id} ({room['kind']}). 이름은 단체방에서만 "
+                              "바꿉니다")
+        if room["archived_at"] is not None:
+            raise StudioError("precondition_failed", f"보관한 단체방입니다: {id}")
+        if not title:
+            raise StudioError("missing_fields", "title 은 비울 수 없습니다", fields=["title"])
+        if title != room["title"]:  # the same name changes and says nothing
+            old = room["title"]
+            room = store.update_room(id, tx=tx, title=title)
+            room = _group_notice(store, tx, room, "group_renamed", f"방 이름을 '{title}' (으)로 바꿨습니다",
+                                 title=title, old_title=old)
+    return room
+
+
+@router.post("/rooms/{id}/archive")
+def archive_room(id: str, store: StudioStore = Depends(get_store)) -> dict:
+    with store.transaction() as tx:
+        room = _need(store.get_room(id, tx=tx), "방", id)
+        if room["kind"] != "group":
+            raise StudioError("precondition_failed", f"단체방이 아닙니다: {id} ({room['kind']}). 보관하는 방은 "
+                              "단체방뿐입니다")
+        if room["archived_at"] is not None:
+            return room  # already archived: the same row, no second event
+        room = store.update_room(id, tx=tx, archived_at=now())  # the owner leaves: members and messages stay
+        members = store.list_room_members(room_id=id, tx=tx)
+        store.emit(tx, "room.updated", {"room": room, "members": members}, room_id=id)
+    return room
+
+
+# §4.6 · §6.4: the owner has a group room that is held at its limit go on. Looked at in this order: the room
+# (404), that it is a group room, that the owner has not left it, that it is held — one that is not answers
+# with its row and nothing happens (no message, no event, no turn), however often it is asked. A held room
+# counts anew, says so (a system message) and the turns it kept back go into its line; the answer does not
+# wait for them.
+@router.post("/rooms/{id}/continue")
+def continue_room(id: str, store: StudioStore = Depends(get_store)) -> dict:
+    with store.transaction() as tx:
+        room = _need(store.get_room(id, tx=tx), "방", id)
+        if room["kind"] != "group":
+            raise StudioError("precondition_failed", f"단체방이 아닙니다: {id} ({room['kind']}). 이어 가는 방은 "
+                              "단체방뿐입니다")
+        if room["archived_at"] is not None:
+            raise StudioError("precondition_failed", f"보관한 단체방입니다: {id}")
+        if not group_halted(store, id, tx):
+            return room
+        room = store.update_room(id, tx=tx, exchange_count=0)
+        room = _group_notice(store, tx, room, GROUP_CONTINUED, "직원들의 대화를 이어 갑니다")
+    _group_turns(id, group_owed(store, id), mentioned=True)
+    return room
+
+
+def _seat(store: StudioStore, id: str, employee_id: str, tx: Tx) -> tuple[dict, dict, dict | None]:
+    """What both calls on the members of a room look at first, in this order: the room (404), that it is a task
+    room or a group room (`precondition_failed`), the employee (404), and of a group room that the owner has not
+    left it. (the room, the employee, the room's task — None in a group room)."""
+    room = _need(store.get_room(id, tx=tx), "방", id)
+    if room["kind"] not in ("task", "group"):
+        raise StudioError("precondition_failed", f"작업방도 단체방도 아닙니다: {id} ({room['kind']}). 구성원은 "
+                          "작업방과 단체방에서만 넣고 뺍니다")
+    employee = _need(store.get_employee(employee_id, tx=tx), "직원", employee_id)
+    if room["kind"] == "group":
+        if room["archived_at"] is not None:
+            raise StudioError("precondition_failed", f"보관한 단체방입니다: {id}")
+        return room, employee, None
     task = _need(store.get_task(room["task_id"], tx=tx) if room["task_id"] else None, "작업", room["task_id"])
     return room, employee, task
 
@@ -1880,18 +2091,29 @@ def _seated(store: StudioStore, room: dict, tx: Tx, changed: bool) -> dict:
 def add_room_member(id: str, employee_id: str, store: StudioStore = Depends(get_store)) -> dict:
     """Seats an employee of the task's project in the task room (S-9; §6.4), so that the room's mentions reach
     it. One who is seated already changes nothing; one who left comes back to the row it had — the conversation
-    it kept there —, as `TaskMachine._join_room` does for the assignee."""
+    it kept there —, as `TaskMachine._join_room` does for the assignee.
+
+    A group room (§3.6) takes any employee who has not retired, wherever it is placed, up to
+    `studio_group_max_members`, and says so in the room (a system message)."""
     with store.transaction() as tx:
         room, employee, task = _seat(store, id, employee_id, tx)
-        if employee["project_id"] is None or employee["project_id"] != task["project_id"]:
+        member = store.get_room_member(id, employee_id, tx=tx)
+        seated = member is not None and member["left_at"] is None
+        if task is None:  # a group room
+            employee, limit = _group_guest(store, employee_id, tx), _group_limit()
+            if not seated and len(store.list_room_members(room_id=id, tx=tx)) >= limit:
+                raise StudioError("precondition_failed", f"단체방의 직원은 {limit}명까지입니다. 자리가 없습니다")
+        elif employee["project_id"] is None or employee["project_id"] != task["project_id"]:
             raise StudioError("precondition_failed", f"{employee['name']} 은(는) 이 작업의 프로젝트에 배치된 직원이 "
                               "아닙니다. 작업방에는 그 프로젝트의 직원만 넣습니다")
-        member = store.get_room_member(id, employee_id, tx=tx)
         if member is None:
             store.create_room_member(id, employee_id, tx=tx)
-        elif member["left_at"] is not None:
+        elif not seated:
             store.update_room_member(id, employee_id, left_at=None, tx=tx)
-        out = _seated(store, room, tx, changed=member is None or member["left_at"] is not None)
+        if task is None and not seated:  # the notice tells the room and its members itself
+            room = _group_notice(store, tx, room, "group_invited", f"{employee['name']} 님을 초대했습니다",
+                                 employee_ids=[employee_id])
+        out = _seated(store, room, tx, changed=task is not None and not seated)
     return out
 
 
@@ -1900,17 +2122,23 @@ def remove_room_member(id: str, employee_id: str, store: StudioStore = Depends(g
     """Takes a member out of the task room: `left_at` is set and the row stays (`_may_post` and the turns look at
     `left_at`; POST brings it back). One who is not in the room changes nothing. Where the employee is placed
     is not looked at: one who was moved away can still be taken out. The assignee stays — its run writes there;
-    `/tasks/{id}/assign` is how the assignee changes."""
+    `/tasks/{id}/assign` is how the assignee changes.
+
+    A group room (§3.6) has no assignee: anyone in it can be taken out, and the room says so (a system
+    message)."""
     with store.transaction() as tx:
-        room, _, task = _seat(store, id, employee_id, tx)
-        if employee_id == task["assignee_id"]:
+        room, employee, task = _seat(store, id, employee_id, tx)
+        if task is not None and employee_id == task["assignee_id"]:
             raise StudioError("precondition_failed", "담당은 작업방에서 뺄 수 없습니다. 담당을 바꾸려면 "
                               f"/studio/tasks/{task['id']}/assign 을 씁니다")
         member = store.get_room_member(id, employee_id, tx=tx)
         seated = member is not None and member["left_at"] is None
         if seated:
             store.update_room_member(id, employee_id, left_at=now(), tx=tx)
-        out = _seated(store, room, tx, changed=seated)
+        if task is None and seated:  # the notice tells the room and its members itself
+            room = _group_notice(store, tx, room, "group_removed", f"{employee['name']} 님을 내보냈습니다",
+                                 employee_ids=[employee_id])
+        out = _seated(store, room, tx, changed=task is not None and seated)
     return out
 
 
@@ -1960,6 +2188,10 @@ def post_message(id: str, body: NewMessage, store: StudioStore = Depends(get_sto
                 for m in reversed(store.list_messages(id, limit=DEDUPE_WINDOW, tx=tx)):
                     if m["author_kind"] == "owner" and (m["meta"] or {}).get("client_msg_id") == body.client_msg_id:
                         return JSONResponse(m, 200)
+            # a group room the owner left (§3.6) takes nothing more, like its name and its members. After the
+            # retry above: a message saved before the leaving still answers its retry
+            if room["kind"] == "group" and room["archived_at"] is not None:
+                raise StudioError("precondition_failed", f"보관한 단체방입니다: {id}")
             staged = [_staged_file(a) for a in dict.fromkeys(body.attachments)]
             if not body.body.strip() and not staged:
                 raise StudioError("missing_fields", "본문과 첨부가 모두 비었습니다", fields=["body"])
@@ -1977,6 +2209,10 @@ def post_message(id: str, body: NewMessage, store: StudioStore = Depends(get_sto
                 message = store.set_message_attachments(tx, message["id"], _copy_in(copied, taken))
             store.emit(tx, "message.created", {"message": message}, room_id=id, task_id=room["task_id"],
                        project_id=_room_project(store, room, tx))
+            if room["kind"] == "group" and room["exchange_count"]:  # §4.6: the owner's message is counted from anew
+                room = store.update_room(id, tx=tx, exchange_count=0)
+                store.emit(tx, "room.updated", {"room": room, "members": store.list_room_members(room_id=id, tx=tx)},
+                           room_id=id)
     except BaseException:
         if copied is not None:  # rolled back: the id may be handed out again, so its folder must not stay
             shutil.rmtree(copied, ignore_errors=True)
@@ -1991,6 +2227,8 @@ def post_message(id: str, body: NewMessage, store: StudioStore = Depends(get_sto
     elif room["kind"] == "department":  # §6.6: only who is mentioned answers (S-9)
         for employee_id in mentions:
             _ask_turn(employee_id, id)
+    elif room["kind"] == "group":  # §6.6: who is mentioned, else every member, one after the other in the room's order
+        _group_turns(id, mentions or group_order(store, id))
     return message
 
 
@@ -2036,7 +2274,7 @@ _tracked: dict[str, dict] = {}  # runs that are no task's run: chat · read turn
 
 def track_run(run_id: str, *, mode: Literal["chat", "read"], employee_id: str, room_id: str,
               task_id: str | None = None, project_id: str | None = None) -> None:
-    """Have a run that is no task's run — a chat turn of a 1:1 or department room, a read-only turn of a
+    """Have a run that is no task's run — a chat turn of a 1:1, department or group room, a read-only turn of a
     task room — reported as `run.live` while it runs. S-7 · S-9 call this when they start one and
     `untrack_run` when it has ended. A task run needs neither: tasks.run_id of a working task is enough."""
     with _runs_lock:

@@ -346,6 +346,12 @@ class Hooks:
         is wired."""
         return False
 
+    def group_turns(self, room_id: str, employee_ids: list[str], mentioned: bool = False) -> list[str]:
+        """Put those members' turns in the line of that group room, in that order (§6.6): they run one after
+        the other. `mentioned` = an employee's mention asks, not the owner — such a turn is held at the room's
+        limit and counted (§4.6). Who is in the line for it; [] = nobody, or nothing is wired."""
+        return []
+
     def tell_run(self, run_id: str, text: str) -> bool:
         """Have a run that may be at work read `text` (`RelayEngine.interject`): a message of the task room,
         for the assignee, whose turn there is the task's run. True = the run has it — in the conversation

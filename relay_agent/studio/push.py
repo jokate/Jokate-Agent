@@ -79,7 +79,7 @@ CHANNELS = {URGENT: "katae_urgent", QUIET: "katae_quiet", DIGEST: "katae_digest"
 DIGEST_TAG = "katae_digest"  # one entry in the drawer: a later digest takes the place of the one before
 NOTICE_EVENTS = {  # `meta.event` of the notices of §5.9 that are pushed at once -> the title of the push
     "needs_assignment": "배치 필요", "upstream_rejected": "선행 반려 · 거절", "run_error": "실행하지 못함",
-    "invariant_broken": "불변식 깨짐",
+    "invariant_broken": "불변식 깨짐", "group_exchange_limit": "직원 대화 멈춤",  # the second: a group room held (§4.6)
 }
 DAILY_REPORT = "daily_report"  # `meta.event` of the daily report (S-13): the one digest
 DAILY_TITLE, EMPLOYEE_TITLE, TASK_TITLE = "일일 보고", "직원", "작업"

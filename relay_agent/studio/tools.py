@@ -407,9 +407,9 @@ def _checks(inbox: Inbox) -> employees.Checks:
 
 
 def _may_post(caller: Caller, store: Any, room: dict) -> bool:
-    """§8.5, by the DB of now: a task room = its members, a dm = one's own, a department room = one's own
-    part's, the system room = HR (the daily report, S-13)."""
-    if room["kind"] == "task":
+    """§8.5, by the DB of now: a task room and a group room = its members, a dm = one's own, a department room =
+    one's own part's, the system room = HR (the daily report, S-13)."""
+    if room["kind"] in ("task", "group"):
         member = store.get_room_member(room["id"], caller.id)
         return member is not None and member["left_at"] is None
     if room["kind"] == "dm":
@@ -507,6 +507,28 @@ def _mention_turns(caller: Caller, task: dict, room: dict, message: dict, mentio
     return queued
 
 
+def _group_posted(room: dict, message: dict, mentions: list[str], inbox: Inbox) -> dict:
+    """§8.4, after the message of a group room is stored: each member it mentions gets a turn at the end of the
+    room's line (`Hooks.group_turns`) — `queued` is who waits there for it. Nothing is refused or counted here:
+    the limit is looked at when that turn's time comes, and the turn is counted when it left a message (§4.6;
+    studio/chat.py). The message stays in the room either way."""
+    queued: list[str] = []
+    if mentions:
+        try:
+            queued = list(inbox.hooks.group_turns(room["id"], list(mentions), True))
+        except Exception:  # noqa: BLE001 - the message is stored: a turn that did not go in is not in `queued`
+            log.exception("studio: 단체방 %s 에서 멘션한 직원의 턴을 넣지 못했다", room["id"])
+    missed = [m for m in mentions if m not in queued]
+    note = "방에 글을 남겼다."
+    if queued:
+        note += (f" 멘션한 직원의 턴이 차례에 들어갔다: {', '.join(queued)} — 이 턴이 끝난 뒤에 돌고, 직원 간 왕복 한도에 "
+                 "닿아 있으면 owner 가 이어 가게 할 때까지 선다. 답을 기다리지 않는다.")
+    if missed:
+        note += (f" 턴이 들어가지 않은 직원: {', '.join(missed)} — 퇴사한 직원이거나 턴을 넣을 수 없었다. 글은 방에 남아 "
+                 "있다.")
+    return ok(f"{note} 하던 일을 계속한다", message_id=message["id"], queued=queued)
+
+
 def room_post(caller: Caller, args: dict, machine: TaskMachine, inbox: Inbox) -> dict:
     """A message of the employee in a room it may write in, with `message.created`, in one transaction.
     Every check — the attachments' too — ends before the message is made (§6.6). A dict in `handoff` is stored
@@ -514,15 +536,17 @@ def room_post(caller: Caller, args: dict, machine: TaskMachine, inbox: Inbox) ->
 
     A mention in a task room asks for that employee's turn (S-9): `queued` is who got one, and each is one more
     in `exchange_count` (§4.6). `_before_mentions` refuses before the message — a read turn that cannot be made,
-    the limit —, `_mention_turns` puts the turns in after it. In any other room `queued` is []."""
+    the limit —, `_mention_turns` puts the turns in after it. A mention in a group room asks for that member's
+    turn too (`_group_posted`): it goes into the room's line, and the limit of a group room is looked at when
+    its time comes, not here (§4.6). In any other room `queued` is []."""
     store = machine.store
     room_id = _text(args.get("room")) or caller.room_id
     room = store.get_room(room_id) if room_id else None
     if room is None:
         raise Refusal("not_found", f"방 {room_id or ''} 이 없다. room 을 비우면 지금 방에 쓴다")
     if not _may_post(caller, store, room):
-        raise Refusal("actor_not_allowed", "이 방에는 글을 쓸 수 없다 — 작업방은 구성원, 1:1 방은 자기 방, 파트 방은 "
-                      "자기 파트, 시스템 방은 인사만 쓴다")
+        raise Refusal("actor_not_allowed", "이 방에는 글을 쓸 수 없다 — 작업방 · 단체방은 구성원, 1:1 방은 자기 방, "
+                      "파트 방은 자기 파트, 시스템 방은 인사만 쓴다")
     if room["archived_at"] is not None:
         raise Refusal("precondition_failed", "보관된 방에는 글을 쓸 수 없다", failed=[])
     body = args["text"] if isinstance(args.get("text"), str) else ""
@@ -569,6 +593,8 @@ def room_post(caller: Caller, args: dict, machine: TaskMachine, inbox: Inbox) ->
             raise Refusal("precondition_failed", f"첨부를 복사하지 못해 글을 쓰지 않았다: {e}",
                           failed=[files.NOT_FOUND]) from e
         raise
+    if room["kind"] == "group":
+        return _group_posted(room, message, mentions, inbox)
     if task is None:
         return ok("방에 글을 남겼다. 하던 일을 계속한다", message_id=message["id"], queued=[])
     queued = _mention_turns(caller, task, room, message, mentions, machine, inbox)

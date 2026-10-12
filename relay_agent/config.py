@@ -67,6 +67,13 @@ class Config(BaseModel):
     # Katae Studio: the turns employees may put in for each other in one task (`room_post` mentions) before the
     # system asks the owner — 왕복 한도 (ARCHITECTURE.md §4.6). Read at every mention; T5 of that item counts anew.
     studio_max_exchanges: int = 20
+    # Katae Studio: employees a group room may hold, the owner not counted (ARCHITECTURE.md §3.6 · §6.4). Read
+    # at every making of a group room and at every invitation.
+    studio_group_max_members: int = 8
+    # Katae Studio: the turns the members of a group room may put in for each other (`room_post` mentions) after
+    # one message of the owner's, before the room is held and the owner told (ARCHITECTURE.md §4.6). Read before
+    # every such turn; the owner's next message there, or `POST /studio/rooms/{id}/continue`, counts anew.
+    studio_group_max_exchanges: int = 6
     # Katae Studio: hosts an employee may upload to without the owner being asked, besides the git remotes of
     # the registered projects (ARCHITECTURE.md §10.4 의 5). An approved upload does not add to it.
     studio_known_hosts: list[str] = []

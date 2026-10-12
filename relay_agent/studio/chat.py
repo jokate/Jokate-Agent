@@ -30,8 +30,17 @@ keeps its row of `room_members`), and a mention of it goes into that run (`Hooks
 mention calls: the run is made before it returns, so `room_post` knows whether a turn went in; the mention is
 counted there, not here.
 
+A group turn (§6.6 · §9.5) is a chat turn in a group room, on the member's own row of `room_members`. The turns
+of one room run one after the other (`ChatTurns.group`), so a later member reads what an earlier one just
+answered: the owner's message asks every member's turn, or the ones it mentions; a member's mention of another
+(`room_post`) asks that one's. A member whose business the new messages are not leaves its output empty and
+writes nothing: then no message is left, and none says so. The turns members put in for each other are counted
+in `rooms.exchange_count` (§4.6), and at `Config.studio_group_max_exchanges` the room is held — no turn, one
+`system` message — until the owner writes there or continues (`POST /studio/rooms/{id}/continue`).
+
 It takes no slot of the queue and changes no employee's status (§4.6 · §4.9), files nothing in the inbox and
-counts no exchange (§9.5). What it cannot do it says in the room, as a `system` message (`meta.event` `run_error`).
+counts no exchange of a task (§9.5). What it cannot do it says in the room, as a `system` message (`meta.event`
+`run_error`).
 
 No FastAPI here: server.py connects it (`runs.attach(chat=…)`), and tests use it with an engine of their own.
 
@@ -43,6 +52,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -60,6 +70,7 @@ FEED_MESSAGES = 50        # messages one turn reads; what is left is read by the
 HANDOFF_LOOKBACK = 5      # turns of the session looked through for the last one that finished
 HANDOFF_TITLE = "이전 대화의 인계 (HANDOFF)"
 RUN_ERROR = "run_error"   # `meta.event` of what a turn says about itself (§7.6)
+UNANSWERED = (RUN_ERROR, api.GROUP_LIMIT, api.GROUP_CONTINUED)  # system messages no turn reads: they are the owner's
 
 
 class Refused(Exception):
@@ -84,15 +95,17 @@ class Where:
         return self.task["id"] if self.task else None
 
 
-@dataclass(frozen=True)
+@dataclass
 class Begun:
-    """A turn whose run is made and not advanced yet: what `ChatTurns._finish` goes on with."""
+    """A turn whose run is made and not advanced yet: what `ChatTurns._finish` goes on with. `posted` is what
+    `_finish` found: the turn left a message in the room — its answer, or what its run wrote there itself."""
     store: StudioStore
     room: dict
     employee: dict
     listed: list
     run: Any
     where: Where
+    posted: bool = False
 
 
 def _thread(work: Callable[[], None]) -> None:
@@ -100,10 +113,11 @@ def _thread(work: Callable[[], None]) -> None:
 
 
 def _own(message: dict, employee_id: str) -> bool:
-    """Nothing to answer: the employee's own message, and what a turn said about itself."""
+    """Nothing to answer: the employee's own message, what a turn said about itself, and what a group room is
+    told of its limit (§4.6) — that is the owner's to read."""
     if message["author_kind"] == "employee":
         return message["author_id"] == employee_id
-    return message["author_kind"] == "system" and (message["meta"] or {}).get("event") == RUN_ERROR
+    return message["author_kind"] == "system" and (message["meta"] or {}).get("event") in UNANSWERED
 
 
 def said(messages: list[dict], names: dict[str, str]) -> str:
@@ -123,13 +137,18 @@ class ChatTurns:
     runs on a thread of its own (`spawn(work)` — tests give one that runs in place).
 
     One turn at a time for an employee in a room: two runs on one conversation would split it. A request that
-    comes while the turn runs makes it run once more when it has ended — it then reads what came in between."""
+    comes while the turn runs makes it run once more when it has ended — it then reads what came in between.
+
+    A group room has one turn at a time for the whole room (`group`): its members wait in a line, and one
+    thread takes them one after the other."""
 
     def __init__(self, engine, cfg, spawn: Callable[[Callable[[], None]], Any] | None = None):
         self.engine, self.cfg, self.spawn = engine, cfg, spawn
         self.relay = Path(cfg.relays_dir) / RELAY
         self._lock = threading.Lock()
         self._busy: dict[tuple[str, str], bool] = {}  # (room, employee) of a running turn -> asked again meanwhile
+        # a group room whose turns are running -> who waits there, in order: (employee, a mention put it in)
+        self._rooms: dict[str, deque[tuple[str, bool]]] = {}
 
     def request(self, employee_id: str, room_id: str) -> None:
         key = (room_id, employee_id)
@@ -187,6 +206,88 @@ class ChatTurns:
             return list(e.failed)
         return []
 
+    # --- the turns of a group room (§6.6 · §4.6) -------------------------------------------------------------
+    def group(self, room_id: str, employee_ids: list[str], mentioned: bool = False) -> list[str]:
+        """`Hooks.group_turns`: put those members' turns at the end of the room's line, in the order given, and
+        return at once — who is in the line now, of the ones asked for. One who waits there already waits once.
+        Only who is seated and has not retired gets a turn; a room that is no group room, or that the owner
+        left, gives none.
+
+        `mentioned` = an employee's mention asks (`room_post`): such a turn is looked at against the limit when
+        its time comes and counted when it left a message (`_group_turn`). The owner's asking is neither, and it
+        wins: a member the owner's message put in the line is not a turn a later mention put in."""
+        store = api.get_store()
+        room = store.get_room(room_id)
+        if room is None or room["kind"] != "group" or room["archived_at"] is not None:
+            return []
+        seated = set(api.group_order(store, room_id))
+        asked = [employee_id for employee_id in dict.fromkeys(employee_ids) if employee_id in seated]
+        if not asked:
+            return []
+        with self._lock:
+            line = self._rooms.get(room_id)
+            start = line is None
+            if start:
+                line = self._rooms[room_id] = deque()
+            waiting = {employee_id: at for at, (employee_id, _) in enumerate(line)}
+            for employee_id in asked:
+                if employee_id not in waiting:
+                    line.append((employee_id, mentioned))
+                elif not mentioned:
+                    line[waiting[employee_id]] = (employee_id, False)
+        if start:
+            try:
+                (self.spawn or _thread)(lambda: self._group_work(room_id))
+            except BaseException:
+                with self._lock:
+                    self._rooms.pop(room_id, None)
+                raise
+        return asked
+
+    def _group_work(self, room_id: str) -> None:
+        """The line of one group room, until it is empty: one turn at a time, so each is made after the one
+        before it has ended and reads what that one left. A turn may add to the line while it runs (a mention)."""
+        while True:
+            with self._lock:
+                line = self._rooms.get(room_id)
+                if not line:
+                    self._rooms.pop(room_id, None)
+                    return
+                employee_id, mentioned = line.popleft()
+            try:
+                self._group_turn(employee_id, room_id, mentioned)
+            except Exception:  # noqa: BLE001 - nobody waits for this thread; the rest of the line goes on
+                log.exception("studio: 직원 %s 의 단체방 턴(방 %s)이 실패했다", employee_id, room_id)
+
+    def _group_turn(self, employee_id: str, room_id: str, mentioned: bool) -> None:
+        """One member's turn in a group room. §4.6: a turn a mention put in is not made when the room's count is
+        at the limit — the room is told once (a `system` message, pushed to the owner) and waits for the owner —,
+        and is one more in `exchange_count` when it left a message. One that passed is not counted."""
+        store = api.get_store()
+        if mentioned:
+            room, limit = store.get_room(room_id), api._group_max_exchanges()
+            if room is None:
+                return
+            if limit is not None and room["exchange_count"] >= limit:
+                if not api.group_halted(store, room_id):  # one notice for a room that is held
+                    self._say(store, room, f"직원들끼리 주고받은 턴이 한도 {limit}회에 닿아 멈췄습니다. 이 방에 글을 쓰거나 "
+                              "'이어 가기'를 하면 다시 세고 이어 갑니다", event=api.GROUP_LIMIT, limit=limit)
+                return
+        posted, more = False, True
+        while more:  # as `_work`: a full page read means more may be waiting
+            begun = self._begin(employee_id, room_id)
+            if begun is None:
+                break
+            more = self._finish(begun)
+            posted = posted or begun.posted
+        if mentioned and posted:
+            with store.transaction() as tx:
+                room = store.get_room(room_id, tx=tx)
+                if room is not None:
+                    room = store.update_room(room_id, tx=tx, exchange_count=room["exchange_count"] + 1)
+                    members = store.list_room_members(room_id=room_id, tx=tx)
+                    store.emit(tx, "room.updated", {"room": room, "members": members}, room_id=room_id)
+
     def _work(self, employee_id: str, room_id: str, begun: Begun | None = None) -> None:
         """The turns of one request, one after the other. `begun` is a first turn whose run `put` has made."""
         key = (room_id, employee_id)
@@ -208,6 +309,7 @@ class ChatTurns:
         """Read what is new in the room, run the employee on it, store the answer. Nothing is new -> no run.
         A turn that ends `done` with no answer — an empty output, and nothing the run wrote in the room itself —
         says so in the room and counts as read all the same: its messages are in the conversation (§3.7 · §9.5).
+        In a group room it says nothing: that is how a member passes what is not its business (§6.6).
         True when it read a full page: more may be waiting, and `_work` goes on."""
         begun = self._begin(employee_id, room_id)
         return self._finish(begun) if begun is not None else False
@@ -258,6 +360,7 @@ class ChatTurns:
         # no output is an answer all the same when the run wrote in the room itself (`room_post` keeps `run_id`)
         posted = bool(answer) or any(message["run_id"] == run.id
                                      for message in store.list_messages(room_id, limit=FEED_MESSAGES))
+        begun.posted = posted
         with store.transaction() as tx:
             if answer:
                 message = store.create_message(room_id, "employee", tx=tx, author_id=employee_id, body=answer,
@@ -267,7 +370,8 @@ class ChatTurns:
             store.update_room_member(room_id, employee_id, tx=tx, session_id=run.session_id,
                                      conversation_id=run.done_sessions.get(STAGE) if keep else None,
                                      fed_message_id=listed[-1]["id"])
-        if not posted:  # after the block: `_say` opens a transaction of its own
+        # after the block: `_say` opens a transaction of its own. Not in a group room: there no answer is a pass
+        if not posted and room["kind"] != "group":
             self._say(store, room, f"{employee['name']} 이(가) 답하지 못했다 — 턴은 끝났지만 답이 비어 있다", run.id)
         return len(listed) >= FEED_MESSAGES
 
@@ -294,14 +398,29 @@ class ChatTurns:
                 "올라간다. 담당의 작업 런에 바로 전해야 하는 말은 output 을 비우고 room_post(text, mentions=[담당의 id]) "
                 "로 쓴다 — 그 글이 담당의 런에 끼어든다.")
 
+    @staticmethod
+    def _group_note(store: StudioStore, room: dict, employee: dict) -> str:
+        """What a turn of a group room is told after the new messages, as a line of the server: who is in the
+        room, who the reader is, how to pass what is not its business and how to ask another member (§6.6). It
+        goes with the messages, so a conversation that resumes — which is sent these only — is told it too."""
+        names = {row["id"]: row["name"] for row in store.list_employees(include_retired=True)}
+        who = ", ".join(f"{names.get(id) or id} (id `{id}`)" for id in api.group_order(store, room["id"]))
+        return (f"시스템: 이 방은 단체방 `{room['title']}` 이다. 구성원은 owner 와 직원 {who} 이고, 너는 "
+                f"{employee['name']} (id `{employee['id']}`) 이다. 위 글이 네가 답할 일이면 답을 output 에 쓴다. 네 일이 "
+                "아니면 넘어간다 — output 을 비우고 room_post 도 쓰지 않으면 방에 글이 남지 않는다. 다른 직원의 답이 "
+                "필요할 때만 room_post(text, mentions=[그 직원의 id]) 로 쓴다 — 그 직원의 턴이 네 턴 뒤에 들어가고, 같은 "
+                "말을 output 에 또 쓰지 않는다. 자기 자신과 이 방의 구성원이 아닌 직원은 멘션할 수 없다.")
+
     def _make(self, store: StudioStore, employee: dict, room: dict, member: dict, fresh: list[dict], text: str,
               where: Where):
         """The run of this turn, not advanced yet. `Refused` when it cannot be made."""
         values = self._values(store, employee)
         repo, folder = self._folder(store, employee, where.project_id)
-        session_id, conversation = self._session(store, member, employee, repo, folder, where)
+        session_id, conversation = self._session(store, member, employee, repo, folder, where, room)
         if where.task is not None:
             text = f"{text}\n{self._read_note(store, where.task)}"
+        elif room["kind"] == "group":
+            text = f"{text}\n{self._group_note(store, room, employee)}"
         hiring = self._hiring(store, employee, where)
         goal = self._goal(store, employee, room, text, session_id, where.project_id, hiring)
         try:
@@ -364,15 +483,18 @@ class ChatTurns:
         return None, folder.resolve()
 
     def _session(self, store: StudioStore, member: dict, employee: dict, repo: str | None,
-                 folder: Path, where: Where) -> tuple[str, str | None]:
+                 folder: Path, where: Where, room: dict | None = None) -> tuple[str, str | None]:
         """(the session the turn is filed under, the conversation it resumes). A new session — the first turn,
-        or the employee now works elsewhere — starts a new conversation: Claude Code keeps one per folder."""
+        or the employee now works elsewhere — starts a new conversation: Claude Code keeps one per folder. It
+        is named after the task, after the group room, or `1:1`."""
         history = self.engine.history
         session = history.get_session(member["session_id"]) if member["session_id"] else None
         if session is not None and (session.get("repo") or None) == repo and (
                 repo is not None or Path(session["workdir"]) == folder):
             return session["id"], member["conversation_id"]
         title = where.task["title"] if where.task is not None else "1:1"
+        if room is not None and room["kind"] == "group":
+            title = room["title"] or "단체방"
         session = history.create_session(f"{employee['name']} · {title}", str(folder), repo)
         store.update_room_member(member["room_id"], member["employee_id"], session_id=session["id"],
                                  conversation_id=None)
@@ -431,9 +553,11 @@ class ChatTurns:
                  if isinstance(a, dict) and a.get("path")]
         return [path for path in found if path.is_file()]
 
-    def _say(self, store: StudioStore, room: dict, text: str, run_id: str | None = None) -> None:
-        """§9.5: why there is no answer, as a `system` message of the room. No inbox item, no exchange counted."""
-        meta = {"event": RUN_ERROR, **({"run_id": run_id} if run_id else {})}
+    def _say(self, store: StudioStore, room: dict, text: str, run_id: str | None = None, event: str = RUN_ERROR,
+             **more) -> None:
+        """§9.5: why there is no answer, as a `system` message of the room. No inbox item, no exchange counted.
+        `event` · `more` are its `meta`: a group room that is held says so the same way (§4.6)."""
+        meta = {"event": event, **({"run_id": run_id} if run_id else {}), **more}
         with store.transaction() as tx:
             message = store.create_message(room["id"], "system", tx=tx, body=text, meta=meta)
             store.emit(tx, "message.created", {"message": message}, room_id=room["id"], task_id=room["task_id"],

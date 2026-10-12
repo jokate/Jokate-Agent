@@ -308,5 +308,7 @@ def report(cfg: Any, projects: list[dict], src: Sources) -> dict:
         "disk": disk(cfg.runs_dir, src.usage),
         "providers": _listed("AI 사용량", src.providers),
         "editors": _listed("실행 중인 에디터", lambda: editors(src.processes(), projects, src.healthy)),
-        "limits": {"max_concurrent_runs": cfg.studio_max_runs, "max_exchanges": cfg.studio_max_exchanges},
+        "limits": {"max_concurrent_runs": cfg.studio_max_runs, "max_exchanges": cfg.studio_max_exchanges,
+                   "group_max_members": cfg.studio_group_max_members,
+                   "group_max_exchanges": cfg.studio_group_max_exchanges},
     }

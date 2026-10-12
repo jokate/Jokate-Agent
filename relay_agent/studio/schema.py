@@ -6,8 +6,9 @@ executescript: it commits first). Shipped steps are frozen — a change is appen
 there is no downgrade. Dropping a column/table or changing a CHECK needs the owner's approval.
 
 Version 1 = the 12 tables and 21 indexes of §3.3–§3.14 (the document's text with the comments left out)
-followed by the §3.15 seed. Version 2 = stream_events (§7.2). tests/test_studio_store.py compares both
-with the document.
+followed by the §3.15 seed. Version 2 = stream_events (§7.2). Version 3 = rooms made again for the group
+rooms (§3.2: `group` in the CHECK of kind, and exchange_count). tests/test_studio_store.py compares the
+three with the document.
 """
 
 from __future__ import annotations
@@ -284,7 +285,46 @@ CREATE TABLE stream_events (
 );
 """
 
+# Version 3 (§3.2): a CHECK cannot be altered, so rooms is made again — the owner asked for the group rooms.
+# messages and room_members point at rooms and foreign keys are on. Inside the step's transaction the one thing
+# that can be changed is defer_foreign_keys (PRAGMA foreign_keys does nothing there; it goes back to off by
+# itself at COMMIT). The order is the point: the implicit DELETE of DROP TABLE counts one violation for every
+# row that pointed at a room, and putting the rows back INTO A TABLE OF THE SAME NAME takes them off again, so
+# COMMIT finds none. A room that did not come back leaves its violations: COMMIT fails and the whole step goes
+# back. Making `rooms_new` and renaming it does not work — nothing takes the violations of the DROP off.
+# The executor (StudioStore._apply_step) is as it was.
+_ROOMS_V3 = """
+PRAGMA defer_foreign_keys = ON;
+CREATE TABLE rooms_hold AS SELECT * FROM rooms;
+DROP TABLE rooms;
+CREATE TABLE rooms (
+    id              TEXT PRIMARY KEY,
+    kind            TEXT NOT NULL CHECK (kind IN ('dm', 'task', 'department', 'system', 'group')),
+    title           TEXT NOT NULL DEFAULT '',
+    employee_id     TEXT UNIQUE REFERENCES employees(id),
+    task_id         TEXT UNIQUE REFERENCES tasks(id),
+    department_id   TEXT UNIQUE REFERENCES departments(id),
+    owner_read_id   INTEGER NOT NULL DEFAULT 0,
+    muted           INTEGER NOT NULL DEFAULT 0 CHECK (muted IN (0, 1)),
+    exchange_count  INTEGER NOT NULL DEFAULT 0,
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL,
+    archived_at     TEXT,
+    CHECK ((kind = 'dm') = (employee_id IS NOT NULL)),
+    CHECK ((kind = 'task') = (task_id IS NOT NULL)),
+    CHECK ((kind = 'department') = (department_id IS NOT NULL))
+);
+INSERT INTO rooms (id, kind, title, employee_id, task_id, department_id, owner_read_id, muted,
+                   created_at, updated_at, archived_at)
+SELECT id, kind, title, employee_id, task_id, department_id, owner_read_id, muted,
+       created_at, updated_at, archived_at
+FROM rooms_hold ORDER BY rowid;
+DROP TABLE rooms_hold;
+CREATE UNIQUE INDEX rooms_one_system ON rooms(kind) WHERE kind = 'system';
+"""
+
 MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
     (1, _statements(_TABLES_V1) + _SEED_V1),
     (2, _statements(_STREAM_V2)),
+    (3, _statements(_ROOMS_V3)),
 )

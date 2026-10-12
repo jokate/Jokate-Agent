@@ -117,7 +117,7 @@ EMPLOYEES = _table(
     "name department_id project_id status retired_at", prefix="emp_", touch=True)
 ROOMS = _table(
     "rooms", "kind title employee_id task_id department_id owner_read_id muted",
-    "title owner_read_id muted archived_at", prefix="room_", touch=True)
+    "title owner_read_id muted exchange_count archived_at", prefix="room_", touch=True)
 ROOM_MEMBERS = _table(
     "room_members", "room_id employee_id session_id conversation_id fed_message_id",
     "session_id conversation_id fed_message_id left_at", key=("room_id", "employee_id"), stamp="joined_at")

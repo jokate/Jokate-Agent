@@ -88,7 +88,7 @@ CHECK 제약과 API · WS · MCP 가 같은 값을 쓴다.
 | 작업 상태 (8) | `proposed` 제안 · `backlog` 대기 · `working` 진행 중 · `blocked` 결재 대기 · `review` 검수 필요 · `done` 완료 · `rejected` 기각 · `cancelled` 취소 |
 | 작업 유형 (5) | `feature` · `fix` · `chore` · `doc` · `data` |
 | 직원 상태 (4) | `idle` 대기 · `working` 작업 중 · `blocked` 결재 대기 · `on_leave` 휴직 |
-| 방 종류 (4) | `dm` 1:1 · `task` 작업방 · `department` 파트방 · `system` 시스템 공지 |
+| 방 종류 (5) | `dm` 1:1 · `task` 작업방 · `department` 파트방 · `system` 시스템 공지 · `group` 단체방 (버전 3, §3.2) |
 | 진행 방식 (3) | `nonstop` 무정차 · `milestone` 고비 정차(기본) · `each` 작업마다 정차 (CAMPAIGN.md 469–476행) |
 | 결재 종류 (9) | `task_proposal` 작업 제안 · `hire` 채용 · `design_approval` 설계 승인 · `structure_choice` 구조 선택 · `question` 질문 · `pre_approval` 사전 승인 · `budget` 예산 · `risky_command` 위험 명령 · `final_review` 최종 검수 |
 | 결재 상태 (3) | `pending` · `decided` · `cancelled` |
@@ -245,7 +245,7 @@ runs/
 ### 3.2 스키마 버전과 마이그레이션
 
 - 버전은 `PRAGMA user_version` 에 둔다. 0 은 빈 DB 다.
-- `schema.py` 의 `MIGRATIONS` 는 `(버전, SQL 문장 목록)` 을 버전 오름차순으로 담는다. 버전 1 = §3.3–§3.14 의 테이블 12개 + 인덱스 + §3.15 의 시드. 문장은 인자 없는 SQL 이다. 시각이 필요한 시드는 §3.15 의 SQL 식으로 채운다.
+- `schema.py` 의 `MIGRATIONS` 는 `(버전, SQL 문장 목록)` 을 버전 오름차순으로 담는다. 버전 1 = §3.3–§3.14 의 테이블 12개 + 인덱스 + §3.15 의 시드. 버전 2 = `stream_events` (§7.2). 버전 3 = `rooms` 를 다시 만든다 (이 절 끝의 '버전 3'). 문장은 인자 없는 SQL 이다. 시각이 필요한 시드는 §3.15 의 SQL 식으로 채운다.
 
 `StudioStore` 를 만들 때의 순서:
 
@@ -261,6 +261,43 @@ runs/
 - 컬럼 · 테이블 삭제와 CHECK 변경(테이블을 다시 만들어야 한다)은 owner 승인을 받는다.
 - 서버를 두 번 띄워도 4의 재확인 때문에 한 번만 돈다 (S-1 완료 기준).
 - 실패한 단계 뒤에 `user_version` 은 그대로다. 단계의 트랜잭션과 함께 되돌아간다 (S-1 테스트로 확인).
+
+**버전 3 — `rooms` 를 다시 만든다 (단체방).** `kind` 의 CHECK 에 `group` 을 넣고 `exchange_count` 칸을 더한다. CHECK 변경이라 위 규칙의 owner 승인 사항이고, owner 가 단체방을 요청하며 정했다 (2026-10-12). 버전 1 의 문장(§3.6)은 고치지 않고 아래 7문장을 새 버전으로 덧붙였다. `schema.py` 의 버전 3 이 이 블록과 같다 (`tests/test_studio_store.py` 가 대조한다).
+
+```sql
+PRAGMA defer_foreign_keys = ON;                          -- 이 트랜잭션의 FK 검사를 COMMIT 까지 미룬다
+CREATE TABLE rooms_hold AS SELECT * FROM rooms;          -- 행을 옮겨 둔다
+DROP TABLE rooms;                                        -- 인덱스 rooms_one_system 도 함께 없어진다
+CREATE TABLE rooms (
+    id              TEXT PRIMARY KEY,
+    kind            TEXT NOT NULL CHECK (kind IN ('dm', 'task', 'department', 'system', 'group')),
+    title           TEXT NOT NULL DEFAULT '',
+    employee_id     TEXT UNIQUE REFERENCES employees(id),
+    task_id         TEXT UNIQUE REFERENCES tasks(id),
+    department_id   TEXT UNIQUE REFERENCES departments(id),
+    owner_read_id   INTEGER NOT NULL DEFAULT 0,
+    muted           INTEGER NOT NULL DEFAULT 0 CHECK (muted IN (0, 1)),
+    exchange_count  INTEGER NOT NULL DEFAULT 0,          -- 단체방에서 직원끼리 주고받은 턴의 수 (§3.6)
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL,
+    archived_at     TEXT,
+    CHECK ((kind = 'dm') = (employee_id IS NOT NULL)),
+    CHECK ((kind = 'task') = (task_id IS NOT NULL)),
+    CHECK ((kind = 'department') = (department_id IS NOT NULL))
+);
+INSERT INTO rooms (id, kind, title, employee_id, task_id, department_id, owner_read_id, muted,
+                   created_at, updated_at, archived_at)
+SELECT id, kind, title, employee_id, task_id, department_id, owner_read_id, muted,
+       created_at, updated_at, archived_at
+FROM rooms_hold ORDER BY rowid;                          -- 행의 순서도 그대로
+DROP TABLE rooms_hold;
+CREATE UNIQUE INDEX rooms_one_system ON rooms(kind) WHERE kind = 'system';
+```
+
+- `messages` · `room_members` 가 `rooms` 를 참조하고 FK 가 켜져 있다. 트랜잭션 안에서는 `PRAGMA foreign_keys` 를 끌 수 없으므로(아무 일도 하지 않는다) `defer_foreign_keys` 로 검사를 COMMIT 까지 미룬다. 이 값은 COMMIT · ROLLBACK 때 스스로 꺼진다. 실행기(`StudioStore._apply_step`)는 고치지 않았다.
+- 순서가 요점이다. `DROP TABLE` 은 행을 지우는 것으로 셈해 그 방을 가리키던 행만큼 위반 수를 올리고, **같은 이름**의 새 테이블에 같은 `id` 의 행을 되넣으면 그만큼 내린다. 그래서 COMMIT 때 위반이 0 이다. 다른 이름(`rooms_new`)으로 만들어 `RENAME` 하는 순서는 쓰지 않는다 — 올라간 위반 수를 내릴 길이 없다.
+- 되넣지 못한 방이 하나라도 있으면 그 방을 가리키는 행이 위반으로 남아 COMMIT 이 `FOREIGN KEY constraint failed` 로 실패하고, 단계 전체(테이블 · 행 · `user_version`)가 되돌아간다 (테스트로 확인). 올리기 전부터 있던 고아 행은 이 단계가 만들지도 고치지도 않는다.
+- 12개 테이블 · 인덱스 21개 · 다른 테이블의 행은 그대로다. 옛 방의 `exchange_count` 는 0 이다. 올리기 전의 파일은 `studio.sqlite.bak-v2` 로 남고 (위 3), 버전 3 의 DB 는 옛 서버가 열지 못한다 (위 2) — 되돌리려면 서버를 내리고 그 복사본을 쓴다.
 
 ### 3.3 projects
 
@@ -361,8 +398,12 @@ CREATE UNIQUE INDEX rooms_one_system ON rooms(kind) WHERE kind = 'system';
 ```
 
 - 직원마다 1:1 방 하나, 작업마다 작업방 하나, 파트마다 파트방 하나, 시스템 방은 전체에 하나다. `[§12]`
-- 만드는 때: 1:1 방은 직원을 만들 때, 작업방은 작업이 `backlog` 에 처음 들어올 때(§4.3 의 C2 · T1), 파트방은 파트를 만들 때.
+- 만드는 때: 1:1 방은 직원을 만들 때, 작업방은 작업이 `backlog` 에 처음 들어올 때(§4.3 의 C2 · T1), 파트방은 파트를 만들 때, 단체방은 owner 가 만들 때.
 - owner 는 모든 방에 있으므로 `room_members` 에 행이 없다. 읽은 위치는 `owner_read_id` 에 둔다. `[§12]`
+- 위 DDL 은 버전 1 의 문장이다. 버전 3 (§3.2) 뒤의 테이블은 `kind` 의 CHECK 가 `group` 을 더 받고, `muted` 다음에 `exchange_count INTEGER NOT NULL DEFAULT 0` 이 있다.
+- 단체방(`group`)은 owner 가 직원 여럿을 초대해 만드는 방이다 (`POST /studio/rooms`, §6.4). `employee_id` · `task_id` · `department_id` 가 모두 NULL 이고 (짝 CHECK 셋이 그대로 지킨다) 수에 제한이 없다 — 같은 직원들의 방이 둘이어도 된다. 앱이 같은 요청을 다시 보내 방이 둘 생기는 것은 `client_room_id` 가 막는다 (§6.4). `title` 은 만들 때 주지 않으면 구성원 이름을 초대한 순서대로 `, ` 로 이은 것이고, 그 뒤에 구성원이 바뀌어도 따라 바뀌지 않는다 (owner 가 `rename` 으로 바꾼다).
+- 단체방의 `archived_at` 은 owner 가 그 방에서 나갔다는 뜻이다 (`POST /studio/rooms/{id}/archive`). 구성원 행과 글은 그대로 남고, 방 목록에서는 `?archived=1` 일 때만 보인다. 보관한 단체방에는 owner 도 글을 쓰지 못한다 (§6.6). 되살리는 경로는 아직 없다 — 보관한 방은 읽기만 된다. 다른 종류의 방은 이 경로로 보관하지 않는다.
+- `exchange_count` 는 단체방에서 직원끼리 주고받은 턴의 수다 (`tasks.exchange_count` 와 같은 쓰임, §4.6). 직원의 멘션으로 들어온 턴이 글을 남기고 끝날 때마다 1 올리고, owner 가 그 방에 글을 쓰거나 이어 가기(`POST /studio/rooms/{id}/continue`, §6.4)를 하면 0 으로 돌린다. 값이 바뀔 때 `room.updated` 를 낸다. 다른 종류의 방에서는 쓰지 않는다.
 
 ### 3.7 room_members
 
@@ -382,7 +423,8 @@ CREATE INDEX room_members_employee ON room_members(employee_id);
 
 - 행 하나가 전제 1의 "직원×방 대화 하나"다. 채팅 턴과 읽기 전용 턴이 이 대화를 잇는다. 대화가 길어져 새 대화로 넘길 때(S-7) `conversation_id` 를 비운다 — 끝난 턴의 입력 토큰이 `chat.HANDOFF_TOKENS`(10만. 값 잠정)를 넘었을 때와, `--resume` 이 실패해 그 턴이 새로 시작했을 때다. 다음 턴은 그 세션에서 마지막으로 `done` 으로 끝난 런의 `state` · `open_issues` · `next_steps` 를 인계(HANDOFF)로 실어 새 대화로 시작한다. 모델을 따로 불러 요약하지 않는다. `session_id` 는 직원×방에 하나이고 새 대화로 넘어가도 그대로다. `fed_message_id` 는 턴이 `done` 으로 끝났을 때 그 턴이 읽은 마지막 글의 id 로 올린다 (답이 비어도 같다, §9.5. `studio/chat.py`).
 - 작업방에서 담당의 작업 런은 이 대화가 아니라 `tasks.run_id` 의 런이 가진 단계별 대화(`RunState.stage_sessions` · `done_sessions`, `pipeline.py` 200 · 216–217)를 쓴다. 릴레이는 단계마다 대화가 따로라 "직원×방 대화 하나"와 글자 그대로 같지 않다. `[§12]`
-- 구성원: `dm` 은 그 직원 1행, `task` 는 담당과 owner 가 넣은 직원(§4.3 의 T3, S-9), `department` 는 그 파트의 재직 직원, `system` 은 행이 없다.
+- 구성원: `dm` 은 그 직원 1행, `task` 는 담당과 owner 가 넣은 직원(§4.3 의 T3, S-9), `department` 는 그 파트의 재직 직원, `system` 은 행이 없다. `group` 은 owner 가 초대한 직원이다: 재직 중이면 인사도, 프로젝트에 배치되지 않은 직원도 된다 (퇴사한 직원은 안 된다. 휴직은 아직 가리지 않는다). 2명 이상으로 만들고 `Config.studio_group_max_members`(기본 8)명까지다 (§6.4).
+- 단체방에서 내보낸 직원의 행은 지우지 않고 `left_at` 을 채운다. 다시 초대하면 `left_at` 을 비워 그 행 — `session_id` · `conversation_id` · `fed_message_id`, 곧 그 방에서 하던 대화 — 으로 돌아온다. 작업방의 구성원과 같은 규칙이다 (S-9). 직원이 퇴사해도 단체방의 행은 그대로 남는다 (파트방과 같다) — 퇴사한 직원과 내보낸 직원은 단체방의 턴을 받지 않는다 (§6.6 '단체방의 턴').
 - 쓰기 권한 열은 없다. 작업방에서 쓰는 사람은 `tasks.assignee_id` 한 명이다 (S-9).
 
 ### 3.8 messages
@@ -628,7 +670,7 @@ VALUES ('hr', '인사', 1, NULL, 0,
 |---|---|---|
 | WS 재접속용 단일 순번 (`after_id`) | 12개 테이블에 없다. 13번째 테이블 `stream_events` 를 마이그레이션 버전 2 로 둔다 (§7.2 가 정했다) | §7.2 `[§12]` |
 | 페어링 코드 | 서버 메모리 | M-2 |
-| 한도 설정값 (동시 3 · 왕복 20) | `Config`(`config.py` 17–)에 필드 추가. 동시 한도의 이름은 `studio_max_runs` 로 확정했다 (S-8. 큐가 줄을 볼 때마다 읽는다). 왕복 한도의 이름은 `studio_max_exchanges` 로 확정했다 (S-9. 기본 20. `room_post` 가 멘션마다 읽는다) | S-8, S-9 |
+| 한도 설정값 (동시 3 · 왕복 20) | `Config`(`config.py` 17–)에 필드 추가. 동시 한도의 이름은 `studio_max_runs` 로 확정했다 (S-8. 큐가 줄을 볼 때마다 읽는다). 왕복 한도의 이름은 `studio_max_exchanges` 로 확정했다 (S-9. 기본 20. `room_post` 가 멘션마다 읽는다). 단체방의 직원 상한은 `studio_group_max_members` 다 (기본 8. owner 는 세지 않는다. 방을 만들 때와 초대할 때마다 읽는다, §6.4). 단체방의 직원 간 왕복 한도는 `studio_group_max_exchanges` 다 (기본 6. 멘션으로 들어온 턴을 시작하기 직전마다 읽는다, §4.6) | S-8, S-9 |
 | 가드 감사 로그 | `runs/studio/audit/guard-<YYYYMMDD>.jsonl`. 훅이 직접 쓴다 | §10.7 |
 | 지침 이력 | 직원 폴더의 git | H-3 |
 | 검수 패키지 본문 | `inbox.payload_json` (`final_review`) | §5 |
@@ -884,6 +926,7 @@ T10 · T11 도 CAMPAIGN.md §2 의 그림에 없는 전이다. owner 가 더했�
 | 전체 동시 실행 | 3 (설정) | 슬롯을 쥔 작업 런 수 (아래 "슬롯") | T3 의 전이 순간, T5 · T8 의 런 재개 |
 | 같은 프로젝트 쓰기 | 1 (고정) | 같은 `project_id` 에서 슬롯을 쥔 작업 런 수 | 위와 같다 |
 | 직원 간 왕복 | 20 (설정) | `tasks.exchange_count` | 작업방에서 직원이 다른 직원을 멘션해 턴을 넣을 때 (S-9) |
+| 단체방의 직원 간 왕복 | 6 (설정) | `rooms.exchange_count` | 단체방에서 직원의 멘션으로 들어온 턴을 시작하기 직전 (아래 "단체방의 왕복 한도") |
 
 **슬롯.** 작업 런 하나가 슬롯 하나를 쥔다. 쥐는 구간은 큐가 슬롯을 준 순간부터 그 런을 진행시킨 스레드가 `engine.advance` 에서 돌아올 때까지다. 작업 상태로 세지 않는다 — T4(`ask_owner`) · T6 직후에는 작업이 이미 `blocked` · `review` 인데 런은 아직 돌고 있다. 이 문서에서 "런이 멈췄다"는 그 작업 런이 슬롯을 쥐고 있지 않다는 뜻이다. 슬롯 장부는 서버 메모리에 두고(`queue.py`), 재시작하면 빈 채로 시작한다(§4.8).
 
@@ -901,6 +944,15 @@ T10 · T11 도 CAMPAIGN.md §2 의 그림에 없는 전이다. owner 가 더했�
 - 한도(`Config.studio_max_exchanges`)는 글 하나에 한 번, 글을 만들기 전 모든 검사 뒤에 본다. 닿으면 글도 만들지 않는다 — 거부될 글이 T4 를 일으키지 않게 순서를 맨 뒤로 뒀다.
 - T4 를 한 그 호출 뒤에는 `ask_owner` 와 같은 뒤처리(§8.3)를 한다: 부른 턴이 작업 런이면 대기 타이머, 읽기 턴이면 바로 끊는다 (§5.7). 이미 결재를 기다리는 작업에서 다시 한도에 닿은 호출은 `limit` 행만 남기고 뒤처리를 부르지 않는다 — 부르면 타이머가 새로 걸려, 턴을 끝내지 않는 런이 끊기지 않는다.
 - 알려진 틈: 검사와 올리기 사이를 잠그지 않는다. 동시에 온 멘션이나 한 글의 여러 멘션이 한도를 조금 넘길 수 있다.
+
+**단체방의 왕복 한도.** 단체방(§3.6)은 작업이 없어 `rooms.exchange_count` 로 방 단위로 센다. owner 의 글 하나에서 시작된 직원 간 왕복이 세는 대상이다 (`studio/chat.py` 의 `ChatTurns._group_turn`).
+
+- 세는 것: 직원의 멘션(`room_post(mentions=[…])`, §8.4)으로 들어온 턴이 글을 남기고 끝난 것. 글 없이 넘어간 턴(§9.5), `done` 으로 끝나지 못한 턴, owner 의 글로 들어온 턴은 세지 않는다. owner 의 글이 넣어 둔 차례를 기다리는 직원을 다른 직원이 멘션해도 그 턴은 owner 의 글로 들어온 턴이다. 올릴 때 `room.updated` 를 낸다 (§7.4).
+- 한도(`Config.studio_group_max_exchanges`, 기본 6)는 멘션으로 들어온 턴을 시작하기 직전 한 곳에서 본다. 값이 한도 이상이면 그 턴을 넣지 않는다. 멘션한 글은 방에 그대로 남는다 — 작업방과 달리 글을 거부하지 않고, 결재도 `limit` 행도 만들지 않는다. 방에 시스템 글 하나(`meta.event = group_exchange_limit`, `meta.limit`, §7.6)를 쓰고 그 글이 owner 에게 즉시 푸시된다 (§5.9). 이미 멈춘 방에서는 시스템 글을 다시 쓰지 않는다.
+- 멈춘 방인지는 그 방의 글로 본다: 새 글부터 거슬러 보아 `group_exchange_limit` 글이 owner 의 글과 `group_continued` 글보다 먼저 나오면 멈춘 방이다. 칸을 따로 두지 않아 서버를 다시 띄워도 같고, 시스템 글이 한 번만 남는다.
+- 다시 세는 때는 둘이다. owner 가 그 방에 글을 쓰면 0 으로 돌린다 — 새 사슬이고, 턴은 그 글의 대상(멘션한 직원, 없으면 전원)에게만 넣는다 (§6.6). `POST /studio/rooms/{id}/continue`(이어 가기)는 멈춘 방에서 0 으로 돌리고 세워 둔 턴을 넣는다 — 자기가 읽은 곳(`room_members.fed_message_id`) 뒤에 자기를 멘션한 직원 글이 있는 구성원의 턴이다 (§6.4).
+- 방의 턴은 한 번에 하나라 (§6.6) 시작 직전의 값이 정확하다: 한 글이 여럿을 멘션해도 한도를 넘지 않는다. 설정이 `null` 이면 세기만 하고 보지 않는다.
+- 알려진 틈: owner 가 일부 직원만 멘션해 글을 쓰면, 그 전에 세워 둔 다른 직원의 멘션 턴은 이어지지 않는다 (멈춘 방이 아니게 되어 이어 가기도 아무것도 하지 않는다). 그 직원은 다음에 자기 턴이 올 때 그 글을 읽는다. 턴이 도는 중에 owner 가 글을 쓰면 0 으로 돌린 뒤 그 턴이 1 을 올릴 수 있다.
 - 파트방 · 1:1 방에서 직원이 한 멘션은 턴을 넣지 않고 세지도 않는다. 왕복 한도가 작업 단위라 그 방에는 안전망이 없기 때문이다.
 
 **선행 조건.** 작업의 선행이 "채워졌다"의 뜻은 캠페인의 진행 방식에 따른다 (CAMPAIGN.md 467–471행).
@@ -1310,6 +1362,7 @@ CLI 는 서버를 거치지 않고 엔진을 직접 부른다 (S-5 에서 확인
 | 런 생성 실패 | T3 에서 런을 만들지 못함 (§4.3) | 시스템 방 | `run_error` |
 | 턴을 넣지 못함 | 채팅 · 읽기 턴을 넣지 못함 (§9.5 의 덧붙임). 직원의 멘션이 §9.5 의 5 (가)에 걸린 경우는 글을 남기지 않고 도구 오류로 답한다 | 계기가 된 그 방 (시스템 방이 아니다) | `run_error` |
 | 불변식 깨짐 | 재시작 복구의 5 (§4.8), 밖에서 조작된 작업 런 (§5.8 다) | 시스템 방 | `invariant_broken` |
+| 단체방 왕복 한도 | 단체방에서 직원의 멘션으로 들어온 턴이 한도에 닿아 넣지 않음 (§4.6). 멈춘 방마다 한 번이고 즉시 푸시한다 (음소거한 방이어도 간다 — 다른 시스템 알림과 같다) | 그 단체방 | `group_exchange_limit` |
 | 일일 보고 | 하루 1회 (S-13) | 시스템 방 (인사 직원 이름으로) | `daily_report` |
 
 "배치 필요"를 결재로 두지 않은 이유: CAMPAIGN.md 가 "알림"이라 적었고, `backlog` 작업은 차단 결재를 가질 수 없다 (F2). 같은 작업에는 담당이 바뀌거나 캠페인을 다시 시작할 때까지 한 번만 알린다 (S-14 확정): 글을 쓸 때 그 작업의 가장 새 `assigned` 이벤트(`task_events`)의 id 를 `meta.assigned_event_id` 에 적는다 (그런 이벤트가 없으면 0. §7.6). 시스템 방에 그 작업의 `needs_assignment` 글이 이미 있으면 둘 중 하나일 때만 다시 쓴다 — 지금의 그 id 가 가장 새 글에 적힌 값보다 크다(글 뒤에 담당이 바뀌었다. 키가 없는 옛 글은 0 으로 본다), 또는 캠페인이 `running` 이 된 직후의 훑기다(시작 · 재개. 전이가 `Effects.after` 에 `campaign` 대신 `campaign_started` 를 넘기고, 그 훑기가 `again` 으로 돈다 — `tasks.CAMPAIGN_STARTED`). "선행 거절"은 (작업, 선행) 쌍마다 한 번이고 캠페인이 `running` 이 된 직후의 훑기에서만 다시 쓴다. 캠페인의 제목 · 목표 · 방식을 고친 뒤의 훑기는 다시 알리지 않는다. 따로 적어 두는 열은 없다 — 시스템 방의 글이 기록이어서 서버를 다시 띄워도 유지된다 (§4.8 의 5 와 같은 방식). 시각은 비교하지 않는다 — 이벤트 id 는 단조 증가라 글을 쓴 그 초 안의 변화도 본다 (남는 틈은 §4.10).
@@ -1449,7 +1502,7 @@ CAMPAIGN.md §2(76행), S-5, A-9 가 적은 결재는 모두 9가지이고 이�
 | `PATCH /studio/devices/{id}` | `{name, fcm_token, settings}` 중 일부. `id` 에 `me` 를 쓰면 지금 토큰의 기기. 보낸 키만 바꾼다 — `fcm_token` 의 `null` · 빈 문자열은 지우고, 같은 값을 쥔 다른 기기는 그 값을 내놓는다. `settings` 는 통째로 바뀐다 (§3.14) | 기기 행 (`token_hash` 제외) | `not_found` (없거나 폐기된 기기) · `precondition_failed` (공용 토큰으로 `me`) | A-11, N-2 |
 | `POST /studio/devices/{id}/revoke` | — | 기기 행 | | M-2 |
 
-- `machine` 의 필드 (M-1 이 정했다. `studio/machine.py`). `name` 은 컴퓨터 이름, `server_version` 은 서버가 올려 둔 코드의 해시 12자(`server.py` 의 `RUNNING_CODE`), `schema_version` 은 `MIGRATIONS` 의 마지막 버전(§3.2), `now` · `utc_offset_minutes` 는 이 컴퓨터의 지역 시각과 UTC 와의 차(분)다 (§6.1). `doctor` 는 `relay doctor` 의 점검 목록 `[{id, ok, what, hint}]` — `ok` 가 `null` 이면 문제로 세지 않는 참고 줄이고, `hint` 는 실패한 점검에만 있다. `engines` 는 `[{version, path, exists}]` — `HKLM\SOFTWARE\EpicGames\Unreal Engine` 아래 버전 키의 `InstalledDirectory` 를 읽어(64비트 뷰 다음 32비트 뷰. 읽기만 한다) 버전 순으로 낸다. 키가 없거나 Windows 가 아니면 빈 배열이고, 소스에서 빌드한 엔진은 나오지 않는다. `disk` 는 `{path, free_bytes, total_bytes}` — `runs_dir` 가 놓인 드라이브다. `providers` 는 기존 `/providers` 응답 그대로다. `editors` 는 `[{project_id, pid, mcp_port, healthy, uproject}]` — 실행 중인 `UnrealEditor` · `UE4Editor` 프로세스(`-Cmd` 는 제외)이고, 명령줄의 `.uproject` 가 등록된 프로젝트의 `path` 아래면 그 프로젝트다(못 찾으면 `project_id` · `mcp_port` 는 `null`). `healthy` 는 그 프로젝트의 `mcp_port` 로 MCP `health_check` 를 보내 3초 안에 JSON 객체가 돌아오는지다 — 응답이 `status: error` 여도 참이고, 모달 · 크래시로 답이 없으면 거짓이다 (M-7 확정. `machine.py` 의 `health_check`. 전송 형식은 아래 '에디터 경로'). `limits` 는 `{max_concurrent_runs, max_exchanges}` (§3.16. `max_exchanges` 는 S-9 가 설정을 넣기 전까지 20). 출처 하나를 읽지 못해도 응답은 200 이고 그 칸만 빈 배열이다(`disk` 는 두 값이 `null`). 캐시는 없다 — 부를 때마다 `claude --version` 한 번과 프로세스 조회(PowerShell 한 번, 최대 8초)를 돌리므로 몇 초 걸릴 수 있다. 그래서 앱은 이 값을 보여 주는 화면을 열거나 새로 고칠 때만 부르고, 값싼 네 값(`name` · `server_version` · `schema_version` · `utc_offset_minutes`)은 `hello` 의 `machine` (§7.1) 에서 읽는다 (M-1 확정). `/providers` 응답의 전체 모양은 확인 필요 (§11.3).
+- `machine` 의 필드 (M-1 이 정했다. `studio/machine.py`). `name` 은 컴퓨터 이름, `server_version` 은 서버가 올려 둔 코드의 해시 12자(`server.py` 의 `RUNNING_CODE`), `schema_version` 은 `MIGRATIONS` 의 마지막 버전(§3.2), `now` · `utc_offset_minutes` 는 이 컴퓨터의 지역 시각과 UTC 와의 차(분)다 (§6.1). `doctor` 는 `relay doctor` 의 점검 목록 `[{id, ok, what, hint}]` — `ok` 가 `null` 이면 문제로 세지 않는 참고 줄이고, `hint` 는 실패한 점검에만 있다. `engines` 는 `[{version, path, exists}]` — `HKLM\SOFTWARE\EpicGames\Unreal Engine` 아래 버전 키의 `InstalledDirectory` 를 읽어(64비트 뷰 다음 32비트 뷰. 읽기만 한다) 버전 순으로 낸다. 키가 없거나 Windows 가 아니면 빈 배열이고, 소스에서 빌드한 엔진은 나오지 않는다. `disk` 는 `{path, free_bytes, total_bytes}` — `runs_dir` 가 놓인 드라이브다. `providers` 는 기존 `/providers` 응답 그대로다. `editors` 는 `[{project_id, pid, mcp_port, healthy, uproject}]` — 실행 중인 `UnrealEditor` · `UE4Editor` 프로세스(`-Cmd` 는 제외)이고, 명령줄의 `.uproject` 가 등록된 프로젝트의 `path` 아래면 그 프로젝트다(못 찾으면 `project_id` · `mcp_port` 는 `null`). `healthy` 는 그 프로젝트의 `mcp_port` 로 MCP `health_check` 를 보내 3초 안에 JSON 객체가 돌아오는지다 — 응답이 `status: error` 여도 참이고, 모달 · 크래시로 답이 없으면 거짓이다 (M-7 확정. `machine.py` 의 `health_check`. 전송 형식은 아래 '에디터 경로'). `limits` 는 `{max_concurrent_runs, max_exchanges, group_max_members, group_max_exchanges}` (§3.16. `group_max_exchanges` 는 단체방의 직원 간 왕복 한도 `Config.studio_group_max_exchanges` 다 — 앱이 방의 `exchange_count` 와 함께 n/한도 를 보이는 자리다, §4.6. `max_exchanges` 는 S-9 가 설정을 넣기 전까지 20. `group_max_members` 는 단체방의 직원 상한 `Config.studio_group_max_members` 다 — 앱이 초대할 수 있는 수를 미리 아는 자리다). 출처 하나를 읽지 못해도 응답은 200 이고 그 칸만 빈 배열이다(`disk` 는 두 값이 `null`). 캐시는 없다 — 부를 때마다 `claude --version` 한 번과 프로세스 조회(PowerShell 한 번, 최대 8초)를 돌리므로 몇 초 걸릴 수 있다. 그래서 앱은 이 값을 보여 주는 화면을 열거나 새로 고칠 때만 부르고, 값싼 네 값(`name` · `server_version` · `schema_version` · `utc_offset_minutes`)은 `hello` 의 `machine` (§7.1) 에서 읽는다 (M-1 확정). `/providers` 응답의 전체 모양은 확인 필요 (§11.3).
 
 **프로젝트 · 에디터 · 생성 작업**
 
@@ -1550,19 +1603,29 @@ CAMPAIGN.md §2(76행), S-5, A-9 가 적은 결재는 모두 9가지이고 이�
 
 | 메서드 · 경로 | 요청 | 응답 | 오류 | 작업 |
 |---|---|---|---|---|
-| `GET /studio/rooms` | `?kind` · `?archived=0·1` | 행 목록 + 각 `{unread, last_message}` | | S-3 |
+| `GET /studio/rooms` | `?kind` (`dm` · `task` · `department` · `system` · `group`) · `?archived=0·1` | 행 목록 + 각 `{unread, last_message}` | | S-3 |
+| `POST /studio/rooms` | `{employee_ids[], title, client_room_id}` — 단체방을 만든다. `title` · `client_room_id` 는 없어도 된다 | 201 행 + `{members[], unread}`. 시스템 글 하나와 `room.updated` · `message.created` 를 낸다. 같은 `client_room_id` 의 재시도는 200 과 그 방의 행 + `{members[], unread}` 이고 이벤트를 다시 내지 않는다 | `precondition_failed` (2명 미만 · 상한 초과 · 퇴사한 직원) · `not_found` (없는 직원) | 단체방 |
 | `GET /studio/rooms/{id}` | — | 행 + `{members[], unread}` | | S-3 |
 | `PATCH /studio/rooms/{id}` | `{muted}` | 행. 값이 바뀐 때만 `room.updated` 를 낸다. 음소거가 막는 것은 §5.9 | `not_found` | N-2 |
 | `POST /studio/rooms/{id}/read` | `{message_id}` | 행 (`owner_read_id` 는 줄어들지 않는다) | | S-3 |
-| `POST` · `DELETE /studio/rooms/{id}/members/{employee_id}` | — | `{members[]}` (지금 구성원. 나간 구성원은 뺀다). 둘 다 멱등이고 바뀐 때만 `room.updated` 를 낸다. `DELETE` 는 행을 지우지 않고 `left_at` 을 채우며, `POST` 가 그 행을 되살린다 | `precondition_failed` (작업방이 아니다 · `POST`: 그 프로젝트에 배치되지 않은 직원이다 · `DELETE`: 그 작업의 담당이다 — 담당은 `/tasks/{id}/assign` 으로 바꾼다) | S-9 |
+| `POST` · `DELETE /studio/rooms/{id}/members/{employee_id}` | — | `{members[]}` (지금 구성원. 나간 구성원은 뺀다). 둘 다 멱등이고 바뀐 때만 `room.updated` 를 낸다. `DELETE` 는 행을 지우지 않고 `left_at` 을 채우며, `POST` 가 그 행을 되살린다 | `precondition_failed` (작업방도 단체방도 아니다 · 작업방의 `POST`: 그 프로젝트에 배치되지 않은 직원이다 · 작업방의 `DELETE`: 그 작업의 담당이다 — 담당은 `/tasks/{id}/assign` 으로 바꾼다 · 단체방: 표 아래) | S-9, 단체방 |
+| `POST /studio/rooms/{id}/rename` | `{title}` | 행. 이름이 바뀐 때만 시스템 글 하나와 `room.updated` · `message.created` 를 낸다 | `precondition_failed` (단체방이 아니다 · 보관한 방이다) · `missing_fields` (`title` 이 비었다) | 단체방 |
+| `POST /studio/rooms/{id}/archive` | — | 행 (`archived_at`). owner 가 단체방에서 나간다. 처음 보관할 때만 `room.updated` 를 낸다 | `precondition_failed` (단체방이 아니다) | 단체방 |
+| `POST /studio/rooms/{id}/continue` | — | 행. 왕복 한도에 멈춘 단체방을 이어 간다 (§4.6): `exchange_count` 를 0 으로 돌리고 시스템 글 하나와 `room.updated` · `message.created` 를 낸 뒤 세워 둔 턴을 넣는다. 멈춘 방이 아니면 아무것도 하지 않고 행을 돌려준다 | `precondition_failed` (단체방이 아니다 · 보관한 방이다) | 단체방 |
 | `GET /studio/rooms/{id}/messages` | `?before_id` · `?after_id` · `?limit` (기본 50, 최대 200) | `{items, has_more}` (`id` 오름차순) | | S-3 |
-| `POST /studio/rooms/{id}/messages` | `{body, mentions[], attachments[], client_msg_id}` | 201 글 행 | `missing_fields` · `precondition_failed` | S-3, S-7, S-9 |
+| `POST /studio/rooms/{id}/messages` | `{body, mentions[], attachments[], client_msg_id}` | 201 글 행 | `missing_fields` · `precondition_failed` (보관한 단체방도 여기에 든다, §6.6) | S-3, S-7, S-9 |
 | `POST /studio/attachments` | `{name, data_b64}` | 201 `{id, name, mime, size}` | `payload_too_large` | S-3 |
 | `GET /studio/attachments/{id}/{name}` | — | 파일. `id` 는 글 id, 결재 id 또는 방에 올리지 않은 스크린샷의 `shot_<hex12>` 다 (§6.6) | | S-3 |
 
 - `unread` 는 `id > owner_read_id` 이고 owner 가 쓰지 않은 글의 수다. `last_message` 는 그 방의 마지막 글 행이고 글이 없으면 `null` 이다. `read` 의 `message_id` 가 그 방의 마지막 글 id 보다 크면 마지막 글 id 로 맞추고, 값이 실제로 늘 때만 `room.updated` 를 낸다 (S-3).
 - 글 목록은 `before_id` 만 주면 그보다 앞의 최근 `limit` 개, `after_id` 만 주면 그보다 뒤의 처음 `limit` 개, 둘 다 없으면 가장 최근 `limit` 개다 (§3.8 의 `(room_id, id)` 인덱스). 둘 다 주면 그 사이(`after_id < id < before_id`)의 최근 `limit` 개다 (잠정, S-3). 저장소의 `list_messages` 인자가 같은 뜻이다. `has_more` 는 읽은 방향으로 `limit` 개 밖에 글이 더 있다는 뜻이다. `limit` 이 200 을 넘으면 줄여서 받지 않고 422(검증 오류)다 (S-3).
 - owner 가 글을 쓴 뒤의 일 (§6.6).
+- 단체방 만들기 (§3.6): `employee_ids` 는 겹친 id 를 하나로 센 뒤 2명 이상이고 `Config.studio_group_max_members`(기본 8) 이하여야 한다. 초대할 수 있는 직원은 재직 중인 직원 누구나다 — 인사도, 프로젝트에 배치되지 않은 직원도 된다. 퇴사한 직원(`retired_at`)은 안 되고, 휴직은 아직 가리지 않는다. 보는 순서는 `client_room_id` → 수(2명 미만 → 상한 초과) → 없는 직원 → 퇴사한 직원이고, 하나라도 걸리면 아무것도 만들지 않는다. 없는 직원은 전원을 먼저 본다 — 퇴사한 직원과 없는 id 를 함께 주면 순서와 상관없이 `not_found` 다. `title` 은 앞뒤 공백을 떼고, 비었으면 구성원 이름을 받은 순서대로 `, ` 로 잇는다. `{title}` · `{employee_ids}` · `{client_room_id}` 밖의 키는 422 다. 앱은 상한을 `GET /studio/machine` 의 `limits.group_max_members` 로 미리 안다.
+- `client_room_id` 는 중복 방지용이다 (글의 `client_msg_id` 와 같은 쓰임, §6.6). 방을 만들 때 쓰는 시스템 글의 `meta.client_room_id` 에 넣고 (§7.6), 보관한 방을 포함한 단체방 전부의 첫 글에서 찾는다. 같은 값으로 만든 방이 있으면 새로 만들지 않고 200 과 그 방을 돌려준다 — 본문은 `GET /studio/rooms/{id}` 와 같고, 시스템 글도 이벤트도 다시 내지 않는다. 이때 요청의 나머지(`employee_ids` · `title`)는 보지 않는다: 그 사이 구성원이 퇴사했거나 방을 보관했어도 200 이다. 빈 문자열과 `null` 은 키가 없는 것이고, 키가 없으면 요청마다 새 방이다. 방마다 첫 글을 하나씩 읽으므로, 단체방이 아주 많아지면 `rooms` 의 칸으로 옮긴다 (그때는 마이그레이션이다, §3.2).
+- 단체방의 구성원은 작업방과 같은 경로로 넣고 뺀다. `POST` 는 재직 중인 직원만 받고 프로젝트는 보지 않는다. 지금 구성원이 상한만큼이면 `precondition_failed` 다 — 이미 앉아 있는 직원은 상한을 묻지 않고(아무것도 바뀌지 않는다), 나갔다 돌아오는 직원은 묻는다. 돌아온 직원은 나가기 전의 `room_members` 행을 그대로 잇는다 (§3.7). `DELETE` 는 구성원 누구든 뺀다 (담당이 없다. 남는 수의 아래 한도도 없다). 보관한 단체방에는 둘 다 `precondition_failed` 다. owner 의 글도 받지 않는다 (§6.6).
+- `rename` 은 `title` 의 앞뒤 공백을 떼고, 지금 이름과 같으면 아무것도 하지 않고 행을 돌려준다. `archive` 는 이미 보관한 방이면 같은 행을 돌려주고 이벤트를 다시 내지 않는다. 보관은 방에 시스템 글을 쓰지 않고 구성원 행도 건드리지 않는다.
+- 단체방을 만들 때 · 초대 · 내보내기 · 이름 변경은 그 방에 시스템 글을 하나 쓰고 (`meta.event` 는 차례로 `group_invited` · `group_invited` · `group_removed` · `group_renamed`, §7.6) `room.updated` 다음에 `message.created` 를 낸다. owner 가 한 일이므로, 그 글을 쓰기 전에 안 읽은 글이 없었으면 `owner_read_id` 를 그 글로 올려 `unread` 가 늘지 않는다. 안 읽은 글이 있었으면 `owner_read_id` 를 그대로 둔다. 이 글은 푸시하지 않는다 (§5.9 의 즉시 알리는 종류가 아니다).
+- `continue`(이어 가기)는 멈춘 단체방에서만 일한다 (§4.6). 보는 순서는 없는 방(`not_found`) → 단체방이 아니다 → 보관한 방이다 → 멈춘 방인가다. 멈춘 방이면 `exchange_count` 를 0 으로 돌리고 시스템 글(`meta.event = group_continued`. 이것도 푸시하지 않는다)을 쓴 뒤, 세워 둔 턴을 방의 순서(§6.6)로 넣는다 — 응답은 턴을 기다리지 않는다. 멈춘 방이 아니면 200 과 행뿐이고 글도 이벤트도 턴도 없다: 여러 번 눌러도 글이 늘지 않는다. 앱은 한도를 `GET /studio/machine` 의 `limits.group_max_exchanges` 로 안다.
 
 **캠페인 · 작업**
 
@@ -1713,7 +1776,18 @@ owner 가 `POST /studio/rooms/{id}/messages` 로 글을 쓰면 글을 저장하�
 | `dm` | 그 직원의 채팅 턴을 넣는다 (S-7) |
 | `task` | 작업 런이 돌고 있으면 `engine.interject` 로 끼어든다 (S-9, `server.py` 293–296 과 같은 호출). 끼어드는 것은 작업이 `working` 일 때다 — 런이 돌고 있으면 그 대화에, 아니면 다음 단계나 재개 때 실린다. `blocked` · `review` 의 런에는 넣지 않는다 (곧 끊기거나 끝날 대화다). 멘션한 직원 가운데 담당이 아닌 구성원의 읽기 턴을 넣는다 — 담당의 그 방 턴은 작업 런이라 따로 넣지 않는다. owner 의 글은 `exchange_count` 에 세지 않는다 (§4.6) |
 | `department` | 멘션한 직원의 턴만 넣는다 |
+| `group` | 턴을 넣는다 (아래 '단체방의 턴'): `mentions` 가 있으면 그 직원만, 없으면 방의 직원 전원이 정해진 순서로 한 명씩 받는다. `exchange_count` 가 0 이 아니면 0 으로 돌리고 `room.updated` 를 낸다 (§4.6). 안 읽음과 마지막 글은 다른 방과 같다. 보관한 단체방(owner 가 나간 방, §3.6)에는 쓸 수 없다 — `precondition_failed`. 보관하기 전에 저장된 `client_msg_id` 의 재시도는 그래도 200 과 그 글이다 (중복 방지를 먼저 본다) |
 | `system` | owner 는 쓸 수 없다 — `precondition_failed` |
+
+**단체방의 턴.** (`studio/chat.py` 의 `ChatTurns.group`. `Hooks.group_turns` 가 부른다)
+
+- 정해진 순서는 재직 중인 지금 구성원의 `(joined_at, employee_id)` 오름차순이다 — `GET /studio/rooms/{id}` 의 `members[]` 만으로 앱이 같은 순서를 낸다. 퇴사한 직원과 내보낸 직원은 턴을 받지 않는다. owner 가 멘션한 직원들은 멘션한 순서로 받는다.
+- 한 방의 턴은 한 번에 하나다. 방마다 차례를 기다리는 줄이 있고, 앞 직원의 턴이 끝난 뒤에 다음 직원의 턴을 만든다 — 그래서 뒤 직원의 턴에는 앞 직원이 방금 남긴 글이 들어 있다. 글 쓰기의 응답은 턴을 기다리지 않는다 (1:1 방과 같다).
+- 각 턴은 그 직원의 `room_members` 행을 잇는 채팅 턴이다 (§3.7 · §9.5): `fed_message_id` 뒤에 쌓인 글을 글쓴이 이름과 함께 읽고, 그 끝에 방 이름 · 구성원(이름과 id) · 자기가 누구인지 · 넘어가는 법 · 다른 직원을 부르는 법을 적은 `시스템:` 줄이 붙는다. 할 수 있는 일은 1:1 방의 채팅 턴과 같다. 왕복 한도의 두 시스템 글(`group_exchange_limit` · `group_continued`)은 owner 가 읽을 글이라 턴에 넣지 않는다.
+- 자기 일이 아닌 직원은 넘어간다: 답(`output`)을 비우고 `room_post` 도 쓰지 않으면 방에 글이 남지 않는다 (§9.5).
+- 직원이 `room_post` 로 다른 구성원을 멘션하면 그 직원의 턴이 줄 끝에 들어간다 (§8.4). 이미 차례를 기다리는 직원은 한 번만 받는다. 이렇게 들어온 턴을 방 단위로 세고 한도에서 멈춘다 (§4.6).
+- 줄은 서버 메모리에 있다. 서버를 다시 띄우면 남은 차례는 사라지고, owner 의 다음 글이 다시 넣는다. 나중에 초대된 직원의 `fed_message_id` 는 0 이라, 첫 턴에 방의 처음 글부터 50개씩 읽는다 (1:1 방의 턴과 같은 쪽 나눔이다).
+- 1:1 방 · 파트방에서 직원이 다른 직원을 멘션해도 턴은 들어가지 않는다 (§8.4).
 
 - `mentions` 는 그 방의 구성원인 직원 id 여야 한다. 아니면 `precondition_failed`.
 - `client_msg_id` 는 중복 방지용이다. `meta.client_msg_id` 에 넣고, 같은 방의 최근 글에 같은 값이 있으면 새로 만들지 않고 그 글을 돌려준다 (잠정, S-3). 이때 응답은 201 이 아니라 200 이고 `message.created` 를 다시 내지 않는다. '최근'은 그 방의 마지막 50개 글이다 (S-3).
@@ -1795,7 +1869,7 @@ CREATE TABLE stream_events (
 | `type` | 저장 | 내는 때 | `data` |
 |---|---|---|---|
 | `message.created` | ● | 방에 글이 저장됐다 (owner · 직원 · 시스템) | `{message}` — §3.8 의 행 |
-| `room.updated` | ● | 방이 생겼다, 구성원 · 음소거 · `owner_read_id` 가 바뀌었다 | `{room, members[]}` |
+| `room.updated` | ● | 방이 생겼다, 구성원 · 음소거 · `owner_read_id` 가 바뀌었다. 단체방은 이름이 바뀐 때와 보관한 때, `exchange_count` 가 바뀐 때에도 낸다 (§4.6 · §6.4). 단체방의 시스템 글과 함께 나갈 때는 이것이 그 글의 `message.created` 보다 먼저다 | `{room, members[]}` |
 | `task.created` | ● | C1 · C2 | `{task}` |
 | `task.transitioned` | ● | T1–T11. 작업 취소(T10 · T11)는 `to` 가 `cancelled` 다 | `{task, rule, from, to, actor, reason, event_id, inbox_id}` |
 | `task.updated` | ● | 전이가 아닌 작업 변화 | `{task, change, event_id}` |
@@ -1837,9 +1911,10 @@ CREATE TABLE stream_events (
 | `last` | 마지막 런 이벤트 `{kind, stage, detail}` |
 | `precise` | `false` 면 pulse 없이 활동 기록만으로 판단했다 |
 
-- `mode` 는 `work`(작업 런) · `read`(작업방의 읽기 전용 턴) · `chat`(1:1 방 · 파트방의 채팅 턴)이다. 작업 런은 `working` 인 작업의 `tasks.run_id`(S-8 이 채운다)로 잡힌다. 채팅 · 읽기 턴은 작업의 런이 아니므로 S-7 · S-9 가 턴을 시작할 때 `api.track_run`, 끝낼 때 `api.untrack_run` 을 부른다 — 부르지 않으면 그 턴의 `run.live` 는 나가지 않는다 (S-4).
+- `mode` 는 `work`(작업 런) · `read`(작업방의 읽기 전용 턴) · `chat`(1:1 방 · 파트방 · 단체방의 채팅 턴)이다. 작업 런은 `working` 인 작업의 `tasks.run_id`(S-8 이 채운다)로 잡힌다. 채팅 · 읽기 턴은 작업의 런이 아니므로 S-7 · S-9 가 턴을 시작할 때 `api.track_run`, 끝낼 때 `api.untrack_run` 을 부른다 — 부르지 않으면 그 턴의 `run.live` 는 나가지 않는다 (S-4).
 - 보내는 때: 런이 시작 · 재개될 때, 도는 동안 2초마다(값이 바뀌었을 때만), 런이 멈출 때 한 번 더(`alive = false`). 커밋이 알린 변화는 2초를 기다리지 않고 바로 읽되 두 읽기 사이는 0.5초 이상 띄운다 — 커밋이 몰려도 읽기와 전송이 그보다 잦아지지 않고, 시작 · 멈춤 보고는 최대 0.5초 늦는다. 연결이 하나도 없으면 읽지 않는다 (간격 잠정, S-4).
 - 저장하지 않으므로 다시 붙은 앱은 `GET /studio/runs/{run_id}/live`(§6.4)로 한 번 읽는다. "지금 답하는 중"(§4.9)은 `mode = chat` 인 `run.live` 로 본다.
+- 단체방의 턴도 `mode = chat` 이고 `employee_id` · `room_id` 가 그 턴의 직원과 방이다 (`task_id` 는 `null`). 한 방의 턴은 한 번에 하나라 (§6.6), 단체방에서 지금 답하는 직원은 `room_id` 가 그 방인 `run.live` 의 `employee_id` 한 명이다. 차례를 기다리는 직원은 `run.live` 에 나오지 않는다.
 
 ### 7.5 §4 와의 대조
 
@@ -1862,11 +1937,15 @@ CREATE TABLE stream_events (
 
 | 키 | 뜻 |
 |---|---|
-| `event` | 시스템 글의 종류: `inbox.created` · `inbox.decided` · `needs_assignment` · `upstream_rejected` · `run_error` · `invariant_broken` · `daily_report` · `greeting` · `handoff` |
+| `event` | 시스템 글의 종류: `inbox.created` · `inbox.decided` · `needs_assignment` · `upstream_rejected` · `run_error` · `invariant_broken` · `daily_report` · `greeting` · `handoff` · `group_invited` · `group_removed` · `group_renamed` · `group_exchange_limit` · `group_continued` |
 | `task_id` · `inbox_id` · `run_id` | 카드가 가리키는 것 |
 | `date` · `from` · `to` | `daily_report` 글이 다룬 날(서버 현지 날짜 `YYYY-MM-DD`)과 구간(`from <= 시각 < to`, 서버 현지 시각). `date` 가 같은 날 다시 쓰지 않는 근거다 (§5.9, S-13) |
 | `upstream_task_id` | `upstream_rejected` 의 선행 작업 |
 | `assigned_event_id` | `needs_assignment` 글을 쓸 때 그 작업의 가장 새 `assigned` 이벤트 id (없으면 0). 다시 알릴지 가리는 데 쓴다 (§5.9) |
+| `employee_ids` | 단체방의 시스템 글 `group_invited` · `group_removed` (`event` 의 값이다) 가 가리키는 직원 id 목록. 방을 만들 때의 글은 처음 구성원 전부, 그 뒤는 한 명이다 (§6.4) |
+| `title` · `old_title` | 단체방의 시스템 글 `group_renamed` (`event` 의 값이다) 의 새 이름과 그 전 이름 |
+| `limit` | 단체방의 시스템 글 `group_exchange_limit` (`event` 의 값이다) 이 닿은 한도 값 (§4.6). `group_continued` 글은 `event` 뿐이다 |
+| `client_room_id` | 단체방을 만들 때의 `group_invited` 글에만 있다. 그 방을 만든 요청의 중복 방지 키다 (요청이 준 때만, §6.4) |
 | `client_msg_id` | 중복 방지 (§6.6) |
 | `handoff` | H-5 의 인계 형식 이름과 본문 (잠정, H-5) |
 
@@ -1989,6 +2068,7 @@ CREATE TABLE stream_events (
 - `task_request_review` 의 `precondition_failed` 는 하네스 게이트(§4.3 T6, S-11)와 줄 서 있는 작업, 그리고 위의 첨부 검사다. 결과의 `failed[]` 에 걸린 항목을 적는다 — 예: `checklist_incomplete`(완료 기준마다 표기가 없다) · `structure_choice_missing`.
 - `room_post` 의 `mentions` 는 그 방의 구성원인 직원이어야 한다. 작업방에서 직원을 멘션하면 `exchange_count` 를 올리고(§4.6), 한도에 닿으면 §4.6 대로 한다 (`working` 이면 T4, 그 밖은 §4.5 의 표). 자기 자신은 멘션할 수 없다.
 - 작업방에서 멘션한 직원의 턴 (S-9 확정). 담당이면 그 글이 작업 런에 `engine.interject` 로 끼어든다 — 누구의 글인지와 owner 의 지시가 아님을 앞에 적는다. 작업이 `working` 일 때만이고, 런이 아직 없으면 넣은 것으로 본다 (그 런은 시작할 때 방을 읽는다). 그 밖의 구성원이면 읽기 전용 턴(`mode = read`, §9.5)을 넣는다. `queued[]` 는 턴이 들어간 직원 id 이고 그 수만큼 `exchange_count` 를 올린다. 들어가지 않은 직원은 `message` 에 적는다. 파트방 · 1:1 방 · 시스템 방의 멘션은 턴을 넣지 않고 `queued` 는 빈 배열이다.
+- 단체방에서 멘션한 직원의 턴. 재직 중인 지금 구성원이면 그 방의 줄 끝에 채팅 턴이 들어가고 (§6.6 '단체방의 턴') `queued[]` 에 그 id 가 든다 — 턴은 부른 직원의 턴이 끝난 뒤에 돈다. 자기 자신과 구성원이 아닌 직원의 멘션은 글을 만들기 전에 `precondition_failed` 로 거부한다. 한도는 글을 쓸 때가 아니라 그 턴을 시작하기 직전에 본다 (§4.6): 한도에 닿아 있어도 글은 남고 `exchange_limit` 은 돌려주지 않는다 — `queued[]` 는 줄에 선 직원이지 턴이 돈 직원이 아니다. 퇴사한 구성원을 멘션하면 글은 남고 `queued[]` 에서 빠진다. 턴을 만들지 못하면 (§9.5) 그 방의 시스템 글이 이유를 말한다.
 - `room_post` 의 `handoff` 는 H-5 의 인계 형식이다. 형식 이름과 검사는 H-5 가 정하고, 맞지 않으면 `invalid_format` 과 이유를 돌려준다 (잠정). S-6 은 받은 값을 `messages.meta.handoff` 에 그대로 저장하기만 한다. 멘션한 직원의 턴 넣기와 `exchange_count` 는 S-9 가 했다 (위).
 - `task_progress` 는 작업이 `working` · `blocked` · `review` 일 때 받는다 (T4 · T6 뒤에도 런이 돈다).
 
@@ -2014,7 +2094,7 @@ CREATE TABLE stream_events (
 |---|---|
 | `task_request_review` · `task_progress` | 호출자가 지금 작업의 담당이고, 토큰의 `run` 이 그 작업의 `tasks.run_id` 다. 담당이라도 다른 방의 채팅 턴에서는 못 올린다 |
 | `ask_owner` | 지금 작업이 있고 호출자가 그 작업방의 구성원이다 |
-| `room_post` | `task` 방 = 구성원, `dm` 방 = 자기 1:1 방, `department` 방 = 자기 파트의 방, `system` 방 = 인사만 (일일 보고, S-13) |
+| `room_post` | `task` 방 · `group` 방 = 구성원, `dm` 방 = 자기 1:1 방, `department` 방 = 자기 파트의 방, `system` 방 = 인사만 (일일 보고, S-13) |
 | `task_propose` · `followup_propose` | 재직 중이고 휴직이 아니다. 그 프로젝트에 배치돼 있다 (인사는 예외) |
 | `task_get` · `task_list` · `employee_list` | 호출자가 배치된 프로젝트의 것. 인사는 전체 |
 | `employee_draft` · `employee_submit` · `policy_draft` | 호출자의 파트가 `hr` |
@@ -2151,8 +2231,9 @@ cap:
 - 거르는 자리는 `create` 의 MCP 한정 인자 `mcp_only` 다 (S-7 확정. §11.2). 런에 `RunState.mcp_only` 로 남고 `None` 이면 거르지 않는다. 준 이름만 남기고, 단계에 붙이는 목록(`_attached_mcp`)과 런을 만들기 전의 목록(`_run_mcp_names`)이 같은 값으로 거른다. 채팅 · 읽기 턴은 `chat_mcp` + `studio` 로 한정한다. 릴레이 단계가 적은 `mcp` 는 릴레이 파일의 것이라 거르지 않는다. 작업 런에는 주지 않는다 (S-8 확정. 프로젝트의 MCP — 에디터 등 — 는 작업의 일부라, 거르면 그 MCP 로 고치는 릴레이가 말없이 깨진다) — `employee.yaml` 의 `mcp` 에 없는 프로젝트 MCP 도 지금처럼 붙는다. 어느 쪽으로 정하든 서버 코드를 품은 프로젝트는 T3 의 규칙이 받는다 — 한정 인자는 릴레이 단계의 `mcp` 와 직원 자신의 `mcp` 를 거르지 못한다 (§4.3 T3).
 - 채팅 턴 · 읽기 전용 턴: 릴레이는 `relays/employee-chat.yaml`(S-7), 칸은 `chat` 하나, MCP 는 `chat_mcp` + `studio` 다 (위의 한정 인자로 건다). 덮어쓰기는 없다. `start` 요청이 없으므로 값은 턴을 넣는 순간에 한 번만 본다. 6 은 같다 — 상한을 넘으면 낮춘다. 5 도 같다 — (가)는 studio 가 보고 (나)는 엔진의 검사에 맡긴다.
 - 채팅 · 읽기 턴을 넣지 못할 때 (채팅 턴은 S-7, 읽기 턴은 S-9 확정 — 둘 다 `studio/chat.py`). `employee.yaml` 을 읽지 못하거나(§9.6) 5 의 (가)에 걸리거나 엔진이 `create` 를 거부하면 턴을 넣지 않는다. 거부할 `start` 가 없는 길이라 §4.5 의 왕복 한도 행과 같은 꼴로 한다 — 결재를 만들지 않고, `exchange_count` 도 올리지 않는다.
-  - owner 의 글(§6.6)이 계기면: 글은 저장된 그대로 두고 REST 응답도 성공이다. 그 방에 `system` 글로 이유를 남긴다. `meta.event` 는 `run_error` 다 (§7.6. 종류를 새로 더하지 않는다). 런을 만들었는데 `done` 으로 끝나지 않은 턴도 같은 글을 남긴다(`meta.run_id` 가 그 런). 어느 쪽이든 `fed_message_id` 는 올리지 않아 다음 턴이 그 글을 다시 읽는다 (S-7). `done` 으로 끝났는데 답(`output`)이 비어 있고 그 런이 방에 쓴 글(`room_post`. `messages.run_id` 가 그 런)도 없으면 같은 `run_error` 글을 남긴다(`meta.run_id` 가 그 런). 이때는 `fed_message_id` 를 올린다 (§3.7) — 그 글은 이어 갈 대화에 이미 들어 있어, 올리지 않으면 다음 턴에 두 번 들어간다. 답이 비어도 그 런이 방에 글을 썼으면 그 글이 답이고 `run_error` 글은 남기지 않는다 (`ChatTurns.turn`).
+  - owner 의 글(§6.6)이 계기면: 글은 저장된 그대로 두고 REST 응답도 성공이다. 그 방에 `system` 글로 이유를 남긴다. `meta.event` 는 `run_error` 다 (§7.6. 종류를 새로 더하지 않는다). 런을 만들었는데 `done` 으로 끝나지 않은 턴도 같은 글을 남긴다(`meta.run_id` 가 그 런). 어느 쪽이든 `fed_message_id` 는 올리지 않아 다음 턴이 그 글을 다시 읽는다 (S-7). `done` 으로 끝났는데 답(`output`)이 비어 있고 그 런이 방에 쓴 글(`room_post`. `messages.run_id` 가 그 런)도 없으면 같은 `run_error` 글을 남긴다(`meta.run_id` 가 그 런). 이때는 `fed_message_id` 를 올린다 (§3.7) — 그 글은 이어 갈 대화에 이미 들어 있어, 올리지 않으면 다음 턴에 두 번 들어간다. 답이 비어도 그 런이 방에 글을 썼으면 그 글이 답이고 `run_error` 글은 남기지 않는다 (`ChatTurns.turn`). 단체방은 답이 빈 턴을 다르게 본다 (아래 '단체방의 턴').
   - 직원의 멘션(`room_post`, §8.4)이 계기면: (가)는 글을 만들기 전에 본다. 걸리면 글도 턴도 만들지 않고 `precondition_failed` 와 `failed[]`(`provider_unguarded`)를 돌려준다. 엔진의 거부는 글을 만든 뒤에 나므로 owner 의 글과 같이 `system` 글을 남기고, 도구 결과의 `queued[]` 에서 그 직원이 빠진다. `employee.yaml` 을 읽지 못한 경우(§9.6)도 엔진의 거부와 같이 글을 만든 뒤에 처리한다 (S-9 확정 — (가)의 코드가 아니라 `failed[]` 로 돌려줄 것이 없다). 담당을 멘션했는데 작업이 `working` 이 아니면 `system` 글 없이 `queued[]` 에서만 빠진다.
+  - 단체방의 턴 (§6.6): 값 · 릴레이 · 폴더는 1:1 방의 채팅 턴과 같고 (`mode = chat`), 세션 제목만 방 이름이다. 넣지 못한 턴과 `done` 으로 끝나지 않은 턴은 owner 의 글이든 직원의 멘션이든 위와 같이 `run_error` 글을 남기고 `fed_message_id` 를 올리지 않는다. `done` 으로 끝났는데 답이 비어 있고 그 런이 방에 쓴 글도 없으면 넘어간 것이다 — 단체방에서만 `run_error` 글을 남기지 않고, `fed_message_id` 는 올린다. 그래서 단체방에서는 답이 빈 실패와 넘어감을 구분하지 못한다 (둘 다 글이 없다). 넘어가는 법은 턴에 넣는 새 글 끝의 `시스템:` 줄과 `prompts/employee-chat.md` 가 안내한다 — 실제 모델이 따르는지, 릴레이의 결과 검사가 빈 `output` 을 `done` 으로 받는지는 자동 테스트로 확인하지 못했다 (`VERIFICATION.md`). `exchange_count` 는 §4.6 의 '단체방의 왕복 한도'대로 센다.
 - 채팅 · 읽기 턴의 릴레이와 작업 폴더 (채팅 턴은 S-7, 읽기 턴은 S-9 확정). 읽기 턴은 작업방에서 담당이 아닌 구성원에게만 만든다 — 담당의 그 방 대화는 작업 런이 가진다 (§3.7). owner 가 작업방에서 담당을 멘션해도 턴은 따로 생기지 않는다. 읽기 턴의 답(`output`)은 방에만 남는다. 담당의 작업 런에 닿게 하려면 그 구성원이 `room_post(mentions=[담당])` 을 불러야 하고, 턴에 넣는 새 글 끝의 `시스템:` 줄이 그렇게 안내한다 (실제 모델이 따르는지는 자동 테스트로 확인하지 못했다). `employee-chat.yaml` 의 단계는 provider 를 Claude Code 로 적고 `mcp` 는 적지 않는다. `hidden` 으로 둬 `auto` 의 후보에서 빠지게 한다 (`router.py` 47). `create` 는 `workdir` 나 `repo`, 아니면 세션의 작업 폴더가 있어야 한다 (`pipeline.py` 539–542). 작업방의 읽기 턴은 그 작업의 프로젝트, 그 밖의 방은 직원이 배치된 프로젝트의 `repo` 로 만든다 — 프로젝트의 지침이 함께 실리고 프로젝트의 MCP 는 한정 인자가 거른다. 프로젝트 밖의 폴더를 주면 MCP 는 빠지지만 지침도 빠진다. 미배치 직원과 인사는 `workdir` 를 그 직원 폴더로 준다 (§6.6 의 허용 폴더가 이 값을 쓴다).
   - 프로젝트 맥락이 없는 런의 MCP 와 알려진 제한 (확정 — 서버 3단계에 앞서 메웠다. `pipeline.py` `_attached_mcp` · `_env_mcp`. 자동 테스트는 `tests/test_studio_mcp.py` · `test_studio_chat.py` · `test_studio_work.py`). 맥락이 없는 때는 둘이다 — 저장소 설정의 `project_context` 가 꺼져 있을 때와, 그 폴더와 위 폴더들에 표식 파일(CLAUDE.md · `.claude/` · `.mcp.json`)도 사용자 MCP 도 없어 `projctx.discover` 가 `None` 을 돌려줄 때다. 미배치 직원의 폴더가 둘째 경우에 걸릴 수 있고, 걸리는지는 PC 마다 다르다. 그때에도 `studio` 를 고른 런 — 채팅 턴과 작업 런 — 에는 `studio` 가 붙는다. 붙는 길은 둘이다. 하나는 env 콜백이다 — studio 장부에 있는 런이면 `mcp_env` 콜백이 준 `studio` 를 맥락과 무관하게 단계에 붙인다 (`_env_mcp`, §8.2 '주입'). 다른 하나는 `_attached_mcp` 다 — 맥락이 없어도 `RunState.mcp` 에 `mcp_env` 에 등록된 이름(`studio`)이 있으면 그 런이 고른 레지스트리 MCP 를 붙이고 `mcp_only` 로 거르며, 붙은 것이 있으므로 ToolSearch 도 준다. 그래서 `RunState.mcp` 가 레지스트리 이름뿐이면 실제로 붙은 목록과 같다. 남는 제한은 셋이다. 첫째, 프로젝트 MCP 와 사용자 MCP(unreal 등)는 맥락 없이는 찾지 않아 붙지 않는다 — 런이 골랐으면 `mcp_missing` 이벤트가 남고 그 이름만큼 `RunState.mcp` 와 붙은 목록이 어긋난다. 둘째, 그 런에는 `project_context` 이벤트와 프롬프트의 MCP 안내 줄이 없고 프로젝트 지침 · 스킬도 실리지 않는다 — `project_context: false` 의 뜻은 그대로다. 셋째, `studio` 를 고르지 않은 런(대시보드 · CLI · 기존 캠페인)은 레지스트리 이름을 골라도 전처럼 아무것도 붙지 않는다. `studio` 를 골랐지만 장부에 없는 런(`relay run --mcp studio`)은 토큰이 없어 `studio` 는 빠지고, 함께 고른 레지스트리 MCP 와 ToolSearch 만 붙는다. 실서버 확인은 `VERIFICATION.md` 에 있다.
 - `failed[]` 의 `unknown_stage` · `provider_unguarded` · `model_unavailable` · `effort_unsupported` · `model_over_cap` · `effort_over_cap` 은 S-8 확정이다 (`studio/work.py` 의 `CODES`. 걸음 4 · 5 · 6 의 순서). 문제 하나는 `{code, stage, message}` 다. `provider_unguarded` 는 §9.4 의 8 과 같은 코드다.

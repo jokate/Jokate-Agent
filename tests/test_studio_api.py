@@ -247,7 +247,11 @@ def test_routes_are_the_s3_rows_of_the_document():
     history = {("PUT", "/studio/employees/{id}/files/{name}"), ("GET", "/studio/employees/{id}/history"),
                ("POST", "/studio/employees/{id}/revert")}  # H-3: the files (tests/test_studio_employee_git.py)
     assert all(f"| `{method} {path}` |" in section for method, path in history)
-    others = members | muted | failed | editor | parts | history
+    group = {("POST", "/studio/rooms"), ("POST", "/studio/rooms/{id}/rename"),
+             ("POST", "/studio/rooms/{id}/archive"),  # the group rooms (the tests of the group rooms below)
+             ("POST", "/studio/rooms/{id}/continue")}  # and their turns (tests/test_studio_group.py)
+    assert all(f"| `{method} {path}` |" in section for method, path in group)
+    others = members | muted | failed | editor | parts | history | group
     assert len(doc) == 18 and not doc & others and built == doc | others
 
 
@@ -561,6 +565,284 @@ def test_room_members_are_refused_outside_a_task_room_or_its_project_and_the_ass
     assert rows()[mate] is not None
     refused(world.owner.post(f"/studio/rooms/{room}/members/{mate}"), 409, "precondition_failed")  # not back in
     assert rows()[mate] is not None and len(world.events("room.updated")) == 2
+
+
+# --- group rooms (§3.6 · §6.4) ----------------------------------------------------------------------------
+def _staff(world, *names, **where):
+    """Employees of the program part, by name; placed in no project unless `project_id` says where."""
+    return [world.store.create_employee(name, "program", **where)["id"] for name in names]
+
+
+def _group(world, *employee_ids, **more):
+    r = world.owner.post("/studio/rooms", json={"employee_ids": list(employee_ids), **more})
+    assert r.status_code == 201, r.text
+    return r.json()
+
+
+def _notices(world, room_id):
+    """`meta` of the room's system messages, oldest first."""
+    return [m["meta"] for m in world.store.list_messages(room_id) if m["author_kind"] == "system"]
+
+
+def _told(world, room_id):
+    """Who each `room.updated` of the room said is in it."""
+    return [{m["employee_id"] for m in e["data"]["members"]} for e in world.events("room.updated")
+            if e["room_id"] == room_id]
+
+
+def test_a_group_room_is_made_of_serving_employees_wherever_they_are_placed(world):
+    me = world.emp["id"]
+    [mate], [idle] = _staff(world, "지수", project_id=world.pid), _staff(world, "대기")
+    hr = next((e["id"] for e in world.store.list_employees(department_id="hr")), None)
+    hr = hr or world.store.create_employee("최인사", "hr")["id"]  # company-wide: in no project
+    room = _group(world, mate, me, mate, idle, hr)  # one named twice is one
+    names = ", ".join(world.store.get_employee(e)["name"] for e in (mate, me, idle, hr))
+    assert (room["kind"], room["title"], room["exchange_count"], room["unread"]) == ("group", names, 0, 0)
+    assert room["id"].startswith("room_") and room["archived_at"] is None
+    assert (room["employee_id"], room["task_id"], room["department_id"]) == (None, None, None)
+    assert {m["employee_id"] for m in room["members"]} == {me, mate, idle, hr}
+
+    [notice] = world.store.list_messages(room["id"])  # the room says who was invited
+    assert (notice["author_kind"], notice["author_id"]) == ("system", None) and names in notice["body"]
+    assert notice["meta"] == {"event": "group_invited", "employee_ids": [mate, me, idle, hr]}
+    assert room["owner_read_id"] == notice["id"]  # the owner's own doing is not unread
+    [made], [said] = world.events("room.updated"), world.events("message.created")
+    assert made["id"] < said["id"] and (made["room_id"], said["room_id"]) == (room["id"], room["id"])
+    assert made["data"]["room"] == {k: v for k, v in room.items() if k not in ("members", "unread")}
+    assert made["data"]["members"] == room["members"] and said["data"]["message"]["id"] == notice["id"]
+    assert (made["project_id"], made["task_id"]) == (None, None)
+
+    [listed] = world.owner.get("/studio/rooms?kind=group").json()["items"]
+    assert (listed["id"], listed["unread"], listed["last_message"]["id"]) == (room["id"], 0, notice["id"])
+    assert room["id"] in {r["id"] for r in world.owner.get("/studio/rooms").json()["items"]}
+    assert world.owner.get(f"/studio/rooms/{room['id']}").json() == room
+    assert world.owner.get("/studio/rooms?kind=dm").json()["items"][0]["id"] == world.dm["id"]
+
+    named = _group(world, me, mate, title="  점프 회의 ")  # a name of the owner's; the same people again is fine
+    assert named["title"] == "점프 회의" and named["id"] != room["id"]
+    assert len(world.owner.get("/studio/rooms?kind=group").json()["items"]) == 2
+
+
+def test_a_group_room_needs_two_who_serve_and_holds_no_more_than_the_limit(world, monkeypatch):
+    me = world.emp["id"]
+    a, b, c, gone = _staff(world, "지수", "현우", "다은", "퇴사")
+    world.store.update_employee(gone, retired_at=now())
+    assert world.cfg.studio_group_max_members == 8
+    monkeypatch.setattr(world.cfg, "studio_group_max_members", 3)
+
+    def make(*ids, **more):
+        return world.owner.post("/studio/rooms", json={"employee_ids": list(ids), **more})
+
+    refused(make(), 409, "precondition_failed")
+    refused(make(me), 409, "precondition_failed")
+    refused(make(me, me), 409, "precondition_failed")       # one, named twice
+    refused(make(me, a, b, c), 409, "precondition_failed")  # one over the limit
+    refused(make(me, "emp_none"), 404, "not_found")
+    refused(make(me, a, gone), 409, "precondition_failed")  # one who retired
+    refused(make(gone, "emp_none"), 404, "not_found")       # every one is looked for before anyone's retirement
+    refused(make(me, gone, "emp_none"), 404, "not_found")
+    assert make(me, a, nope=1).status_code == 422 and world.owner.post("/studio/rooms", json={}).status_code == 422
+    assert world.store.list_rooms(kind="group", include_archived=True) == []  # a refusal makes and says nothing
+    assert world.events("room.updated") == [] and world.events("message.created") == []
+
+    r = make(me, a, b, a)  # at the limit
+    assert r.status_code == 201, r.text
+    room = r.json()["id"]
+    url = f"/studio/rooms/{room}/members/"
+    refused(world.owner.post(url + c), 409, "precondition_failed")     # no seat
+    assert world.owner.post(url + a).status_code == 200                # seated already: the limit is not asked
+    assert world.owner.delete(url + b).status_code == 200
+    refused(world.owner.post(url + gone), 409, "precondition_failed")  # a seat, but not for one who retired
+    assert world.owner.post(url + c).status_code == 200
+    refused(world.owner.post(url + b), 409, "precondition_failed")     # one who comes back needs a seat too
+    assert {m["employee_id"] for m in world.owner.get(f"/studio/rooms/{room}").json()["members"]} == {me, a, c}
+    assert _told(world, room) == [{me, a, b}, {me, a}, {me, a, c}]
+
+
+def test_a_group_room_is_made_once_per_client_room_id(world):
+    me = world.emp["id"]
+    mate, gone = _staff(world, "지수", "현우")
+    body = {"employee_ids": [me, mate, gone], "client_room_id": "r-1"}
+
+    def make(**more):
+        return world.owner.post("/studio/rooms", json={**body, **more})
+
+    def groups():
+        return world.store.list_rooms(kind="group", include_archived=True)
+
+    r = make()
+    room = r.json()
+    assert r.status_code == 201, r.text
+    assert _notices(world, room["id"]) == [{"event": "group_invited", "employee_ids": [me, mate, gone],
+                                            "client_room_id": "r-1"}]
+
+    again = make()  # nothing new: the room the first one made, as GET gives it
+    assert again.status_code == 200 and again.json() == room, again.text
+    assert again.json() == world.owner.get(f"/studio/rooms/{room['id']}").json()
+    assert len(groups()) == 1 and len(world.store.list_messages(room["id"])) == 1
+    assert len(world.events("room.updated")) == 1 and len(world.events("message.created")) == 1
+    r = make(employee_ids=[me])  # the key is looked at first: the rest of a retry is not
+    assert (r.status_code, r.json()["id"]) == (200, room["id"])
+
+    world.store.update_employee(gone, retired_at=now())  # a member retired since: still the room it made
+    assert (make().status_code, make().json()["id"]) == (200, room["id"])
+    left = world.owner.post(f"/studio/rooms/{room['id']}/archive").json()
+    r = make()  # and a room the owner left is not made again
+    assert (r.status_code, r.json()["id"], r.json()["archived_at"]) == (200, room["id"], left["archived_at"])
+    assert len(groups()) == 1 and len(world.events("message.created")) == 1
+
+    other = make(employee_ids=[me, mate], client_room_id="r-2")  # another key is another room
+    assert other.status_code == 201 and other.json()["id"] != room["id"], other.text
+    blank = [make(employee_ids=[me, mate], client_room_id="") for _ in range(2)]  # a blank key is no key
+    assert [b.status_code for b in blank] == [201, 201] and blank[0].json()["id"] != blank[1].json()["id"]
+    assert _notices(world, blank[0].json()["id"]) == [{"event": "group_invited", "employee_ids": [me, mate]}]
+    assert len(groups()) == 4
+
+
+def test_a_group_rooms_member_is_invited_taken_out_and_comes_back_to_its_conversation(world):
+    me = world.emp["id"]
+    mate, late, never = _staff(world, "지수", "현우", "다은")
+    room = _group(world, me, mate)["id"]
+    url = f"/studio/rooms/{room}/members/{late}"
+
+    def ids(r):
+        assert r.status_code == 200 and set(r.json()) == {"members"}, r.text
+        return {m["employee_id"] for m in r.json()["members"]}
+
+    def said():
+        return [(m["event"], m["employee_ids"]) for m in _notices(world, room)]
+
+    assert ids(world.owner.post(url)) == {me, mate, late}
+    assert said() == [("group_invited", [me, mate]), ("group_invited", [late])]
+    assert _told(world, room) == [{me, mate}, {me, mate, late}] and len(world.events("message.created")) == 2
+    assert ids(world.owner.post(url)) == {me, mate, late}  # seated already: nothing is said
+    assert len(said()) == 2 and len(_told(world, room)) == 2
+
+    world.store.update_room_member(room, late, session_id="s1", conversation_id="c1", fed_message_id=2)
+    assert ids(world.owner.delete(url)) == {me, mate}
+    assert world.store.get_room_member(room, late)["left_at"] is not None  # the row stays, and what it kept
+    assert said()[-1] == ("group_removed", [late]) and _told(world, room)[-1] == {me, mate}
+    assert ids(world.owner.delete(url)) == {me, mate}  # gone already
+    assert ids(world.owner.delete(f"/studio/rooms/{room}/members/{never}")) == {me, mate}  # one who was never there
+    assert world.store.get_room_member(room, never) is None
+    assert len(said()) == 3 and len(_told(world, room)) == 3 and len(world.events("message.created")) == 3
+
+    assert ids(world.owner.post(url)) == {me, mate, late}  # back, in the row it had: the same conversation
+    row = world.store.get_room_member(room, late)
+    assert (row["left_at"], row["session_id"], row["conversation_id"], row["fed_message_id"]) == (None, "s1", "c1", 2)
+    assert len(world.store.list_room_members(room_id=room, include_left=True)) == 3
+    assert said()[-1] == ("group_invited", [late]) and _told(world, room)[-1] == {me, mate, late}
+    assert ids(world.owner.delete(f"/studio/rooms/{room}/members/{me}")) == {mate, late}  # no assignee: anyone
+
+    detail = world.owner.get(f"/studio/rooms/{room}").json()
+    assert detail["unread"] == 0 and detail["owner_read_id"] == world.store.list_messages(room)[-1]["id"]
+    for call in (world.owner.post, world.owner.delete):
+        refused(call(f"/studio/rooms/{room}/members/emp_none"), 404, "not_found")
+    assert len(said()) == 5
+
+
+def test_a_group_room_is_renamed_and_says_so(world):
+    me = world.emp["id"]
+    [mate] = _staff(world, "지수")
+    room = _group(world, me, mate)
+    url = f"/studio/rooms/{room['id']}/rename"
+
+    r = world.owner.post(url, json={"title": "  점프 회의 "})
+    assert r.status_code == 200 and r.json()["title"] == "점프 회의", r.text
+    notice = world.store.list_messages(room["id"])[-1]
+    assert notice["meta"] == {"event": "group_renamed", "title": "점프 회의", "old_title": room["title"]}
+    assert r.json()["owner_read_id"] == notice["id"] and "점프 회의" in notice["body"]
+    assert world.events("room.updated")[-1]["data"]["room"] == r.json()
+    assert world.events("message.created")[-1]["data"]["message"]["id"] == notice["id"]
+    assert world.owner.get(f"/studio/rooms/{room['id']}").json()["title"] == "점프 회의"
+
+    assert world.owner.post(url, json={"title": "점프 회의 "}).json() == r.json()  # the same name: nothing is said
+    assert len(world.events("room.updated")) == 2 and len(world.events("message.created")) == 2
+    assert refused(world.owner.post(url, json={"title": "  "}), 422, "missing_fields")["fields"] == ["title"]
+    assert world.owner.post(url, json={}).status_code == 422
+    assert world.owner.post(url, json={"title": "새 이름", "muted": True}).status_code == 422
+    for other in (world.dm["id"], "room_system", "room_dep_program"):  # only a group room has a name to change
+        refused(world.owner.post(f"/studio/rooms/{other}/rename", json={"title": "새 이름"}), 409, "precondition_failed")
+    refused(world.owner.post("/studio/rooms/room_none/rename", json={"title": "새 이름"}), 404, "not_found")
+    assert len(world.events("room.updated")) == 2 and world.store.get_room(world.dm["id"])["title"] == "민수"
+
+
+def test_the_owner_leaves_a_group_room_by_archiving_it(world):
+    me = world.emp["id"]
+    [mate] = _staff(world, "지수")
+    room = _group(world, me, mate)["id"]
+    url = f"/studio/rooms/{room}/archive"
+
+    def listed(query):
+        return [r["id"] for r in world.owner.get("/studio/rooms?kind=group" + query).json()["items"]]
+
+    r = world.owner.post(url)
+    assert r.status_code == 200 and r.json()["archived_at"], r.text
+    assert listed("") == [] and listed("&archived=1") == [room]
+    assert world.events("room.updated")[-1]["data"]["room"] == r.json() and _told(world, room)[-1] == {me, mate}
+    assert world.owner.post(url).json() == r.json() and len(world.events("room.updated")) == 2  # again: the same row
+    assert len(world.store.list_room_members(room_id=room)) == 2  # the members stay, and nothing is said in the room
+    assert len(world.store.list_messages(room)) == 1 and len(world.events("message.created")) == 1
+
+    refused(world.owner.post(f"/studio/rooms/{room}/rename", json={"title": "새 이름"}), 409, "precondition_failed")
+    for call in (world.owner.post, world.owner.delete):  # nobody is invited into or taken out of a room left
+        refused(call(f"/studio/rooms/{room}/members/{mate}"), 409, "precondition_failed")
+    refused(world.post(room, body="아직 계신가요"), 409, "precondition_failed")  # nor does the owner write there
+    assert len(world.store.list_messages(room)) == 1 and len(world.events("message.created")) == 1
+    for other in (world.dm["id"], "room_system", "room_dep_program"):
+        refused(world.owner.post(f"/studio/rooms/{other}/archive"), 409, "precondition_failed")
+    refused(world.owner.post("/studio/rooms/room_none/archive"), 404, "not_found")
+    assert world.store.get_room(world.dm["id"])["archived_at"] is None and len(world.events("room.updated")) == 2
+
+
+def test_a_message_saved_before_the_owner_left_a_group_room_still_answers_its_retry(world):
+    me = world.emp["id"]
+    [mate] = _staff(world, "지수")
+    room = _group(world, me, mate)["id"]
+    first = world.post(room, body="먼저 나갑니다", client_msg_id="c-1")
+    assert first.status_code == 201, first.text
+    assert world.owner.post(f"/studio/rooms/{room}/archive").status_code == 200
+
+    again = world.post(room, body="먼저 나갑니다", client_msg_id="c-1")
+    assert again.status_code == 200 and again.json() == first.json()  # the retry of what was saved
+    refused(world.post(room, body="새 글", client_msg_id="c-2"), 409, "precondition_failed")
+    assert len(world.store.list_messages(room)) == 2 and len(world.events("message.created")) == 2
+
+
+def test_the_owners_message_in_a_group_room_is_kept_and_told_and_asks_its_members_turns(world, monkeypatch):
+    asked, turns = [], []
+    monkeypatch.setattr(api, "_ask_turn", lambda *a, **k: asked.append(a))
+    monkeypatch.setattr(api, "_group_turns", lambda room_id, ids, mentioned=False: turns.append((room_id, list(ids),
+                                                                                                 mentioned)))
+    me = world.emp["id"]
+    mate, outsider = _staff(world, "지수", "현우")
+    room = _group(world, me, mate)["id"]
+
+    r = world.post(room, body="다들 봐 주세요", mentions=[mate])
+    assert r.status_code == 201 and (r.json()["author_kind"], r.json()["mentions"]) == ("owner", [mate]), r.text
+    assert world.events("message.created")[-1]["data"]["message"] == r.json()
+    # §6.6: who is mentioned only, through the room's line and not as the turn of a 1:1 room (tests/test_studio_group.py)
+    assert asked == [] and turns == [(room, [mate], False)]
+    refused(world.post(room, body="봐요", mentions=[outsider]), 409, "precondition_failed")  # not of the room
+    assert len(turns) == 1  # what was refused asks nothing
+
+    def row():
+        return {g["id"]: g for g in world.owner.get("/studio/rooms?kind=group").json()["items"]}[room]
+
+    assert row()["unread"] == 0 and row()["last_message"]["id"] == r.json()["id"]
+    answer = world.says("넵", room)
+    assert row()["unread"] == 1 and row()["last_message"]["id"] == answer["id"]
+    # what waits to be read is not jumped over by a notice of the owner's own doing
+    read = world.store.get_room(room)["owner_read_id"]
+    assert world.owner.post(f"/studio/rooms/{room}/rename", json={"title": "점프 회의"}).json()["owner_read_id"] == read
+    assert row()["unread"] == 2
+    last = world.store.list_messages(room)[-1]["id"]
+    assert world.owner.post(f"/studio/rooms/{room}/read", json={"message_id": last}).json()["owner_read_id"] == last
+    assert row()["unread"] == 0 and asked == []
+    assert world.post(room, body="다들 의견 주세요").status_code == 201  # no mention: every member, in the room's order
+    assert turns[-1] == (room, api.group_order(world.store, room), False) and set(turns[-1][1]) == {me, mate}
+    world.store.update_employee(mate, retired_at="2026-10-12T00:00:00")  # one who retired takes no turn
+    assert api.group_order(world.store, room) == [me]
 
 
 # --- messages ---------------------------------------------------------------------------------------------
