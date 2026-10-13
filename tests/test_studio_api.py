@@ -248,11 +248,18 @@ def test_routes_are_the_s3_rows_of_the_document():
     history = {("PUT", "/studio/employees/{id}/files/{name}"), ("GET", "/studio/employees/{id}/history"),
                ("POST", "/studio/employees/{id}/revert")}  # H-3: the files (tests/test_studio_employee_git.py)
     assert all(f"| `{method} {path}` |" in section for method, path in history)
+    life = {("PATCH", "/studio/employees/{id}"), ("POST", "/studio/employees/{id}/assign"),
+            ("POST", "/studio/employees/{id}/leave"),
+            ("POST", "/studio/employees/{id}/retire")}  # H-3: a life (tests/test_studio_employee_lifecycle.py)
+    assert all(f"| `{method} {path}` |" in section for method, path in life)
+    memory = {("GET", "/studio/employees/{id}/memory"), ("PATCH", "/studio/employees/{id}/memory/{item_id}"),
+              ("DELETE", "/studio/employees/{id}/memory/{item_id}")}  # H-4: the memory (tests/test_studio_memory.py)
+    assert all(f"| `{method} {path}` |" in section for method, path in memory)
     group = {("POST", "/studio/rooms"), ("POST", "/studio/rooms/{id}/rename"),
              ("POST", "/studio/rooms/{id}/archive"),  # the group rooms (the tests of the group rooms below)
              ("POST", "/studio/rooms/{id}/continue")}  # and their turns (tests/test_studio_group.py)
     assert all(f"| `{method} {path}` |" in section for method, path in group)
-    others = members | muted | failed | editor | parts | history | group
+    others = members | muted | failed | editor | parts | history | life | memory | group
     assert len(doc) == 18 and not doc & others and built == doc | others
 
 

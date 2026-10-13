@@ -71,7 +71,7 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 from starlette.concurrency import run_in_threadpool
 from starlette.requests import HTTPConnection
 
-from . import creator, devices, employee_git, employees, files, guard, importer, jobs as create_jobs
+from . import creator, devices, employee_git, employees, files, guard, importer, jobs as create_jobs, memory
 from . import editor as editor_control
 from . import machine as machine_info, review, sat, staffing, stats, tools, work
 from .inbox import Hooks, Inbox, InboxError
@@ -329,7 +329,8 @@ def ensure_hr() -> dict | None:
 
 def fill_parts() -> list[dict]:
     """Fill the empty defaults of the three other parts from relay_agent/studio/parts/ (H-1; §3.4 · §3.15;
-    studio/employees.py `fill_parts`): a cell that has a value is never written over. Called once at the server's
+    studio/employees.py `fill_parts`): a cell that has a value is never written over,
+    except that a guide gets the original's '## 인계' section added when it has none (H-5; `with_handover`). Called once at the server's
     start, after `ensure_hr()` and apart from it. Returns the rows that were written; [] when nothing was empty,
     the store is not open, or it failed (logged — the server starts without it)."""
     with _lock:
@@ -1246,6 +1247,46 @@ def put_employee_file(id: str, name: EmployeeFileName, body: EmployeeFileBody,
         return {"name": name, "sha256": digest, "commit": commit}
 
 
+# The memory of an employee (H-4; `studio/memory.py`): MEMORY.md as the lines it is made of. An item's id is the
+# hash of its line, so a line the server moved is found and one that was changed meanwhile is `item_unknown`
+# (no `base_sha256` needed). The whole file is written by `PUT …/files/MEMORY.md`. `commit` is the folder's head.
+class MemoryItemPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    text: str
+
+
+def _memory_refused(e: memory.MemoryRefused) -> StudioError:
+    return StudioError("precondition_failed", str(e), failed=[e.failed])
+
+
+@router.get("/employees/{id}/memory")
+def get_employee_memory(id: str, store: StudioStore = Depends(get_store)) -> dict:
+    employee = _need(store.get_employee(id), "직원", id)
+    studio_dir = _config().studio_dir
+    return {**memory.view(studio_dir, employee["id"]), "commit": _folder_head(employees.folder(studio_dir, id))}
+
+
+@router.patch("/employees/{id}/memory/{item_id}")
+def patch_employee_memory(id: str, item_id: str, body: MemoryItemPatch, store: StudioStore = Depends(get_store)) -> dict:
+    if not memory.one_line(body.text):
+        raise StudioError("missing_fields", "text 는 비울 수 없습니다", fields=["text"])
+    employee = _need(store.get_employee(id), "직원", id)
+    try:
+        return memory.edit(store, _config().studio_dir, employee, item_id, body.text)
+    except memory.MemoryRefused as e:
+        raise _memory_refused(e) from e
+
+
+@router.delete("/employees/{id}/memory/{item_id}")
+def delete_employee_memory(id: str, item_id: str, store: StudioStore = Depends(get_store)) -> dict:
+    employee = _need(store.get_employee(id), "직원", id)
+    try:
+        return memory.remove(store, _config().studio_dir, employee, item_id)
+    except memory.MemoryRefused as e:
+        raise _memory_refused(e) from e
+
+
 # The newest first, 200 at most; `files` are all the files that commit changed. [] while the folder has no
 # history. A git that cannot be read is `engine_error`, as the refusals of git are elsewhere (§4.3 T7).
 @router.get("/employees/{id}/history")
@@ -1304,6 +1345,169 @@ def revert_employee(id: str, body: EmployeeRevert, store: StudioStore = Depends(
         commit = _folder_commit(folder, f"revert: {sha[:7]}")
         _file_changed(store, employee)
         return {"commit": commit}
+
+
+# --- an employee's life: rename · placement · leave · retirement (H-3 ②, §6.4 · §4.9 · §4.10) ----------------
+# Comments, not docstrings, on the four routes: the saved contract (openapi.json) would carry a docstring as
+# the path's description. One transaction holds the read, the checks, the write and the events of each; a value
+# that is already so writes nothing and says nothing. After a change that is committed the running campaigns
+# are looked at (`_look_at_campaigns`): a task that waited for this employee may start now.
+class EmployeePatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+
+
+class EmployeeAssign(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    project_id: str | None  # required; null = out of every project
+
+
+class EmployeeLeave(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    on: bool
+
+
+def _look_at_campaigns() -> None:
+    """The look of §4.10 over every running campaign, after a change of an employee (assigned · leave · retired · renamed:
+    a rename has nothing to look at, but the same helper is called for it).
+    What it fails at is logged: the change is committed and the answer does not depend on it."""
+    look = getattr(_effects, "campaign", None)
+    if look is None:
+        return
+    try:
+        look(None)
+    except Exception:  # noqa: BLE001
+        log.exception("studio: 직원 변경 뒤 캠페인을 훑지 못했다")
+
+
+def _employee_changed(store: StudioStore, tx: Tx, row: dict, change: str) -> None:
+    store.emit(tx, "employee.updated", {"employee": row, "change": change}, project_id=row["project_id"])
+
+
+def _engaged(store: StudioStore, row: dict, tx: Tx, what: str) -> None:
+    """Refuse when the employee holds a task that is going on or is in the line (§4.9): `working` · `blocked` ·
+    `review`, or a `backlog` task that has been queued (`queued_at`)."""
+    busy = [t for t in store.list_tasks(assignee_id=row["id"], tx=tx)
+            if t["status"] in ("working", "blocked", "review") or (t["status"] == "backlog" and t["queued_at"])]
+    if busy:
+        titles = " · ".join(f"'{t['title']}'" for t in busy[:3])
+        raise StudioError("precondition_failed", f"{row['name']} 은(는) 진행 중인 작업({titles})이 있어 {what} 수 없습니다. "
+                          "먼저 작업을 멈추거나 담당을 바꿉니다", failed=["active_tasks"])
+
+
+def _not_retired(row: dict) -> None:
+    if row["retired_at"] is not None:
+        raise StudioError("precondition_failed", f"{row['name']} 은(는) 퇴사한 직원입니다", failed=["retired"])
+
+
+def _employee_answer(store: StudioStore, row: dict, changed: bool) -> dict:
+    if changed:
+        _look_at_campaigns()
+    return _with_dm_room(store, [row])[0]
+
+
+# The name is the one of the others too — a retired one's among them (`name` is unique for good). The 1:1 room
+# that carries the old name carries the new one. A retired employee can be renamed: that is how a name is freed.
+@router.patch("/employees/{id}")
+def patch_employee(id: str, body: EmployeePatch, store: StudioStore = Depends(get_store)) -> dict:
+    name = body.name.strip()
+    if not name:
+        raise StudioError("missing_fields", "name 은 비울 수 없습니다", fields=["name"])
+    with store.transaction() as tx:
+        row = _need(store.get_employee(id, tx=tx), "직원", id)
+        if row["name"] == name:
+            changed = False
+        else:
+            taken = StudioError("conflict", f"이름 '{name}' 은(는) 다른 직원이 쓰고 있습니다 (퇴사한 직원 포함)",
+                                field="name")
+            if any(e["name"] == name and e["id"] != id for e in store.list_employees(include_retired=True, tx=tx)):
+                raise taken
+            try:
+                new = store.update_employee(id, tx=tx, name=name)
+            except sqlite3.IntegrityError as e:
+                raise taken from e
+            for room in store.list_rooms(kind="dm", employee_id=id, include_archived=True, tx=tx)[:1]:
+                if room["title"] == row["name"]:
+                    room = store.update_room(room["id"], tx=tx, title=name)
+                    members = store.list_room_members(room_id=room["id"], tx=tx)
+                    store.emit(tx, "room.updated", {"room": room, "members": members}, room_id=room["id"])
+            _employee_changed(store, tx, new, "renamed")
+            row, changed = new, True
+    return _employee_answer(store, row, changed)
+
+
+# `project_id` null takes the employee out of every project. The HR one is of the company: no project but null.
+# A project that is not there or is archived is refused, and so is an employee with a task going on.
+@router.post("/employees/{id}/assign")
+def assign_employee(id: str, body: EmployeeAssign, store: StudioStore = Depends(get_store)) -> dict:
+    with store.transaction() as tx:
+        row = _need(store.get_employee(id, tx=tx), "직원", id)
+        _not_retired(row)
+        target = body.project_id
+        if target is not None and row["department_id"] == employees.HR_DEPARTMENT:
+            raise StudioError("precondition_failed", f"{row['name']} 은(는) 회사 전체의 직원이라 프로젝트에 배치하지 않습니다",
+                              failed=["company_wide"])
+        if target == row["project_id"]:
+            changed = False
+        else:
+            if target is not None:
+                project = store.get_project(target, tx=tx)
+                if project is None:
+                    raise StudioError("precondition_failed", f"프로젝트를 찾을 수 없습니다: {target}",
+                                      failed=["project_unknown"])
+                if project["archived_at"] is not None:
+                    raise StudioError("precondition_failed", f"보관된 프로젝트입니다: {project['name']}",
+                                      failed=["project_archived"])
+            _engaged(store, row, tx, "배치를 바꿀")
+            row = store.update_employee(id, tx=tx, project_id=target)
+            _employee_changed(store, tx, row, "assigned")
+            changed = True
+    return _employee_answer(store, row, changed)
+
+
+# `on` true: on_leave (refused with a task going on); false: the status of §4.9 worked out again from the tasks
+# held. A retired employee takes no leave. The status change is told before the update.
+@router.post("/employees/{id}/leave")
+def leave_employee(id: str, body: EmployeeLeave, store: StudioStore = Depends(get_store)) -> dict:
+    with store.transaction() as tx:
+        row = _need(store.get_employee(id, tx=tx), "직원", id)
+        _not_retired(row)
+        if (row["status"] == "on_leave") == body.on:
+            changed = False
+        else:
+            if body.on:
+                _engaged(store, row, tx, "휴직할")
+                status = "on_leave"
+            else:
+                held = [t["status"] for t in store.list_tasks(assignee_id=id, tx=tx)]
+                status = employees.derive_status("idle", held)
+            prev = row["status"]
+            row = store.update_employee(id, tx=tx, status=status)
+            if status != prev:
+                store.emit(tx, "employee.status", {"employee_id": id, "status": status, "prev": prev},
+                           project_id=row["project_id"])
+            _employee_changed(store, tx, row, "leave")
+            changed = True
+    return _employee_answer(store, row, changed)
+
+
+# Retired: `retired_at` only. The row, the folder, the 1:1 room and what was said in it stay (it can be read);
+# the employee leaves the default list. Already retired: the same row, no event. Refused with a task going on.
+@router.post("/employees/{id}/retire")
+def retire_employee(id: str, store: StudioStore = Depends(get_store)) -> dict:
+    with store.transaction() as tx:
+        row = _need(store.get_employee(id, tx=tx), "직원", id)
+        if row["retired_at"] is not None:
+            changed = False
+        else:
+            _engaged(store, row, tx, "퇴사할")
+            row = store.update_employee(id, tx=tx, retired_at=now())
+            _employee_changed(store, tx, row, "retired")
+            changed = True
+    return _employee_answer(store, row, changed)
 
 
 # --- campaigns · tasks (§6.4) -----------------------------------------------------------------------------
@@ -1731,6 +1935,29 @@ def run_inbox() -> Inbox | None:
                  hire_cooldown_days=_cfg.studio_hire_cooldown_days)
 
 
+def _learn(item: dict) -> None:
+    """The lessons of a decided final review into the assignee's MEMORY.md (H-4), on the thread that calls. What
+    fails is logged: the decision was made before this."""
+    with _lock:
+        store = _store
+    if store is None or _cfg is None:
+        return
+    try:
+        ask = memory.writer(_cfg.studio_memory_model)
+        if ask is not None:
+            memory.learn(store, _cfg.studio_dir, item, ask)
+    except Exception:  # noqa: BLE001
+        log.exception("studio: 메모리 추출이 실패했다 (결재 %s)", item.get("id"))
+
+
+def learn_later(item: dict) -> threading.Thread:
+    """`_learn` on a thread of its own: the call to the model takes up to a minute and a decision must not wait
+    for it. A turn that follows a rework at once may not carry the new lines; the next one does (§9.1)."""
+    thread = threading.Thread(target=_learn, args=(item,), name="studio-memory", daemon=True)
+    thread.start()
+    return thread
+
+
 def is_task_run(run_id: str) -> bool:
     """§5.8 다: is this the run of a studio task (`tasks.run_id`)? False when the studio layer cannot say."""
     try:
@@ -1977,7 +2204,7 @@ def _group_turns(room_id: str, employee_ids: list[str], mentioned: bool = False)
 
 def _group_guest(store: StudioStore, employee_id: str, tx: Tx) -> dict:
     """One who can be invited: an employee that is there (404) and has not retired — the hr one and one placed
-    in no project too. `on_leave` is not looked at: nothing sets it yet."""
+    in no project too. `on_leave` is not looked at: a leave stops a task from starting (§4.9), not a talk."""
     employee = _need(store.get_employee(employee_id, tx=tx), "직원", employee_id)
     if employee["retired_at"] is not None:
         raise StudioError("precondition_failed", f"{employee['name']} 은(는) 퇴사한 직원입니다. 단체방에는 재직 중인 "
@@ -2482,7 +2709,7 @@ class McpRoomPost(BaseModel):
     mentions: list[str] = Field(default_factory=list)
     room: str = ""                      # default: the room of this turn
     attachments: list[dict[str, Any]] = Field(default_factory=list)  # each {path, name=""} (§6.6)
-    handoff: dict[str, Any] | None = None  # H-5; stored in meta.handoff as it is
+    handoff: dict[str, Any] | None = None  # H-5: checked by studio/handover.py, then stored in meta.handoff as it is
 
 
 class McpEmployeeList(BaseModel):

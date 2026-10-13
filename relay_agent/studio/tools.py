@@ -25,8 +25,8 @@ engine. Each turn that went in is one more in `exchange_count`, and at `inbox.ma
 the system asks the owner (T4, `exchange_limit`) and the turn ends. A mention in a group room or a department room asks for that member's turn in the room's line
 (`_group_posted`); in any other room it starts no turn.
 
-Not here yet: the handoff format of `room_post` (H-5), and the two file arguments of an inbox item (`_file_args`,
-S-11).
+Not here yet: the two file arguments of an inbox item (`_file_args`, S-11). The handoff of `room_post` is checked
+against studio/handover.py (H-5) before anything is written.
 
 Not here at all: what the server does once the answer of a T4 · T6 has gone out (cutting the run that is still
 at work, §8.3 '서버의 뒤처리' · §5.7). That is studio/cutoff.py's, and api.py calls it (`answered`) with the run
@@ -42,7 +42,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from . import drafts, employees, files, staffing
+from . import drafts, employees, files, handover, staffing
 from .inbox import AMEND_FILES, DRAFT_KEYS, DRAFT_REQUIRED, RECOMMEND, Inbox, InboxError, validate_payload
 from .tasks import (FORBIDDEN_WHY, STATES, SYSTEM, TASK_TYPES, TEXT_FIELDS, Actor, Outcome, TaskMachine,
                     TaskNotFound, TransitionError, classify)
@@ -54,9 +54,9 @@ ASK_KINDS = {"question": "question", "choice": "structure_choice", "approval": "
 HR = "hr"
 GROUP_KINDS = ("group", "department")  # the rooms whose turns go into the room's line (api.GROUP_KINDS; no import: api imports this)
 CODES = ("no_task_context", "not_found", "actor_not_allowed", "missing_fields", "precondition_failed",
-         "exchange_limit")  # Refusal
+         "exchange_limit", "invalid_format")  # Refusal
 ADDED = {"illegal_transition": ("from", "to"), "precondition_failed": ("failed",), "missing_fields": ("fields",),
-         "exchange_limit": ("inbox_id",)}
+         "exchange_limit": ("inbox_id",), "invalid_format": ("fields",)}
 ENDING = ("ask_owner", "task_request_review")   # the tools whose success ends the turn (T4 · T6)
 WAITING = ("blocked", "review")                 # the task already waits for the owner: end the turn (§8.3)
 PROGRESS_STATES = ("working", "blocked", "review")  # §8.4: the run still goes after T4 · T6
@@ -100,7 +100,7 @@ class Caller:
 
 # --- the result (§8.3) ------------------------------------------------------------------------------------
 class Refusal(Exception):
-    """A refusal a tool makes itself. `extra`: `failed` (precondition_failed) · `fields` (missing_fields)."""
+    """A refusal a tool makes itself. `extra`: `failed` (precondition_failed) · `fields` (missing_fields · invalid_format)."""
 
     def __init__(self, code: str, message: str, **extra: Any):
         if code not in CODES:
@@ -533,8 +533,9 @@ def _group_posted(room: dict, message: dict, mentions: list[str], inbox: Inbox) 
 
 def room_post(caller: Caller, args: dict, machine: TaskMachine, inbox: Inbox) -> dict:
     """A message of the employee in a room it may write in, with `message.created`, in one transaction.
-    Every check — the attachments' too — ends before the message is made (§6.6). A dict in `handoff` is stored
-    in `meta.handoff` as it is.
+    Every check — the attachments' too — ends before the message is made (§6.6). A `handoff` is checked first
+    (H-5, studio/handover.py): one that is not a format of §8.4 is `invalid_format` with the reasons and `fields[]`,
+    and nothing is written; one that passes is stored in `meta.handoff` as it is.
 
     A mention in a task room asks for that employee's turn (S-9): `queued` is who got one, and each is one more
     in `exchange_count` (§4.6). `_before_mentions` refuses before the message — a read turn that cannot be made,
@@ -560,6 +561,13 @@ def room_post(caller: Caller, args: dict, machine: TaskMachine, inbox: Inbox) ->
     if bad:
         raise Refusal("missing_fields", f"비어 있거나 틀린 인자: {', '.join(bad)}. text 나 attachments 중 하나는 있어야 "
                       "하고 attachments 는 각 {path, name=\"\"} 다", fields=bad)
+    handoff = args.get("handoff")
+    if handoff is not None:  # before _before_mentions: a wrong handoff must leave nothing behind (a limit approval)
+        wrong = handover.problems(handoff)
+        if wrong:
+            name = handoff.get("format") if isinstance(handoff, dict) else None
+            raise Refusal("invalid_format", "인계 형식이 맞지 않아 글을 쓰지 않았다: " + "; ".join(why for _, why in wrong)
+                          + f". 형식: {handover.hint(name)}", fields=list(dict.fromkeys(field for field, _ in wrong)))
     mentions = list(dict.fromkeys(m.strip() for m in args.get("mentions") or [] if not _blank(m)))
     if caller.id in mentions:
         raise Refusal("precondition_failed", "자기 자신은 멘션할 수 없다", failed=[])
@@ -577,7 +585,7 @@ def room_post(caller: Caller, args: dict, machine: TaskMachine, inbox: Inbox) ->
     task = store.get_task(room["task_id"]) if room["kind"] == "task" and room["task_id"] and mentions else None
     if task is not None:
         _before_mentions(caller, task, room, mentions, machine, inbox)
-    meta = {"handoff": args["handoff"]} if isinstance(args.get("handoff"), dict) else {}
+    meta = {"handoff": handoff} if handoff is not None else {}
     folder: Path | None = None
     try:
         with store.transaction() as tx:
@@ -863,7 +871,7 @@ TOOLS: dict[str, Callable[[Caller, dict, TaskMachine, Inbox], dict]] = {
 def call(name: str, caller: Caller, args: dict | None, *, machine: TaskMachine, inbox: Inbox) -> dict:
     """Run one tool and return the dict of §8.3. A refusal — the tool's own, the machine's (TransitionError),
     the inbox's (InboxError), a task that is gone — is `{ok: false, code, message, end_turn}` plus `from` ·
-    `to`, `failed` or `fields` for the three codes that carry them (§6.3 names), and `inbox_id` for
+    `to`, `failed` or `fields` for the codes that carry them (§6.3 names), and `inbox_id` for
     `exchange_limit`; nothing else rides along.
 
     `end_turn` of a failure is true in two cases here: `ask_owner` · `task_request_review` on a task that

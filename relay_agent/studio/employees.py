@@ -661,10 +661,39 @@ def part_proposal_problems(draft: dict, parts: list[dict], checks: Checks) -> li
     return out
 
 
+HANDOVER_TITLE = "## 인계"
+_APPROVAL_TITLE = "## 결재 기준"
+
+
+def with_handover(guide: str, original: str) -> str:
+    """H-5: `guide` with the '인계' section of `original` added, only when `original` has one and `guide` has
+    a value but neither a line that starts `## 인계` nor the word `handoff` (an owner who rewrote the section
+    keeps it). The section goes before the first `## 결재 기준` line, else at the end; the rest of `guide` is
+    not changed. Idempotent: the result has the word `handoff`."""
+    if not guide.strip() or "handoff" in guide:
+        return guide
+    guide_lines = guide.splitlines(keepends=True)
+    if any(line.startswith(HANDOVER_TITLE) for line in guide_lines):
+        return guide
+    lines = original.splitlines(keepends=True)
+    start = next((i for i, line in enumerate(lines) if line.startswith(HANDOVER_TITLE)), None)
+    if start is None:
+        return guide
+    end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("## ")), len(lines))
+    section = "".join(lines[start:end]).strip()
+    at = next((i for i, line in enumerate(guide_lines) if line.startswith(_APPROVAL_TITLE)), None)
+    if at is None:
+        return guide.rstrip() + "\n\n" + section + "\n"
+    return "".join(guide_lines[:at]).rstrip() + "\n\n" + section + "\n\n" + "".join(guide_lines[at:])
+
+
 def fill_parts(store: StudioStore) -> list[dict]:
     """Fill `guide_template` · `default_mcp` · `default_models` of the rows of PART_IDS from `part_defaults()`,
     each cell on its own and only while it is empty ('' · [] · {}): a value that is there is never written over,
-    so a DB that already runs gets the originals and keeps what its owner changed. `default_relay` is not
+    so a DB that already runs gets the originals and keeps what its owner changed. The one exception (H-5):
+    a `guide_template` that has a value gets the original's '## 인계' section added (`with_handover`) when it
+    has none — nothing else of it is changed; idempotent, no event; a section deleted on purpose comes back
+    unless the guide says `handoff`. `default_relay` is not
     touched — NULL says "no relay", and the seed has the four. One transaction, no event. Returns the rows
     that were written, in the order of PART_IDS; [] when nothing was empty.
 
@@ -679,6 +708,10 @@ def fill_parts(store: StudioStore) -> list[dict]:
             if part is None:
                 continue
             fields = {key: value for key, value in values.items() if value and not part.get(key)}
+            if "guide_template" not in fields and part.get("guide_template"):
+                added = with_handover(part["guide_template"], values.get("guide_template", ""))
+                if added != part["guide_template"]:
+                    fields["guide_template"] = added
             if fields:
                 written.append(store.update_department(part_id, tx=tx, **fields))
     return written

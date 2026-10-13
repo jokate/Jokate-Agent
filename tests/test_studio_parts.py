@@ -17,6 +17,13 @@ STAGES = {"design_doc": "doc-write", "program": "studio-task", "design_setup": "
 FRAME = "- 묻고 한다 (`ask_owner` 로 무엇을 · 왜 · 안 하면 어떻게 되는지를 올린다):\n- 알아서 한다:\n"
 
 
+def handover_section(original):
+    lines = original.splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith("## 인계"))
+    end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("## ")), len(lines))
+    return "\n".join(lines[start:end]).strip()
+
+
 def no(r, code):
     return refused(r, api.STATUS[code], code)
 
@@ -74,7 +81,9 @@ def test_a_start_fills_only_the_empty_cells_of_the_three_parts(world):
                             default_models={"chat": {"model": "haiku"}})
     assert [row["id"] for row in api.fill_parts()] == ["program"]  # each cell on its own: the one that is empty
     part = store.get_department("program")
-    assert (part["guide_template"], part["default_models"]) == ("# 고친 지침\n", {"chat": {"model": "haiku"}})
+    section = handover_section(defaults["program"]["guide_template"])
+    assert part["guide_template"] == "# 고친 지침\n\n" + section + "\n"  # H-5: only the section is added
+    assert part["guide_template"].count("## 인계") == 1 and part["default_models"] == {"chat": {"model": "haiku"}}
     assert part["default_mcp"] == defaults["program"]["default_mcp"]
     store.update_department("design_doc", default_relay=None)
     assert api.fill_parts() == [] and store.get_department("design_doc")["default_relay"] is None  # not the relay
@@ -83,6 +92,33 @@ def test_a_start_fills_only_the_empty_cells_of_the_three_parts(world):
 
     starts = [f.__name__ for f in server.app.router.on_startup]  # a start of the server does it, after HR's
     assert starts.index("fill_studio_parts") == starts.index("ensure_studio_hr") + 1
+
+
+def test_a_start_adds_the_handover_section_to_a_guide_that_has_none(world):
+    store, defaults = world.store, employees.part_defaults()
+    api.fill_parts()
+    sec = handover_section(defaults["design_doc"]["guide_template"])
+    doc = "# 기획 지침\n본문 앞\n\n## 결재 기준\n\n- 고친 기준 줄\n"
+    owner = "# 세팅 지침\n\n## 인계\n\n내가 쓴 절\n"
+    store.update_department("design_doc", guide_template=doc)
+    store.update_department("program", guide_template="# 고친 지침\n")
+    store.update_department("design_setup", guide_template=owner)
+    store.update_department("art", guide_template="# 아트 지침\n")
+    assert [row["id"] for row in api.fill_parts()] == ["design_doc", "program"]
+    got = store.get_department("design_doc")["guide_template"]
+    assert got == "# 기획 지침\n본문 앞\n\n" + sec + "\n\n## 결재 기준\n\n- 고친 기준 줄\n"
+    assert got.index("## 인계") < got.index("## 결재 기준")
+    assert all(word in got for word in ("spec_table", "rows", "item", "value", "done"))
+    assert store.get_department("program")["guide_template"].startswith("# 고친 지침\n\n## 인계")
+    assert store.get_department("design_setup")["guide_template"] == owner
+    assert store.get_department("art")["guide_template"] == "# 아트 지침\n"
+    before = [store.get_department(p)["guide_template"] for p in PARTS]
+    assert api.fill_parts() == [] and [store.get_department(p)["guide_template"] for p in PARTS] == before
+    assert store.list_stream_events() == []
+    original = defaults["design_doc"]["guide_template"]
+    assert employees.with_handover("", original) == ""
+    assert employees.with_handover("handoff 로 보낸다\n", original) == "handoff 로 보낸다\n"
+    assert employees.with_handover("# 아트\n", defaults["art"]["guide_template"]) == "# 아트\n"
 
 
 def test_the_defaults_pass_the_checks_of_an_employee_yaml(world):

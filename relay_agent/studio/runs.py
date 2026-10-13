@@ -164,12 +164,17 @@ class EngineHooks(Hooks):
     `no_review_request`, of the progress thread coming back and of the restart recovery — all of them reach the
     run through `Inbox.deliver`.
 
+    `learn(item)` is the memory of H-4: server.py gives `api.learn_later`, a thread of its own that asks a light
+    model for the lessons of a decided final review. None = nothing is learned.
+
     `commit` is the commit of an employee's folder after a `hire` · `guide_amend` approval (H-3; §5.5 · §9.6):
     the folder's own git, `studio/employee_git.py`. It needs no engine."""
 
     def __init__(self, engine, advance: Callable[[str], Any] | None = None,
-                 chat: Callable[[str, str], Any] | None = None, turns: Any = None):
+                 chat: Callable[[str, str], Any] | None = None, turns: Any = None,
+                 learn: Callable[[dict], Any] | None = None):
         self.engine = engine
+        self._learn = learn
         self._advance = advance
         self._chat = chat
         self._turns = turns
@@ -198,6 +203,10 @@ class EngineHooks(Hooks):
         """One commit of that employee's folder in its own git; the first one makes the repository. A GitError
         goes up as it is: `Inbox._safely` logs it and the decision stays."""
         employee_git.commit(folder, message)
+
+    def learn(self, item: dict) -> None:
+        if self._learn is not None:
+            self._learn(item)
 
     def chat_turn(self, employee_id: str, room_id: str) -> None:
         if self._chat is not None:
@@ -257,16 +266,18 @@ class EngineHooks(Hooks):
 
 def attach(engine, inbox_factory: Callable[[], Inbox | None], *,
            advance: Callable[[str], Any] | None = None,
-           chat: Callable[[str, str], Any] | None = None, turns: Any = None) -> EngineHooks:
+           chat: Callable[[str, str], Any] | None = None, turns: Any = None,
+           learn: Callable[[dict], Any] | None = None) -> EngineHooks:
     """Connect an engine to the inbox. Its stops are filed: the sink is put beside whatever `engine.notifier`
     already is, so the toast keeps working. The hooks that come back carry the decision of an item without a
     task to that engine — give them to the Inbox (`api.use_hooks`). `chat` is what starts a chat turn
     (`EngineHooks`); without it no turn is started, whoever asks. `turns` is what a mention asks its turn of
-    (`chat.ChatTurns`, S-9); without it a mention starts none."""
+    (`chat.ChatTurns`, S-9); without it a mention starts none. `learn` is what picks the lessons out of a final
+    review's reason (`api.learn_later`, H-4); without it nothing is learned."""
     sink = RunSink(engine, inbox_factory)
     engine.notifier = Fanout(engine.notifier, sink)
     engine.after_advance = sink.idle
-    return EngineHooks(engine, advance, chat, turns)
+    return EngineHooks(engine, advance, chat, turns, learn)
 
 
 def _told(engine, run) -> tuple[str, dict]:

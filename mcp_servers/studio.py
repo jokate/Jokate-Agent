@@ -174,7 +174,13 @@ def room_post(text: str, mentions: list[str] | None = None, room: str = "", atta
     턴이다. queued[] 가 턴이 들어간 직원이다. 직원끼리의 멘션은 작업마다 한도가 있어, 닿으면 글을 쓰지 않고
     exchange_limit 이 온다 (owner 의 결정을 기다린다).
     attachments 는 각 {path, name=""} — 런의 작업 폴더나 프로젝트 폴더 안의 25MB 이하 파일이고, 경로만 넘기면
-    서버가 검사해 복사한다. 돌려주는 것: {message_id, queued[]}. end_turn 이 true 로 오면 턴을 끝낸다."""
+    서버가 검사해 복사한다. 돌려주는 것: {message_id, queued[]}. end_turn 이 true 로 오면 턴을 끝낸다.
+    handoff 는 파트 간 인계일 때만 넣는다 (그 밖의 글에는 넣지 않는다). 형식은 둘이다 — spec_table (기획→프로그램):
+    {format: "spec_table", rows: [{item, value, done, condition?, exception?, note?}], source?} 와 data_items
+    (프로그램→기획(세팅), 노출된 데이터 항목 목록): {format: "data_items", items: [{asset, field, type, default?,
+    note?}], source?}. 필수 칸은 비어 있지 않은 글이고 표는 행이 하나 이상 있어야 한다. 맞지 않으면 글을 쓰지 않고
+    invalid_format 과 이유, fields[] 가 온다 (고쳐서 다시 부른다). 검수로 넘길 때는 handoff 가 아니라
+    task_request_review 를 쓴다."""
     return _call("room_post", text=text, mentions=mentions or [], room=room, attachments=attachments or [],
                  handoff=handoff)
 

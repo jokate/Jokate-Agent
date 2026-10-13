@@ -300,16 +300,70 @@ def test_studios_callback_gives_a_token_to_the_runs_of_its_ledger(desk):  # noqa
 
 
 # --- room_post (§8.4 · §8.5) ------------------------------------------------------------------------------------
+SPEC = {"format": "spec_table", "source": "Docs/combat.md",
+        "rows": [{"item": "기본 공격 피해", "value": "10", "done": "허수아비 HP 가 10 줄어든다", "note": ""}]}
+ITEMS = {"format": "data_items", "items": [{"asset": "/Game/Data/DT_Weapon", "field": "Damage", "type": "float"}]}
+BAD_HANDOFFS = {  # name: (handoff, the fields[] it gets, a word of the reason)
+    "unknown_format": ({"format": "v1", "rows": SPEC["rows"]}, ["format"], "v1"),
+    "no_format": ({"rows": SPEC["rows"]}, ["format"], "format"),
+    "empty_object": ({}, ["format"], "format"),
+    "format_is_a_list": ({"format": ["spec_table"], "rows": SPEC["rows"]}, ["format"], "format"),
+    "format_is_an_object": ({"format": {}, "rows": SPEC["rows"]}, ["format"], "format"),
+    "missing_done": ({"format": "spec_table", "rows": [{"item": "a", "value": "1"}]}, ["rows[0].done"], "done"),
+    "blank_value": ({"format": "spec_table", "rows": [{"item": "a", "value": "  ", "done": "x"}]}, ["rows[0].value"],
+                    "value"),
+    "empty_table": ({"format": "spec_table", "rows": []}, ["rows"], "비어"),
+    "no_table": ({"format": "data_items"}, ["items"], "items"),
+    "wrong_table": ({"format": "data_items", "rows": SPEC["rows"]}, ["handoff", "items"], "rows"),
+    "unknown_key": ({"format": "spec_table", "rows": SPEC["rows"], "to": "qa"}, ["handoff"], "to"),
+    "unknown_column": ({"format": "data_items", "items": [{"asset": "a", "field": "b", "type": "c", "x": "1"}]},
+                       ["items[0]"], "x"),
+}
+
+
+@pytest.mark.parametrize("name", list(BAD_HANDOFFS))
+def test_room_post_refuses_a_handoff_that_is_no_format_and_writes_nothing(desk, name):  # noqa: F811
+    task = desk.working()
+    token, room = desk.token(task), desk.room(task)
+    handoff, fields, word = BAD_HANDOFFS[name]
+    count, events = len(desk.store.list_messages(room["id"])), len(desk.store.list_stream_events())
+    out = failed(desk.call("room_post", token, text="넘긴다", handoff=handoff), "invalid_format")
+    assert out["fields"] == fields and word in out["message"] and ("spec_table" in out["message"] or "data_items" in out["message"])
+    assert len(desk.store.list_messages(room["id"])) == count and len(desk.store.list_stream_events()) == events
+    assert desk.untouched(task)
+
+
+def test_room_post_checks_the_handoff_before_the_mention_does_anything(desk):  # noqa: F811
+    task = desk.working()
+    token, room = desk.token(task), desk.room(task)
+    desk.join(task, desk.w.mate)
+    count, events = len(desk.store.list_messages(room["id"])), len(desk.store.list_stream_events())
+    out = failed(desk.call("room_post", token, text="봐 달라", mentions=[desk.w.mate],
+                           handoff={"format": "spec_table", "rows": []}), "invalid_format")
+    assert out["fields"] == ["rows"]
+    assert desk.store.get_task(task["id"])["exchange_count"] == task["exchange_count"] and desk.untouched(task)
+    assert len(desk.store.list_messages(room["id"])) == count and len(desk.store.list_stream_events()) == events
+
+
+def test_room_post_stores_a_good_handoff_of_either_format_as_it_came(desk):  # noqa: F811
+    task = desk.working()
+    token = desk.token(task)
+    for handoff in (ITEMS, SPEC, {**ITEMS, "source": "Docs/x.md"}):
+        out = desk.call("room_post", token, text="넘긴다", handoff=handoff)
+        assert out["ok"] and desk.store.get_message(out["message_id"])["meta"] == {"handoff": handoff}
+    out = desk.call("room_post", token, text="인계 아님")  # no handoff: no meta
+    assert desk.store.get_message(out["message_id"])["meta"] == {}
+
 def test_room_post_writes_as_the_employee_and_announces_it(desk):  # noqa: F811
     task = desk.working()
     token, room = desk.token(task), desk.room(task)
     before = len(desk.store.list_stream_events())
-    out = desk.call("room_post", token, text="빌드가 끝났다", handoff={"to": "qa", "format": "v1"})
+    out = desk.call("room_post", token, text="빌드가 끝났다", handoff=SPEC)
     message = desk.store.get_message(out["message_id"])
     assert out["queued"] == [] and not out["end_turn"]
     assert (message["room_id"], message["author_kind"], message["author_id"], message["body"], message["run_id"]) == (
         room["id"], "employee", task["assignee_id"], "빌드가 끝났다", task["run_id"])
-    assert message["meta"] == {"handoff": {"to": "qa", "format": "v1"}} and message["attachments"] == []
+    assert message["meta"] == {"handoff": SPEC} and message["attachments"] == []
     events = desk.store.list_stream_events()[before:]
     assert [(e["type"], e["room_id"], e["task_id"]) for e in events] == [("message.created", room["id"], task["id"])]
     assert desk.store.get_task(task["id"])["exchange_count"] == task["exchange_count"]  # S-9 counts, not S-6

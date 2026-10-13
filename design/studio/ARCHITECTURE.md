@@ -491,7 +491,7 @@ CREATE INDEX room_members_employee ON room_members(employee_id);
 
 - 행 하나가 전제 1의 "직원×방 대화 하나"다. 채팅 턴과 읽기 전용 턴이 이 대화를 잇는다. 대화가 길어져 새 대화로 넘길 때(S-7) `conversation_id` 를 비운다 — 끝난 턴의 입력 토큰이 `chat.HANDOFF_TOKENS`(10만. 값 잠정)를 넘었을 때와, `--resume` 이 실패해 그 턴이 새로 시작했을 때다. 다음 턴은 그 세션에서 마지막으로 `done` 으로 끝난 런의 `state` · `open_issues` · `next_steps` 를 인계(HANDOFF)로 실어 새 대화로 시작한다. 모델을 따로 불러 요약하지 않는다. `session_id` 는 직원×방에 하나이고 새 대화로 넘어가도 그대로다. `fed_message_id` 는 턴이 `done` 으로 끝났을 때 그 턴이 읽은 마지막 글의 id 로 올린다 (답이 비어도 같다, §9.5. `studio/chat.py`).
 - 작업방에서 담당의 작업 런은 이 대화가 아니라 `tasks.run_id` 의 런이 가진 단계별 대화(`RunState.stage_sessions` · `done_sessions`, `pipeline.py` 200 · 216–217)를 쓴다. 릴레이는 단계마다 대화가 따로라 "직원×방 대화 하나"와 글자 그대로 같지 않다. `[§12]`
-- 구성원: `dm` 은 그 직원 1행, `task` 는 담당과 owner 가 넣은 직원(§4.3 의 T3, S-9), `department` 는 그 파트의 재직 직원, `system` 은 행이 없다. `group` 은 owner 가 초대한 직원이다: 재직 중이면 인사도, 프로젝트에 배치되지 않은 직원도 된다 (퇴사한 직원은 안 된다. 휴직은 아직 가리지 않는다). 2명 이상으로 만들고 `Config.studio_group_max_members`(기본 8)명까지다 (§6.4).
+- 구성원: `dm` 은 그 직원 1행, `task` 는 담당과 owner 가 넣은 직원(§4.3 의 T3, S-9), `department` 는 그 파트의 재직 직원, `system` 은 행이 없다. `group` 은 owner 가 초대한 직원이다: 재직 중이면 인사도, 프로젝트에 배치되지 않은 직원도 된다 (퇴사한 직원은 안 된다. 휴직은 가리지 않는다 — H-3 확정, §6.4). 2명 이상으로 만들고 `Config.studio_group_max_members`(기본 8)명까지다 (§6.4).
 - 단체방에서 내보낸 직원의 행은 지우지 않고 `left_at` 을 채운다. 다시 초대하면 `left_at` 을 비워 그 행 — `session_id` · `conversation_id` · `fed_message_id`, 곧 그 방에서 하던 대화 — 으로 돌아온다. 작업방의 구성원과 같은 규칙이다 (S-9). 직원이 퇴사해도 단체방의 행은 그대로 남는다 (파트방과 같다) — 퇴사한 직원과 내보낸 직원은 단체방의 턴을 받지 않는다 (§6.6 '단체방의 턴'). 파트방도 같은 턴 규칙을 쓴다 — 파트방의 구성원(그 파트의 재직 직원)이 같은 순서로 턴을 받는다. 파트방의 글쓰기(`room_post`) · 멘션 · 턴이 모두 구성원 행 기준이다 — 직원을 만드는 두 경로(`_enroll`, 채용 승인)가 행을 넣는다.
 - 쓰기 권한 열은 없다. 작업방에서 쓰는 사람은 `tasks.assignee_id` 한 명이다 (S-9).
 
@@ -732,7 +732,7 @@ VALUES ('hr', '인사', 1, NULL, 0,
 
 같은 startup 이 `hr` 파트 행의 `guide_template` · `default_models_json` 도 채운다: 칸마다 비어 있을 때만(`''` · `{}`), 직원 생성과 별개 트랜잭션으로. `guide_template` 은 `hr/GUIDE.md` 의 본문이고 `default_models_json` 은 `{"chat": hr/employee.yaml 의 chat}` 이다. 값이 있는 칸은 건드리지 않고 이벤트도 내지 않는다. 일부러 비운 칸은 다음 시작에 다시 채워진다. 한쪽이 실패해도 다른 쪽은 진행한다.
 
-나머지 네 파트(`design_doc` · `program` · `design_setup` · `art`)의 빈 칸도 시작할 때 채운다 (H-1 확정. `art` 는 T3). `server.py` 의 startup 함수 `fill_studio_parts` → `api.fill_parts()` → `employees.fill_parts()` 이고 `ensure_studio_hr` 바로 다음에 돈다. 원본은 `relay_agent/studio/parts/` 다: `guide_template` 은 `<파트 id>.md` 의 본문, `default_mcp_json` 은 `defaults.yaml` 의 그 파트 `mcp`, `default_models_json` 은 같은 파일의 `{chat, work, cap}` 이다. 규칙은 `hr` 과 같다 — 칸마다 비어 있을 때만(`''` · `[]` · `{}`) 한 트랜잭션에서 채우고, 값이 있는 칸은 건드리지 않고, 이벤트를 내지 않고, 실패해도 서버는 뜬다. 일부러 비운 칸은 다음 시작에 다시 채워지므로 네 파트의 MCP 를 빈 목록으로 둘 수는 없다. `default_relay` 는 시드의 값이고 채우지 않는다 — NULL 은 '릴레이 없음'이라는 값이다. 원본의 기본값은 §9.4 의 검사를 통과하고 `work` 의 단계 이름은 그 파트 릴레이의 것이다 (`employees.defaults_problems`, `tests/test_studio_parts.py`). `program` 의 `work` 에는 `*` 를 두지 않는다 — `auto` 가 다른 릴레이를 고르면 그 릴레이의 단계별 값이 그대로 쓰인다.
+나머지 네 파트(`design_doc` · `program` · `design_setup` · `art`)의 빈 칸도 시작할 때 채운다 (H-1 확정. `art` 는 T3). `server.py` 의 startup 함수 `fill_studio_parts` → `api.fill_parts()` → `employees.fill_parts()` 이고 `ensure_studio_hr` 바로 다음에 돈다. 원본은 `relay_agent/studio/parts/` 다: `guide_template` 은 `<파트 id>.md` 의 본문, `default_mcp_json` 은 `defaults.yaml` 의 그 파트 `mcp`, `default_models_json` 은 같은 파일의 `{chat, work, cap}` 이다. 규칙은 `hr` 과 같다 — 칸마다 비어 있을 때만(`''` · `[]` · `{}`) 한 트랜잭션에서 채우고, 값이 있는 칸은 건드리지 않고, (예외 하나: 원본에 '인계' 절이 있는 세 파트는 지침에 값이 있어도 그 절이 없으면 절만 '결재 기준' 앞에 덧붙인다 — H-5, `employees.with_handover`. 지침에 `## 인계` 줄이나 `handoff` 라는 말이 있으면 붙이지 않으므로 멱등이고 이벤트가 없다. 지운 절은 다시 붙는다.) 이벤트를 내지 않고, 실패해도 서버는 뜬다. 일부러 비운 칸은 다음 시작에 다시 채워지므로 네 파트의 MCP 를 빈 목록으로 둘 수는 없다. `default_relay` 는 시드의 값이고 채우지 않는다 — NULL 은 '릴레이 없음'이라는 값이다. 원본의 기본값은 §9.4 의 검사를 통과하고 `work` 의 단계 이름은 그 파트 릴레이의 것이다 (`employees.defaults_problems`, `tests/test_studio_parts.py`). `program` 의 `work` 에는 `*` 를 두지 않는다 — `auto` 가 다른 릴레이를 고르면 그 릴레이의 단계별 값이 그대로 쓰인다.
 
 ### 3.16 12개 테이블에 두지 않은 것
 
@@ -1102,7 +1102,7 @@ T10 · T11 도 CAMPAIGN.md §2 의 그림에 없는 전이다. owner 가 더했�
 4. 그 밖 → `idle`
 
 - 채팅 턴은 상태를 바꾸지 않는다. "지금 답하는 중"은 `run.live` 로 본다.
-- 휴직으로 보낼 수 있는 때(진행 중인 작업이 있을 때의 처리)는 H-3 이 정한다 (잠정).
+- 진행 중인 작업이 있는 직원의 배치 변경 · 휴직 켜기 · 퇴사 (H-3 확정). 그 직원이 담당인 작업 가운데 `working` · `blocked` · `review` 가 있거나 줄에 선(`queued_at`) `backlog` 가 있으면 세 경로 모두 `precondition_failed`(`failed=["active_tasks"]`)로 거절한다 — 런이 도는 중에 프로젝트나 재직 상태가 바뀌면 T3 의 검사와 어긋나고, `review` 는 반려(T8)로 다시 `working` 이 되기 때문이다. owner 가 먼저 작업을 멈추거나 담당을 바꾼다. 줄에 서지 않은 `backlog` 작업은 담당을 그대로 둔다(퇴사 · 이동 뒤에는 시작 요청이 거절된다, §4.10 알려진 틈). 휴직을 끌 때는 상태를 §4.9 의 규칙으로 담당 작업에서 다시 계산한다(`employees.derive_status`). 휴직은 작업 시작(T3)과 `task_propose` 만 막는다 — 채팅 턴과 단체방 초대는 막지 않는다 (§3.6).
 
 ### 4.10 캠페인 상태
 
@@ -1127,7 +1127,7 @@ T10 · T11 도 CAMPAIGN.md §2 의 그림에 없는 전이다. owner 가 더했�
 
 시작 요청이 거절되면(담당이 휴직 중이거나 다른 프로젝트에 배치돼 있다) 기록만 남기고 다음 작업을 본다. 거절은 `queued` 이벤트를 남기지 않아 위 3 에 걸리지 않는다 — 담당이 복귀하거나 배치가 맞은 뒤의 다음 계기에 시작한다.
 
-- **계기.** 캠페인이 `running` 이 됐을 때. 작업이 만들어졌을 때(C2), 제안이 승인 · 거절됐을 때(T1 · T2), 검수를 요청했을 때(T6), 통과 · 취소됐을 때(T7 · T10 · T11), 담당 · 선행이 바뀌었을 때 — 이때는 그 작업의 캠페인만 본다. 작업 내용을 고쳤을 때(`edited`. 캠페인이 바뀌었을 수 있다)와 서버가 시작했을 때(§4.8 의 복구 뒤)는 `running` 캠페인을 모두 본다. `progress` · `run` 처럼 잦은 변화에서는 보지 않는다 (`campaigns.LOOKS`).
+- **계기.** 캠페인이 `running` 이 됐을 때. 작업이 만들어졌을 때(C2), 제안이 승인 · 거절됐을 때(T1 · T2), 검수를 요청했을 때(T6), 통과 · 취소됐을 때(T7 · T10 · T11), 담당 · 선행이 바뀌었을 때 — 이때는 그 작업의 캠페인만 본다. 직원의 배치 · 휴직 · 퇴사 · 이름이 바뀌었을 때(H-3 — 이름은 훑을 일이 없어도 같은 헬퍼가 부른다)는 `running` 캠페인을 모두 본다. 작업 내용을 고쳤을 때(`edited`. 캠페인이 바뀌었을 수 있다)와 서버가 시작했을 때(§4.8 의 복구 뒤)는 `running` 캠페인을 모두 본다. `progress` · `run` 처럼 잦은 변화에서는 보지 않는다 (`campaigns.LOOKS`).
 - **멈추는 곳.** 캠페인이 스스로 서는 일은 없다. 결재(`blocked`)나 검수(`review`)에 선 작업은 뒤 작업의 선행을 채우지 않을 뿐이고(방식에 따라, §4.6), 런이 멈추면 슬롯을 놓으므로 그 작업에 기대지 않는 줄기는 계속 간다.
 - **끝.** 볼 때마다, 캠페인에 작업이 하나 이상 있고 모두 `done` · `rejected` · `cancelled` 이면 system 이 `running` → `done` 으로 넘긴다. 작업이 하나도 없는 캠페인은 `running` 으로 둔다 — `done` 에서 돌아오는 전이가 없다.
 - **멈춤 (S-14 확정 — `TaskMachine.transition_campaign` 의 `_hold_line`, 그물은 `Autopilot._hold`).** 큐(§4.6)는 캠페인 상태를 보지 않는다. 그래서 캠페인을 `paused` · `cancelled` 로 바꾸는 전이가, 상태를 바꾸는 그 트랜잭션 안에서 자동 진행이 줄 세운 `backlog` 작업(가장 새 `queued` 행이 system 의 "캠페인 자동 진행")을 줄에서 뺀다 — system 의 `unqueued` 이벤트이고 사유는 "캠페인을 일시정지해 줄에서 뺐다" · "캠페인을 취소해 줄에서 뺐다"(`campaigns.HELD`)다. 스트림에는 `campaign.updated` 다음에 뺀 작업마다 `task.updated` 가 나간다. 상태 변경과 줄 빼기가 한 커밋이라, 전이 뒤 훑기 전에 서버가 죽어도 멈춘 캠페인이 세운 작업은 줄에 남지 않는다. 슬롯은 얻었지만 아직 T3 전인 작업도 빠진다 — 큐의 진행 스레드는 줄에서 빠진 것을 보고 런을 만들지 않은 채 슬롯을 놓는다. T3 가 먼저 커밋됐으면 그 작업은 `working` 이라 건드리지 않는다. owner 가 직접 시작을 누른 작업은 줄에 둔다 — 캠페인이 아니라 owner 의 요청이다. 슬롯을 기다리는 `working` 작업(T5 · T8 뒤)과 진행 중인 작업은 건드리지 않는다. 전이 뒤의 훑기(`Autopilot._hold`)가 같은 것을 한 번 더 본다 — 전이와 겹쳐 돌던 훑기가 그 커밋 뒤에 세운 작업을 거두는 그물이다 (아래 알려진 틈). `paused` → `running` 으로 돌아오면 다음 훑기가 뺀 작업을 다시 세운다 (위 3 의 예외).
@@ -1143,7 +1143,8 @@ T10 · T11 도 CAMPAIGN.md §2 의 그림에 없는 전이다. owner 가 더했�
 - 훑기가 도는 중에 캠페인이 `paused` · `cancelled` 가 되면, 그 훑기가 전이의 커밋 뒤에 세운 작업은 줄에 남는다 — 시작 요청은 캠페인 상태를 다시 보지 않는다. 전이 뒤의 훑기(`Autopilot._hold`)가 거두지만, 그 훑기가 먼저 끝났거나 그 전에 서버가 죽으면 그 캠페인을 id 로 다시 훑을 때까지 줄에 남아 큐가 시작할 수 있다. 서버 시작 때의 훑기는 `running` 캠페인만 보므로 거두지 않는다.
 - "선행 반려" 표시는 직접 기다리는 작업 중 `working` · `blocked` · `review` 만 받는다. 이미 `done` 인 뒤 작업과 간접으로 기다리는 작업은 표시하지 않는다 (잠정). 표시는 그 작업이 세 상태를 벗어날 때(T7 · T9 · T11) 내린다 (§4.3 T8). 불리언 하나라 반려된 선행이 여럿이어도 어느 것 때문인지는 `flag` 이벤트에서만 알 수 있다.
 - "배치 필요" · "선행 거절"을 캠페인 시작 · 재개 때 다시 알리는 것은 전이가 그 뒤의 훑기에 넘기는 힌트다 (§5.9). `running` 으로 가는 전이가 커밋된 뒤 그 훑기 전에 서버가 죽으면 다시 알리지 않는다 — 먼저 쓴 글은 방에 남아 있다. 알릴 후보가 있는 훑기마다 시스템 방의 글을 처음부터 읽는다.
-- 담당의 휴직 복귀나 프로젝트 배치 변경은 작업의 변화가 아니어서 훑지 않는다. 다음 계기까지 시작이 늦는다 (시작은 된다 — 위의 거절). 직원의 휴직 · 배치를 바꾸는 API 는 아직 없고(H-3) 직원 행을 바꾸는 곳은 `recompute_employee`(§4.9)뿐이다. H-3 이 그 API 를 만들 때, 바꾼 뒤 `advance_studio()` 로 `running` 캠페인을 모두 훑는다.
+- 담당의 휴직 복귀나 프로젝트 배치 변경은 작업의 변화가 아니어서 작업 쪽 계기로는 훑지 않는다 (H-3 확정). 직원의 수명주기 라우트(`assign` · `leave` · `retire` · `PATCH`)가 변경을 커밋한 뒤 `api._look_at_campaigns` 로 `advance_studio()` 를 부르고 `running` 캠페인을 모두 훑는다. 값이 그대로면 훑지 않는다. 훑기가 실패해도 응답은 그대로다(로그만).
+- 퇴사했거나 다른 프로젝트로 옮긴 직원이 담당인 채 줄에 서지 않은 `backlog` 작업은 시작 요청이 계속 거절되고 "배치 필요" 알림도 나오지 않는다 (알림은 담당이 없는 작업만 본다). owner 가 담당을 바꾼다. 퇴사 · 이동 때 담당을 비우지 않는다 (H-3 확정).
 - 시스템 방 · 작업방에 글로 쓰는 알림(배치 필요 · 선행 거절 · 선행 반려)은 즉시 등급 푸시로도 간다 (N-2 확정, §5.9).
 
 ---
@@ -1572,6 +1573,8 @@ CAMPAIGN.md §2(76행), S-5, A-9 가 적은 결재는 모두 9가지이고 이�
 | §9.4 | `employee.yaml` 의 저장 검사 | `employee.yaml` 을 쓰는 모든 길(§9.6)과 `employee_draft` 의 `problems[]` |
 | §9.5 | 런을 만들 때의 단계 이름 · provider · 모델 · 상한 | `start`(§6.4), 그리고 채팅 · 읽기 턴을 넣지 못한 `room_post` |
 | §9.6 | 직원 파일의 직접 수정 · 되돌리기 — 읽은 뒤에 파일이 바뀌었다, 이력에 없는 커밋 | `PUT /studio/employees/{id}/files/{name}`, `POST /studio/employees/{id}/revert` |
+| §6.4 (직원 메모리) | 메모리 항목 — 그런 항목이 없다, 고친 뒤 MEMORY.md 가 4096바이트를 넘는다 | `PATCH` · `DELETE /studio/employees/{id}/memory/{item_id}` |
+| §6.4 (직원 경로) | 직원의 배치 · 휴직 · 퇴사 — 퇴사한 직원 · 인사에게 프로젝트 · 없는 프로젝트 · 보관된 프로젝트 · 진행 중인 작업(§4.9) | `POST /studio/employees/{id}/assign` · `leave` · `retire` |
 | §4.3 'T5 · T7 · T8 · T9 · T11 의 `failed[]`' | 그 작업의 런과 변경의 상태 — 런이 없다 · 돌고 있다 · 닫히지 않는다, 이미 반영했다 · 이미 되돌렸다, 스냅샷이 없다, 폴더를 다른 런이 쓴다, 다른 작업이 시작됐다 | `POST /studio/inbox/{id}/decide`, `POST /studio/tasks/{id}/cancel` |
 
 `failed[]` 로 검색해 모은 색인이다. 표에 없는 절의 `precondition_failed` 는 코드를 정해 두지 않은 것으로 보고 빈 배열을 낸다. 절이 코드를 새로 정하면 이 표에 그 절을 더한다.
@@ -1675,18 +1678,27 @@ CAMPAIGN.md §2(76행), S-5, A-9 가 적은 결재는 모두 9가지이고 이�
 | `POST /studio/departments/{id}/archive` | — | 행 (파트방도 보관한다. 이미 보관됐으면 같은 행) | `not_found` · `precondition_failed` (`builtin` 이거나 재직 직원이 있다) | H-1 |
 | `GET /studio/employees` | `?project_id` · `?department_id` · `?retired=0·1` | 행 목록 + 각 `dm_room_id` · `company_wide` | | S-3 |
 | `GET /studio/employees/{id}` | — | 행 + `{dm_room_id, company_wide, files, tasks[], runs[]}` | | S-3 |
-| `PATCH /studio/employees/{id}` | `{name}` | 행 | `conflict` | H-3 |
+| `PATCH /studio/employees/{id}` | `{name}` | 행 | `not_found` · `missing_fields` · `conflict` | H-3 |
 | `PUT /studio/employees/{id}/files/{name}` | `{text, base_sha256}`. `name` 은 `PERSONA.md` · `GUIDE.md` · `MEMORY.md` · `employee.yaml` | `{name, sha256, commit}` (`commit` 은 커밋하지 못했으면 `null`) | `not_found` · `precondition_failed` | H-3, H-4 |
 | `GET /studio/employees/{id}/history` | `?file` | `[{commit, at, message, files[]}]` (배열 그대로) | `not_found` · `engine_error` | H-3 |
 | `POST /studio/employees/{id}/revert` | `{commit}` | `{commit}` (되돌린 뒤의 새 커밋) | `not_found` · `precondition_failed` · `engine_error` | H-3 |
-| `POST /studio/employees/{id}/assign` | `{project_id}` (NULL = 해제) | 행 | `precondition_failed` | H-3 |
-| `POST /studio/employees/{id}/leave` | `{on}` | 행 | `precondition_failed` | H-3 |
-| `POST /studio/employees/{id}/retire` | — | 행 | `precondition_failed` | H-3 |
+| `POST /studio/employees/{id}/assign` | `{project_id}` (NULL = 해제) | 행 | `not_found` · `precondition_failed` | H-3 |
+| `POST /studio/employees/{id}/leave` | `{on}` | 행 | `not_found` · `precondition_failed` | H-3 |
+| `GET /studio/employees/{id}/memory` | — | `{items[], bytes, limit, sha256, commit}` | `not_found` | H-4 |
+| `PATCH /studio/employees/{id}/memory/{item_id}` | `{text}` | 위와 같다 (`commit` 은 이 변경의 커밋) | `not_found` · `missing_fields` · `precondition_failed` (`item_unknown` · `memory_too_large`) | H-4 |
+| `DELETE /studio/employees/{id}/memory/{item_id}` | — | 위와 같다 | `not_found` · `precondition_failed` (`item_unknown`) | H-4 |
+| `POST /studio/employees/{id}/retire` | — | 행 | `not_found` · `precondition_failed` | H-3 |
 
 - 직원을 만드는 엔드포인트는 없다. 직원은 `hire` 결재의 승인(§5.5)으로만 생긴다. 예외는 서버가 시작할 때 한 번씩 만드는 둘이다 (§3.15): 직원이 한 명도 없는 DB 의 검증용 시드 직원, 그리고 `hr` 파트의 직원 행이 없는 DB 의 기본 인사 직원(H-2).
 - 직원 행의 `company_wide` 는 파트가 `hr` 이면 `true` 다 — 프로젝트가 아니라 회사 소속이라는 표시다 (§3.5). `GET /studio/employees?project_id=…` 는 그 프로젝트에 배치된 직원 뒤에 재직 중인 인사를 함께 싣는다(인사의 `project_id` 는 NULL 그대로다). `department_id` 가 `hr` 이 아닌 값이면 인사를 넣지 않고, 퇴사한 인사는 `retired=1` 이어도 넣지 않는다. 인사가 아닌 미배치 직원은 나오지 않는다. `project_id` 가 없는 조회는 전과 같다. 없는 프로젝트의 `project_id` 면 오류가 아니라 빈 목록이고 인사도 싣지 않는다.
 - `files` 는 `{persona_md, guide_md, memory_md, employee_yaml}` 이다. 값은 그 파일의 본문이고 파일이 없으면 `null` 이다. `tasks[]` 는 그 직원이 담당이고 종결(`done` · `rejected` · `cancelled`)이 아닌 작업 행이다 — 끝난 작업까지는 `GET /studio/tasks?assignee_id` 로 본다 (S-3). `runs` 는 그 직원의 지금 도는 studio 런 `[{run_id, room_id, task_id, mode}]` 이다.
-- 파일 · 이력 · 되돌리기 경로는 H-3 확정이다 (`studio/api.py` · `studio/employee_git.py`. 순서와 `failed[]` 코드는 §9.6). `name` 과 `?file` 은 네 파일 이름만 받고 그 밖의 값은 422 다. `PUT` 의 `base_sha256` 은 고치기 전에 읽은 파일의 SHA-256 이고 파일이 없었으면 빈 문자열이다. 보낸 본문이 지금 파일과 같으면 쓰지 않고 지금의 마지막 커밋을 `commit` 으로 돌려준다. `history` 는 감싸지 않은 배열이다 (`GET /studio/models` 와 같다): 최신 먼저 최대 200건, `at` 은 §3.1 의 지역 시각, `files[]` 는 그 커밋이 바꾼 파일 전부이고, `?file` 을 주면 그 파일을 바꾼 커밋만 싣는다. 이력이 없는 폴더는 빈 배열이다. `revert` 의 `commit` 은 이력에 있는 커밋의 sha 또는 그 앞 7–40자다. 이름 변경 · 배치 · 휴직 · 퇴사 경로는 잠정이고 H-3 의 나머지(수명주기)가 확정한다.
+- 파일 · 이력 · 되돌리기 경로는 H-3 확정이다 (`studio/api.py` · `studio/employee_git.py`. 순서와 `failed[]` 코드는 §9.6). `name` 과 `?file` 은 네 파일 이름만 받고 그 밖의 값은 422 다. `PUT` 의 `base_sha256` 은 고치기 전에 읽은 파일의 SHA-256 이고 파일이 없었으면 빈 문자열이다. 보낸 본문이 지금 파일과 같으면 쓰지 않고 지금의 마지막 커밋을 `commit` 으로 돌려준다. `history` 는 감싸지 않은 배열이다 (`GET /studio/models` 와 같다): 최신 먼저 최대 200건, `at` 은 §3.1 의 지역 시각, `files[]` 는 그 커밋이 바꾼 파일 전부이고, `?file` 을 주면 그 파일을 바꾼 커밋만 싣는다. 이력이 없는 폴더는 빈 배열이다. `revert` 의 `commit` 은 이력에 있는 커밋의 sha 또는 그 앞 7–40자다.
+- 이름 변경 · 배치 · 휴직 · 퇴사 경로는 H-3 확정이다 (`studio/api.py`). 넷 모두 읽기 · 검사 · 쓰기 · 이벤트가 한 트랜잭션이고, 값이 그대로면 쓰지도 이벤트를 내지도 않고 지금의 행을 돌려준다. 응답은 `dm_room_id` · `company_wide` 가 붙은 직원 행이다. 바뀌었으면 커밋 뒤에 `running` 캠페인을 모두 훑는다 (§4.10).
+- `PATCH` 는 `name` 을 앞뒤 공백을 떼어 받고 비면 422 `missing_fields`(`fields=["name"]`)다. 퇴사한 직원의 이름과 겹쳐도 409 `conflict`(`field="name"`)다 — 이름은 퇴사자까지 유일하다 (§3.5). 퇴사한 직원도 이름을 바꿀 수 있다(이름을 비우는 길이다). 1:1 방 제목이 옛 이름과 같으면 새 이름으로 바꾸고 `room.updated` 를 낸다. `change = renamed`.
+- `assign` 의 `project_id` 는 키가 필수이고 `null` 이면 해제다. `precondition_failed` 의 `failed[]` 는 `retired`(퇴사한 직원) · `company_wide`(인사에게 프로젝트를 준다 — 인사는 `null` 만 받는다) · `project_unknown`(없는 프로젝트) · `project_archived`(보관된 프로젝트) · `active_tasks`(§4.9). `change = assigned`. 프로젝트가 같으면 아무 일도 없다. 'bootstrap 안 된 프로젝트에 프로그램 직원을 배치할 수 없다'는 검사는 아직 `assign` 에 없다 (S-11 ②).
+- `leave` 의 `{on}` 은 `true` 면 `on_leave`(`active_tasks` 로 거절될 수 있다), `false` 면 §4.9 의 규칙으로 다시 계산한 상태다. 퇴사한 직원은 `retired` 로 거절한다. 상태가 바뀌면 `employee.status` 를 먼저, `employee.updated`(`change = leave`)를 다음에 쓴다. 이미 그 상태면 아무 일도 없다. 휴직이 막는 것은 작업 시작(§4.3 의 T3)과 제안 도구(`task_propose` · `followup_propose`, §8)뿐이고 채팅 턴과 단체방 초대(§3.8)는 그대로다 (H-3 확정, 의도한 것).
+- `retire` 는 `retired_at` 만 채운다 (`change = retired`, `active_tasks` 로 거절될 수 있다). 행 · 폴더 · 1:1 방 · 방 글 · `room_members` 는 그대로이고 방도 보관하지 않으므로 `GET /studio/rooms/{id}/messages` 로 읽힌다. 기본 목록에서 빠지고 `?retired=1` 에 나온다. 이미 퇴사했으면 같은 행을 주고 이벤트는 없다. 인사도 퇴사할 수 있다.
+- 메모리 항목 (H-4 확정, `studio/api.py` · `studio/memory.py`): `GET` 은 `{items[{id, text, source, date}], bytes, limit, sha256, commit}` 이다(`source` · `date` 는 출처 꼬리가 없는 줄이면 `null`). `PATCH` 의 `text` 는 공백을 한 줄로 접고 앞의 `- ` 를 떼어 받으며 비면 422 `missing_fields`(`fields=["text"]`)다. 출처 꼬리는 그대로 두고 쓴다. `PATCH` · `DELETE` 는 파일을 쓰고 `memory: edit` · `memory: delete` 로 커밋하고 `employee.updated`(`change = file`)를 낸 뒤 `GET` 과 같은 모양을 준다. 항목 id 가 없으면(그새 서버가 줄을 바꿨거나 지웠다) 409 `precondition_failed` 의 `failed[]` 는 `item_unknown` 이고, 고친 뒤의 파일이 4096바이트를 넘으면 `memory_too_large` 다. 파일이 이미 상한을 넘어 있으면(손으로 고친 경우) 파일을 키우지 않는 변경, 곧 삭제와 줄이는 수정은 넘은 채로도 받는다. id 가 줄의 내용이라 `base_sha256` 은 받지 않는다. 파일 전체를 쓰는 길은 `PUT …/files/MEMORY.md` 그대로다.
 
 **방 · 글 · 첨부**
 
@@ -1976,7 +1988,7 @@ CREATE TABLE stream_events (
 - `task.transitioned` 의 `actor` 는 `{kind, id}`, `event_id` 는 `task_events.id`, `rule` 은 §4.2 의 번호다. `inbox_id` 는 그 전이가 만들거나 결정한 결재다. T11 은 닫은 차단 결재이고 T10 은 `null` 이다.
 - `task.updated` 의 `change` 는 `task_events.kind` 중 전이가 아닌 것이다: `queued` · `unqueued` · `assigned` · `edited` · `deps` · `progress` · `run` · `limit` · `flag` · `guard` (§3.12). `run` 은 런 시작 · 재개 · 멈춤이고, 검수 패키지를 다시 읽을 신호다 (§5.4).
 - `task_events` 행이 없는 `task.updated` 가 하나 있다 (S-9): `change = exchange` — 직원의 멘션이 턴을 넣어 `exchange_count` 가 올랐다 (§4.6). 이때 `event_id` 는 `null` 이다. 세는 것은 열이고 기록은 그 방의 글이라 이벤트 행을 따로 두지 않는다.
-- `employee.updated` 의 `change` 는 `created` · `renamed` · `assigned` · `leave` · `retired` · `file` 이다. `file` 은 H-3 확정이다 — 직원 폴더의 파일이 바뀌었다는 뜻이고 `data` 는 `{employee, change}` 뿐이다(어느 파일인지는 싣지 않는다. 앱은 `GET /studio/employees/{id}` 를 다시 읽는다). 직접 수정 · 되돌리기 · `guide_amend` 승인이 낸다 (§9.6). `renamed` · `assigned` · `leave` · `retired` 는 잠정이고 H-3 의 나머지(수명주기)가 확정한다.
+- `employee.updated` 의 `change` 는 `created` · `renamed` · `assigned` · `leave` · `retired` · `file` 이다. `file` 은 H-3 확정이다 — 직원 폴더의 파일이 바뀌었다는 뜻이고 `data` 는 `{employee, change}` 뿐이다(어느 파일인지는 싣지 않는다. 앱은 `GET /studio/employees/{id}` 를 다시 읽는다). 직접 수정 · 되돌리기 · `guide_amend` 승인이 낸다 (§9.6). `renamed` · `assigned` · `leave` · `retired` 는 H-3 확정이다 — 각각 `PATCH` · `assign` · `leave` · `retire` 가 낸다 (§6.4). `data` 는 `{employee, change}` 이고 `employee` 는 바뀐 뒤의 행이며 이벤트의 `project_id` 도 바뀐 뒤 행의 값이다. 휴직은 `employee.status` 다음에 `employee.updated` 를 쓴다. 값이 그대로면 내지 않는다.
 - 한 트랜잭션이 여러 이벤트를 쓸 때는 §4.2 표의 WS 열에 적힌 순서로 쓴다. 예: T4 는 `inbox.created` → `task.transitioned` → `employee.status`. 결정이 남기는 시스템 글(`message.created`)은 그 뒤다.
 
 **프로젝트 생성 단계 (`job.step`).** `kind` 는 `project_create` 다. `step` 은 M-8 의 순서대로 `folder` → `build` → `plugins` → `harness` → `register` 이고, `status` 는 `running` · `done` · `failed` · `skipped` 다. `job.finished` 의 `status` 는 `done` · `failed` · `cleaned`(만든 것을 정리했다)다. 실패한 단계부터의 재시도와 정리는 §6.4 의 `/studio/jobs/{id}/retry` · `/cleanup` 이다 (M-8 확정. `studio/jobs.py`).
@@ -2036,7 +2048,7 @@ CREATE TABLE stream_events (
 | `key` · `trigger` | 인사 1:1 방의 시스템 글 `staffing.signal` (`event` 의 값이다. 푸시하지 않는다) 이 가리키는 채용 계기의 키(`<파트>:<프로젝트>`, §5.3)와 계기 이름 (§8.4) |
 | `client_room_id` | 단체방을 만들 때의 `group_invited` 글에만 있다. 그 방을 만든 요청의 중복 방지 키다 (요청이 준 때만, §6.4) |
 | `client_msg_id` | 중복 방지 (§6.6) |
-| `handoff` | H-5 의 인계 형식 이름과 본문 (잠정, H-5) |
+| `handoff` | 파트 간 인계: `{format, 표, source?}` — `format` 은 `spec_table` · `data_items` (§8.4. H-5 확정) |
 
 ## 8. studio MCP
 
@@ -2129,7 +2141,7 @@ CREATE TABLE stream_events (
 | `not_found` | 그 작업 · 방 · 초안이 없거나 볼 수 없다 | `false` |
 | `no_task_context` | 작업이 없는 턴에서 작업이 필요한 도구를 불렀다 | `false` |
 | `exchange_limit` | 직원 간 왕복 한도 (§4.5 가 §8 로 미룬 코드) | `true` |
-| `invalid_format` | 인계 형식이 맞지 않는다 (H-5) | `false` |
+| `invalid_format` | 인계 형식이 맞지 않는다 (H-5). 글을 만들지 않는다. 이유는 `message` 에, 틀린 칸의 이름은 `fields[]` 에 싣는다 | `false` |
 | `invalid_arguments` | 타입이 틀리거나 도구에 없는 인자다 (서버의 422. S-6 확정) | `false` |
 | `actor_invalid` | 토큰이 무효다 | `true` |
 | `server_unreachable` | 서버가 꺼졌거나 답하지 않는다. 401 · 422 가 아닌 HTTP 오류(403 · 503 등)도 여기에 든다 | `true` |
@@ -2159,7 +2171,14 @@ CREATE TABLE stream_events (
 - `room_post` 의 `mentions` 는 그 방의 구성원인 직원이어야 한다. 작업방에서 직원을 멘션하면 `exchange_count` 를 올리고(§4.6), 한도에 닿으면 §4.6 대로 한다 (`working` 이면 T4, 그 밖은 §4.5 의 표). 자기 자신은 멘션할 수 없다.
 - 작업방에서 멘션한 직원의 턴 (S-9 확정). 담당이면 그 글이 작업 런에 `engine.interject` 로 끼어든다 — 누구의 글인지와 owner 의 지시가 아님을 앞에 적는다. 작업이 `working` 일 때만이고, 런이 아직 없으면 넣은 것으로 본다 (그 런은 시작할 때 방을 읽는다). 그 밖의 구성원이면 읽기 전용 턴(`mode = read`, §9.5)을 넣는다. `queued[]` 는 턴이 들어간 직원 id 이고 그 수만큼 `exchange_count` 를 올린다. 들어가지 않은 직원은 `message` 에 적는다. 단체방 · 파트방의 멘션은 방의 줄에 턴을 넣고(§6.6 '단체방의 턴') `queued` 는 줄에 들어간 직원 id 다 — 세는 것은 §4.6 의 '단체방의 왕복 한도'다. 1:1 방 · 시스템 방의 멘션은 턴을 넣지 않고 `queued` 는 빈 배열이다.
 - 단체방에서 멘션한 직원의 턴. 재직 중인 지금 구성원이면 그 방의 줄 끝에 채팅 턴이 들어가고 (§6.6 '단체방의 턴') `queued[]` 에 그 id 가 든다 — 턴은 부른 직원의 턴이 끝난 뒤에 돈다. 자기 자신과 구성원이 아닌 직원의 멘션은 글을 만들기 전에 `precondition_failed` 로 거부한다. 한도는 글을 쓸 때가 아니라 그 턴을 시작하기 직전에 본다 (§4.6): 한도에 닿아 있어도 글은 남고 `exchange_limit` 은 돌려주지 않는다 — `queued[]` 는 줄에 선 직원이지 턴이 돈 직원이 아니다. 퇴사한 구성원을 멘션하면 글은 남고 `queued[]` 에서 빠진다. 턴을 만들지 못하면 (§9.5) 그 방의 시스템 글이 이유를 말한다.
-- `room_post` 의 `handoff` 는 H-5 의 인계 형식이다. 형식 이름과 검사는 H-5 가 정하고, 맞지 않으면 `invalid_format` 과 이유를 돌려준다 (잠정). S-6 은 받은 값을 `messages.meta.handoff` 에 그대로 저장하기만 한다. 멘션한 직원의 턴 넣기와 `exchange_count` 는 S-9 가 했다 (위).
+- `room_post` 의 `handoff` 는 파트 간 인계 형식이다 (H-5 확정, `studio/handover.py`). `null`(생략)이면 인계가 아닌 글이고, 값이 있으면 아래 두 형식 중 하나여야 한다. 맞지 않으면(형식 이름을 모름 · `format` 없음 · 표 없음 · 빈 표 · 필수 칸 없음 또는 공백 · 모르는 칸 · `{}`) `invalid_format` 과 이유(`message`, 맞는 형식의 한 줄 설명 포함)와 틀린 칸의 이름(`fields[]`, 예 `rows[0].done`)을 돌려주고 글을 만들지 않는다. 검사는 첨부 · 멘션 검사보다 앞, DB 를 건드리기 전이다 — 틀린 인계가 왕복 한도의 결재 같은 부작용을 남기지 않는다. 맞는 값은 고치지 않고 `messages.meta.handoff` 에 그대로 저장한다.
+
+  | 형식 | 방향 | 표 | 행의 필수 칸 | 행의 선택 칸 |
+  |---|---|---|---|---|
+  | `spec_table` | 기획(문서) → 프로그램: 사양 표 | `rows` | `item` · `value` · `done` | `condition` · `exception` · `note` |
+  | `data_items` | 프로그램 → 기획(세팅): 노출된 데이터 항목 목록 | `items` | `asset` · `field` · `type` | `default` · `note` |
+
+  최상위는 `format` · 표 · `source`(선택, 사양이 있는 `Docs/` 경로)뿐이고 칸 값은 모두 글(문자열)이다. 필수 칸은 공백만 있어서는 안 된다. 보내는 직원의 파트와 방 종류는 검사하지 않는다 — 방향은 형식 정의와 파트 지침 템플릿(H-1)의 '인계' 절에만 적는다(사용자 정의 파트가 있다). 이미 지침이 있는 DB 의 파트에는 시작할 때 절만 덧붙인다 (§3.15). 검수로 넘기는 것은 이 형식이 아니라 `task_request_review` 의 패키지(S-12)다. 알려진 한계: `spec_table` 의 칸은 game-harness 의 game-design-doc 원본과 대조하지 못했다 — 칸 정의는 `handover.FORMATS` 한 곳이다. 멘션한 직원의 턴 넣기와 `exchange_count` 는 S-9 가 했다 (위).
 - `task_progress` 는 작업이 `working` · `blocked` · `review` 일 때 받는다 (T4 · T6 뒤에도 런이 돈다).
 
 **인사 전용** (호출자의 `department_id` 가 `hr` 이 아니면 `actor_not_allowed`)
@@ -2212,7 +2231,8 @@ CREATE TABLE stream_events (
 
 - 프롬프트에 얹는 순서는 S-7 의 문장 그대로다: `PERSONA.md` → `GUIDE.md` → `MEMORY.md` → 프로젝트 정책(`POLICY.md`, §2.2) → 방의 최근 글 요약. 작업 런은 여기에 작업의 제목 · 사유 · 명세 · 완료 기준이 붙는다 (§11.2 의 `goal`. 조립 방식은 S-8). 인사 직원의 채팅 턴은 이 다섯 뒤에 '채용에 쓰는 값' 절이 하나 더 붙는다 (§8.4 인사 전용, H-2). 이어 가는 턴에는 새 글 뒤에 이 절만 다시 붙고, 작업방의 읽기 턴에는 붙지 않는다. 빈 절은 뺀다. 방의 최근 글 요약은 최근 20개를 `작성자: 본문`(글당 200자) 줄로 나열한 것이고 모델을 부르지 않는다 (S-7 확정).
 - `employee.yaml` 은 서버만 읽는다. 값은 런을 만들 때 인자로 들어가고(§9.5) 직원에게 글로 보이지 않는다.
-- `MEMORY.md` 의 상한은 UTF-8 로 4096바이트다 (H-4 의 "4KB"). 서버가 쌓다가 넘게 되면 쓰기 전에 합친다 — 합치는 방법은 H-4 가 정한다. `PUT` 으로 넘는 본문이 오면 `precondition_failed` 이고 `failed[]` 에 `memory_too_large` 를 넣는다. 그래도 파일이 넘어 있으면(손으로 고친 경우) 프롬프트에는 뒤에서부터 줄 단위로 4096바이트까지만 얹는다 (잠정, H-4). 마지막 줄 하나가 4096바이트를 넘으면 그 줄의 뒤쪽 4096바이트만 얹는다 (S-7).
+- `MEMORY.md` 의 상한은 UTF-8 로 4096바이트다 (H-4 의 "4KB"). 서버가 쌓다가 넘게 되면 쓰기 전에 합친다 — 합치는 방법은 아래 H-4 확정이다. `PUT` 으로 넘는 본문이 오면 `precondition_failed` 이고 `failed[]` 에 `memory_too_large` 를 넣는다. 그래도 파일이 넘어 있으면(손으로 고친 경우) 프롬프트에는 뒤에서부터 줄 단위로 4096바이트까지만 얹는다 (H-4 확정). 마지막 줄 하나가 4096바이트를 넘으면 그 줄의 뒤쪽 4096바이트만 얹는다 (S-7).
+- 메모리 쌓기 (H-4 확정, `studio/memory.py`): `final_review` 의 결정에 코멘트가 있으면(재작업은 코멘트가 필수다. 사유 없는 통과 · 되돌리기는 모델을 부르지 않는다) 결정이 커밋된 뒤 서버가 `Config.studio_memory_model`(기본 `haiku`, 빈 값이면 하지 않는다)을 1회 불러 '다음에 다르게 할 것'을 뽑는다. 재료는 작업 제목 · 결정 · 코멘트 · 완료 기준 · 지금 항목이고, 답에서 줄마다 불릿을 떼고 `없음` 과 이미 있는 내용을 빼고 최대 3줄 · 줄당 200자로 자른다. 이 호출은 `api.learn_later` 의 데몬 스레드에서 돌고 결정의 응답을 기다리게 하지 않는다 — 재작업으로 곧바로 이어지는 턴에는 새 줄이 안 실릴 수 있고 그다음 턴부터 실린다. 호출이 실패해도 결정과 파일은 그대로다. 항목은 한 줄이다: `- <내용> (출처: <작업 id> · YYYY-MM-DD)`, 합쳐진 줄의 출처는 `합침` 이다. `- ` 로 시작하지 않는 줄은 항목이 아니고, 손으로 쓴 `- ` 줄은 출처 없는 항목이다. 항목 id 는 그 줄(양끝 공백 제외)의 SHA-256 앞 12자다. 쓰기는 직원 폴더 lock 안에서 읽기 → 덧붙이기 → 쓰기 → `memory: learn <작업 id>` 커밋 → `employee.updated`(`change = file`) 순이다(커밋이 실패하면 로그만 남기고 파일은 둔다). 덧붙여 4096바이트를 넘게 되면 lock 밖에서 같은 모델에 합치기를 시켜 2048바이트 이하를 요청하고(항목이 아닌 줄은 맨 위에 그대로 둔다), 파일이 그새 바뀌었거나 합치기가 실패했거나 여전히 넘으면 오래된 줄(맨 위)부터 버려 상한 안에 맞춘다. 추출 · 합치기 호출의 사용량(토큰 · 비용)은 usage DB 에 적지 않는다.
 - `GUIDE.md` 의 크기는 서버가 검사하지 않는다. 패키지에 든 인사 원본(`relay_agent/studio/hr/GUIDE.md`)만 테스트가 5632바이트 이하로 붙든다(서버 상한이 아니라 `tests/test_studio_employees.py` 의 `HR_GUIDE_BUDGET` 이다) — 턴마다 프롬프트에 들어가기 때문이다.
 - 네 파일은 턴을 시작할 때마다 읽는다. 고친 값은 다음 턴 · 다음 런부터 들고, 도는 런은 바뀌지 않는다 (S-7 확정).
 
@@ -2349,7 +2369,7 @@ cap:
 - 전역 git 설정과 결재의 잠금 (H-3 마무리 확정). 직원 폴더의 git 호출은 모두 `-c core.hooksPath` · `-c core.attributesFile` 을 빈 장치(`os.devnull`)로, `-c core.autocrlf=false` 로 덮는다 (`employee_git.GLOBAL_OUT`). 전역 설정의 훅이 돌지 않고(`--no-verify` 가 건너뛰지 않는 `post-commit` · `prepare-commit-msg` 포함. 폴더의 `.git/hooks` 도 함께 꺼진다), 전역 속성 파일과 줄바꿈 변환이 커밋되는 바이트를 바꾸지 않는다 — 되돌리기는 커밋의 바이트를 그대로 쓴다. 전역 설정 자체는 끊지 않는다 (`safe.directory` 가 거기 있다). 덮지 않는 것: `init.templateDir` 로 들어오는 `.git/info/attributes`, `GIT_EXTERNAL_DIFF` 같은 환경 변수. 전에 줄바꿈이 바뀌어 커밋된 파일(작업 폴더는 CRLF, 커밋은 LF)이 있는 저장소는 다음 커밋에 그 파일이 한 번 변경으로 잡힌다. 결재의 `guide_amend` 승인은 base 비교부터 커밋까지 `employee_git.lock` 을 잡는다 (`Inbox._amend` · `_replace_file`) — 직접 수정 · 되돌리기와 같은 잠금이라, 같은 파일에 REST 쓰기와 승인이 겹치면 뒤에 온 쪽이 `precondition_failed` 다. `POLICY.md` 의 승인도 같은 함수라 같은 잠금을 잡는다.
 - 직접 수정 (H-3 확정): 검사(`employee.yaml` 은 §9.4, `MEMORY.md` 는 §9.1 의 크기) → 지금 파일의 SHA-256 을 `base_sha256` 과 비교 → 쓰기 → 커밋 → 이벤트. 비교가 어긋나면 `precondition_failed` 이고 `failed[]` 는 `base_mismatch` 다 — 앱은 파일을 다시 읽고 고쳐 보낸다. 같은 파일을 한 base 에서 고친 두 요청은 먼저 온 것만 통과한다. 결재의 `guide_amend` 가 같은 조건에 걸렸을 때의 `failed[]` 는 빈 배열 그대로다 (§5.5).
 - 되돌리기 (H-3 확정): 그 커밋에 있던 네 파일의 본문으로 폴더를 되돌리고 새 커밋을 만든다. 이력은 지우지 않으므로 되돌린 것을 다시 되돌릴 수 있다. 그 커밋에 없던 파일은 건드리지 않는다. 검사는 쓰기 전에 그 커밋의 `employee.yaml` 본문으로 한다 — 걸리면 네 파일 어느 것도 쓰지 않는다. 이력에 없는 커밋(sha 가 아닌 이름 포함)은 `precondition_failed` 이고 `failed[]` 는 `commit_unknown` 이다. 폴더가 이미 그 커밋과 같으면 쓰지 않고 지금의 마지막 커밋을 돌려주며 이벤트도 없다. 쓰기 전에 폴더에 미커밋 변경이 있으면 그것부터 `keep: before revert` 로 커밋해 되돌리기가 손으로 고친 내용을 지우지 않게 한다.
-- 알려진 제한 (H-3). 첫째, 미배치 직원과 인사의 채팅 턴은 작업 폴더가 직원 폴더다 (§9.5). 그 폴더가 저장소가 된 뒤로 그 런의 변경 기록(`journal.detect_vcs`)은 직원 폴더의 git 을 본다. 런 도중 서버가 그 폴더에 커밋하면 기록이 보는 기준이 새 커밋이 된다. 직원은 그 폴더에 쓰지 못하므로 코드는 그대로 뒀다. 둘째, `git checkout <커밋> -- employee.yaml` · `git restore` · `git stash` 처럼 git 이 대신 쓰는 명령은 H-3 마무리에서 가드가 막는다 — 보호 폴더 안의 저장소에서는 읽는 하위 명령만 통과한다 (§10.3 의 6). 직원 폴더가 작업 폴더인 실제 채팅 턴에서 거부되는지는 사람이 확인한다. 셋째, 휴직 · 퇴사한 직원의 파일도 지금은 고칠 수 있다 — 막을지는 H-3 의 나머지(수명주기)가 정한다.
+- 알려진 제한 (H-3). 첫째, 미배치 직원과 인사의 채팅 턴은 작업 폴더가 직원 폴더다 (§9.5). 그 폴더가 저장소가 된 뒤로 그 런의 변경 기록(`journal.detect_vcs`)은 직원 폴더의 git 을 본다. 런 도중 서버가 그 폴더에 커밋하면 기록이 보는 기준이 새 커밋이 된다. 직원은 그 폴더에 쓰지 못하므로 코드는 그대로 뒀다. 둘째, `git checkout <커밋> -- employee.yaml` · `git restore` · `git stash` 처럼 git 이 대신 쓰는 명령은 H-3 마무리에서 가드가 막는다 — 보호 폴더 안의 저장소에서는 읽는 하위 명령만 통과한다 (§10.3 의 6). 직원 폴더가 작업 폴더인 실제 채팅 턴에서 거부되는지는 사람이 확인한다. 셋째, 휴직 · 퇴사한 직원의 파일도 고칠 수 있다 — `PUT files` · `revert` 는 직원의 상태를 보지 않는다 (H-3 확정).
 - 직원은 쓰지 못한다. studio MCP 에 이 파일을 쓰는 도구가 없고(인사의 `employee_draft` 는 초안만 만든다, §8.4), 셸과 편집 도구로 직원 폴더에 쓰는 것은 가드가 막는다 (§10.3 의 `protected_write`). 그래서 직원이 자기 상한을 올릴 수 없다.
 - **파트는 채용 뒤 바뀌지 않는다.** 파트를 바꾸는 REST 경로가 없다 (§6.4). `department` 는 `employees.department_id` 의 사본이고, 다르게 쓰려는 요청은 `department_mismatch` 로 거부한다. 읽을 때 둘이 다르면(파일을 손으로 고친 경우) DB 를 따른다 (§2.3). 파트를 옮기려면 퇴사시키고 새로 채용한다.
 - 읽지 못할 때: 파일이 없거나 §9.4 의 1–3 에 걸리면 그 직원의 턴과 작업 런을 만들지 않는다. 작업이면 §4.3 T3 의 실패 처리를 따르고, 채팅이면 방에 시스템 글을 남긴다 (S-7 확정).

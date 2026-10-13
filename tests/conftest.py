@@ -71,3 +71,13 @@ def no_push_with_this_pcs_key(monkeypatch):
     from relay_agent.studio import push
 
     monkeypatch.setattr(push, "load_key", lambda path: None)
+
+
+@pytest.fixture(autouse=True)
+def no_memory_model_from_a_tests_server(monkeypatch):
+    """A decided final review with a reason asks a light model for what to learn (H-4, studio/memory.py). The server
+    module's hooks would call the real `claude` — so no model is made in a test. A test of the memory gives
+    `memory.learn` an `ask` of its own (tests/test_studio_memory.py)."""
+    from relay_agent.studio import memory
+
+    monkeypatch.setattr(memory, "writer", lambda model: None)

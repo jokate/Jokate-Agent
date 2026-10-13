@@ -106,6 +106,9 @@ class Config(BaseModel):
     # Katae Studio: the light model that words the daily report, one call a day ("" = no AI: the three lines are
     # made by rule). An answer that is not the three lines, or a call that fails, leaves the rule's lines too.
     studio_report_model: str = "haiku"
+    # Katae Studio: the light model that picks 'what to do differently next time' out of a final review's
+    # reason and adds it to the assignee's MEMORY.md (H-4 — ARCHITECTURE.md §9.1). "" = nothing is learned.
+    studio_memory_model: str = "haiku"
     # Katae Studio: the folder a `source` of `studio_plugins` that is not an absolute path is taken from — the
     # MNYS project's folder, as an absolute path (M-4 — ARCHITECTURE.md §6.4). Each machine has its own, so it
     # goes in relay.config.local.yaml. "" = not set: such a plugin has no source and cannot be chosen.

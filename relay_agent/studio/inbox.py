@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..pipeline import EFFORT_ORDER
-from . import employee_git, employees, staffing
+from . import employee_git, employees, memory, staffing
 from .store import StudioStore, Tx, now
 from .tasks import DECISIONS as TASK_DECISIONS
 from .tasks import (BLOCKING_KINDS, EDITABLE, OWNER, STARTED, TASK_TYPES, TEXT_FIELDS, Actor, TaskMachine,
@@ -379,6 +379,12 @@ class Hooks:
 
     def chat_turn(self, employee_id: str, room_id: str) -> None:
         """Start that employee's chat turn in that room, so it reads the system message just written (S-7)."""
+
+    def learn(self, item: dict) -> None:
+        """Pick the lessons out of a decided final review that carries a reason and add them to the assignee's
+        MEMORY.md (H-4; `studio/memory.py`). Called after the decision is committed, so a model that is slow or
+        fails leaves the decision as it is (`_safely`). The server's is `api.learn_later` — a thread of its own;
+        the default does nothing."""
 
     # --- what a mention asks (S-9; §4.6 · §8.4 · §9.5). With nothing wired no turn goes in -------------------
     def turn_failed(self, employee_id: str, room_id: str) -> list[str]:
@@ -1116,6 +1122,8 @@ class Inbox:
         if item["delivery"] == "pending":
             self._safely("결정문 전달", self.deliver, item["id"])
         self._safely("판단 표시 알림", self._marks, item)
+        if memory.wanted(item):
+            self._safely("메모리 추출", self.hooks.learn, item)
 
     def deliver(self, inbox_id: str) -> bool:
         """Feed the decision text of a decided item to its run and mark it delivered (§3.13, §4.7). True when

@@ -567,3 +567,15 @@ def test_the_server_connects_the_look_through_the_campaign_runner():
     assert isinstance(look.__self__, campaigns.Autopilot) and look.__self__.inbox is api.run_inbox
     assert server.task_runs.campaign == server.campaigns.advance_studio
     assert server.task_runs.kick == server.task_queue.kick  # the queue's look is still its own
+
+
+# --- an employee's leave that ends is looked at (H-3, §4.10) ---------------------------------------------------
+def test_a_leave_that_ends_starts_the_waiting_task_of_a_running_campaign(auto):
+    auto.cid = auto.store.create_campaign(auto.line.pid, "1막", "1막을 끝낸다", mode="nonstop")["id"]
+    task = auto.member("A")
+    auto.store.update_employee(task["assignee_id"], status="on_leave")
+    assert auto.line.m.transition_campaign(auto.cid, "running", OWNER)["status"] == "running"
+    assert auto.idle() == ["A"] and not auto.line.held  # the request to start is refused while the assignee is away
+    answer = auto.line.owner.post(f"/studio/employees/{task['assignee_id']}/leave", json={"on": False})
+    assert ok(answer)["status"] == "idle"
+    assert auto.idle() == [] and auto.drive() == ["A"]  # the look after the leave put it in the line, and it started

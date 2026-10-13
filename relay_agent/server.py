@@ -935,7 +935,8 @@ def _released(run: RunState) -> RunState:
 # §9.5) go the same way: the owner's message in a 1:1 room and a decision that asks for one start a turn here.
 chat_turns = studio_chat.ChatTurns(engine, cfg)
 studio_api.use_hooks(studio_runs.attach(engine, studio_api.run_inbox, advance=_advance_bg,
-                                        chat=chat_turns.request, turns=chat_turns))
+                                        chat=chat_turns.request, turns=chat_turns,
+                                        learn=studio_api.learn_later))
 
 
 # The stops nobody heard — a run the CLI advanced, or one that stopped while the studio store was not open — are

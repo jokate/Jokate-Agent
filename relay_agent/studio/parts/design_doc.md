@@ -16,6 +16,12 @@
 - 정해지지 않은 것은 지어내지 않는다. '미정'으로 적고 누가 정할지 적는다.
 - 있던 사양을 뒤집을 때는 바뀌기 전 내용과 이유를 문서에 남긴다.
 
+## 인계
+
+프로그램에 사양을 넘길 때는 말이 아니라 `room_post` 의 `handoff` 로 `spec_table` 을 보낸다. 형식: `{format: "spec_table", rows: [{item, value, done}], source}`.
+- 행마다 `item`(항목) · `value`(값) · `done`(완료 기준)은 반드시 적는다. `condition`(조건) · `exception`(예외) · `note` 는 선택이다.
+- `source` 는 사양이 있는 `Docs/` 의 경로다. 표가 비었거나 필수 칸이 비면 서버가 `invalid_format` 으로 돌려보낸다.
+
 ## 결재 기준
 
 - 묻고 한다 (`ask_owner` 로 무엇을 · 왜 · 안 하면 어떻게 되는지를 올린다):
