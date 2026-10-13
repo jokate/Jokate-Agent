@@ -22,7 +22,8 @@ a `hire_recommendation` and `staff_request` (anyone) asks HR to judge (studio/st
 A mention in a task room asks for a turn (S-9; §4.6 · §8.4 · §9.5): the assignee's is the task's run, which is told
 the message; any other member's is a read turn. Both go through `inbox.hooks` — a tool knows the turn, not the
 engine. Each turn that went in is one more in `exchange_count`, and at `inbox.max_exchanges` nothing is written:
-the system asks the owner (T4, `exchange_limit`) and the turn ends. A mention in any other room starts no turn.
+the system asks the owner (T4, `exchange_limit`) and the turn ends. A mention in a group room or a department room asks for that member's turn in the room's line
+(`_group_posted`); in any other room it starts no turn.
 
 Not here yet: the handoff format of `room_post` (H-5), and the two file arguments of an inbox item (`_file_args`,
 S-11).
@@ -51,6 +52,7 @@ log = logging.getLogger(__name__)
 END_TURN = "이제 턴을 끝내라. 도구를 더 부르지 말고, 지금까지 한 일과 기다리는 것을 한 문단으로 적고 멈춰라."  # §8.3
 ASK_KINDS = {"question": "question", "choice": "structure_choice", "approval": "pre_approval"}  # §1.5
 HR = "hr"
+GROUP_KINDS = ("group", "department")  # the rooms whose turns go into the room's line (api.GROUP_KINDS; no import: api imports this)
 CODES = ("no_task_context", "not_found", "actor_not_allowed", "missing_fields", "precondition_failed",
          "exchange_limit")  # Refusal
 ADDED = {"illegal_transition": ("from", "to"), "precondition_failed": ("failed",), "missing_fields": ("fields",),
@@ -409,15 +411,13 @@ def _checks(inbox: Inbox) -> employees.Checks:
 
 
 def _may_post(caller: Caller, store: Any, room: dict) -> bool:
-    """§8.5, by the DB of now: a task room and a group room = its members, a dm = one's own, a department room =
-    one's own part's, the system room = HR (the daily report, S-13)."""
-    if room["kind"] in ("task", "group"):
+    """§8.5, by the DB of now: a task, a group and a department room = its members (a row not left), a dm =
+    one's own, the system room = HR (the daily report, S-13)."""
+    if room["kind"] in ("task", "group", "department"):
         member = store.get_room_member(room["id"], caller.id)
         return member is not None and member["left_at"] is None
     if room["kind"] == "dm":
         return room["employee_id"] == caller.id
-    if room["kind"] == "department":
-        return room["department_id"] == caller.employee["department_id"]
     return caller.is_hr
 
 
@@ -538,8 +538,8 @@ def room_post(caller: Caller, args: dict, machine: TaskMachine, inbox: Inbox) ->
 
     A mention in a task room asks for that employee's turn (S-9): `queued` is who got one, and each is one more
     in `exchange_count` (§4.6). `_before_mentions` refuses before the message — a read turn that cannot be made,
-    the limit —, `_mention_turns` puts the turns in after it. A mention in a group room asks for that member's
-    turn too (`_group_posted`): it goes into the room's line, and the limit of a group room is looked at when
+    the limit —, `_mention_turns` puts the turns in after it. A mention in a group room or a department room asks
+    for that member's turn too (`_group_posted`): it goes into the room's line, and the limit of such a room is looked at when
     its time comes, not here (§4.6). In any other room `queued` is []."""
     store = machine.store
     room_id = _text(args.get("room")) or caller.room_id
@@ -547,8 +547,8 @@ def room_post(caller: Caller, args: dict, machine: TaskMachine, inbox: Inbox) ->
     if room is None:
         raise Refusal("not_found", f"방 {room_id or ''} 이 없다. room 을 비우면 지금 방에 쓴다")
     if not _may_post(caller, store, room):
-        raise Refusal("actor_not_allowed", "이 방에는 글을 쓸 수 없다 — 작업방 · 단체방은 구성원, 1:1 방은 자기 방, "
-                      "파트 방은 자기 파트, 시스템 방은 인사만 쓴다")
+        raise Refusal("actor_not_allowed", "이 방에는 글을 쓸 수 없다 — 작업방 · 단체방 · 파트 방은 구성원, "
+                      "1:1 방은 자기 방, 시스템 방은 인사만 쓴다")
     if room["archived_at"] is not None:
         raise Refusal("precondition_failed", "보관된 방에는 글을 쓸 수 없다", failed=[])
     body = args["text"] if isinstance(args.get("text"), str) else ""
@@ -595,7 +595,7 @@ def room_post(caller: Caller, args: dict, machine: TaskMachine, inbox: Inbox) ->
             raise Refusal("precondition_failed", f"첨부를 복사하지 못해 글을 쓰지 않았다: {e}",
                           failed=[files.NOT_FOUND]) from e
         raise
-    if room["kind"] == "group":
+    if room["kind"] in GROUP_KINDS:
         return _group_posted(room, message, mentions, inbox)
     if task is None:
         return ok("방에 글을 남겼다. 하던 일을 계속한다", message_id=message["id"], queued=[])

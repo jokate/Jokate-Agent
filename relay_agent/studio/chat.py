@@ -249,7 +249,7 @@ class ChatTurns:
         wins: a member the owner's message put in the line is not a turn a later mention put in."""
         store = api.get_store()
         room = store.get_room(room_id)
-        if room is None or room["kind"] != "group" or room["archived_at"] is not None:
+        if room is None or room["kind"] not in api.GROUP_KINDS or room["archived_at"] is not None:
             return []
         seated = set(api.group_order(store, room_id))
         asked = [employee_id for employee_id in dict.fromkeys(employee_ids) if employee_id in seated]
@@ -404,7 +404,7 @@ class ChatTurns:
                                      conversation_id=run.done_sessions.get(STAGE) if keep else None,
                                      fed_message_id=listed[-1]["id"])
         # after the block: `_say` opens a transaction of its own. Not in a group room: there no answer is a pass
-        if not posted and room["kind"] != "group" and not begun.quiet:
+        if not posted and room["kind"] not in api.GROUP_KINDS and not begun.quiet:
             self._say(store, room, f"{employee['name']} 이(가) 답하지 못했다 — 턴은 끝났지만 답이 비어 있다", run.id)
         return len(listed) >= FEED_MESSAGES
 
@@ -433,12 +433,13 @@ class ChatTurns:
 
     @staticmethod
     def _group_note(store: StudioStore, room: dict, employee: dict) -> str:
-        """What a turn of a group room is told after the new messages, as a line of the server: who is in the
+        """What a turn of a group room (a department room takes its turns the same way) is told after the new messages, as a line of the server: who is in the
         room, who the reader is, how to pass what is not its business and how to ask another member (§6.6). It
         goes with the messages, so a conversation that resumes — which is sent these only — is told it too."""
         names = {row["id"]: row["name"] for row in store.list_employees(include_retired=True)}
         who = ", ".join(f"{names.get(id) or id} (id `{id}`)" for id in api.group_order(store, room["id"]))
-        return (f"시스템: 이 방은 단체방 `{room['title']}` 이다. 구성원은 owner 와 직원 {who} 이고, 너는 "
+        kind = "파트방" if room["kind"] == "department" else "단체방"
+        return (f"시스템: 이 방은 {kind} `{room['title']}` 이다. 구성원은 owner 와 직원 {who} 이고, 너는 "
                 f"{employee['name']} (id `{employee['id']}`) 이다. 위 글이 네가 답할 일이면 답을 output 에 쓴다. 네 일이 "
                 "아니면 넘어간다 — output 을 비우고 room_post 도 쓰지 않으면 방에 글이 남지 않는다. 다른 직원의 답이 "
                 "필요할 때만 room_post(text, mentions=[그 직원의 id]) 로 쓴다 — 그 직원의 턴이 네 턴 뒤에 들어가고, 같은 "
@@ -452,8 +453,8 @@ class ChatTurns:
         session_id, conversation = self._session(store, member, employee, repo, folder, where, room)
         if where.task is not None:
             text = f"{text}\n{self._read_note(store, where.task)}"
-        elif room["kind"] == "group":
-            text = f"{text}\n{self._group_note(store, room, employee)}"
+        elif room["kind"] in api.GROUP_KINDS:
+            text =f"{text}\n{self._group_note(store, room, employee)}"
         hiring = self._hiring(store, employee, where)
         goal = self._goal(store, employee, room, text, session_id, where.project_id, hiring)
         try:
@@ -526,8 +527,8 @@ class ChatTurns:
                 repo is not None or Path(session["workdir"]) == folder):
             return session["id"], member["conversation_id"]
         title = where.task["title"] if where.task is not None else "1:1"
-        if room is not None and room["kind"] == "group":
-            title = room["title"] or "단체방"
+        if room is not None and room["kind"] in api.GROUP_KINDS:
+            title = room["title"] or ("파트방" if room["kind"] == "department" else "단체방")
         session = history.create_session(f"{employee['name']} · {title}", str(folder), repo)
         store.update_room_member(member["room_id"], member["employee_id"], session_id=session["id"],
                                  conversation_id=None)

@@ -1902,6 +1902,7 @@ def mark_room_read(id: str, body: ReadMark, store: StudioStore = Depends(get_sto
 # turns themselves are studio/chat.py's (`ChatTurns.group`, one at a time for a room). Comments, not docstrings,
 # on the four paths: the saved contract (openapi.json) would carry a docstring as the path's description.
 GROUP_LIMIT, GROUP_CONTINUED = "group_exchange_limit", "group_continued"  # `meta.event` of the two notices (§7.6)
+GROUP_KINDS = ("group", "department")  # the rooms that take their turns in the room's line (tools.py keeps the same pair)
 
 
 def _group_limit() -> int:
@@ -2079,8 +2080,8 @@ def archive_room(id: str, store: StudioStore = Depends(get_store)) -> dict:
     return room
 
 
-# §4.6 · §6.4: the owner has a group room that is held at its limit go on. Looked at in this order: the room
-# (404), that it is a group room, that the owner has not left it, that it is held — one that is not answers
+# §4.6 · §6.4: the owner has a group room or a department room that is held at its limit go on. Looked at in this
+# order: the room (404), that it is a group or department room, that the owner has not left it, that it is held — one that is not answers
 # with its row and nothing happens (no message, no event, no turn), however often it is asked. A held room
 # counts anew, says so (a system message) and the turns it kept back go into its line; the answer does not
 # wait for them.
@@ -2088,11 +2089,11 @@ def archive_room(id: str, store: StudioStore = Depends(get_store)) -> dict:
 def continue_room(id: str, store: StudioStore = Depends(get_store)) -> dict:
     with store.transaction() as tx:
         room = _need(store.get_room(id, tx=tx), "방", id)
-        if room["kind"] != "group":
-            raise StudioError("precondition_failed", f"단체방이 아닙니다: {id} ({room['kind']}). 이어 가는 방은 "
-                              "단체방뿐입니다")
+        if room["kind"] not in GROUP_KINDS:
+            raise StudioError("precondition_failed", f"단체방도 파트방도 아닙니다: {id} ({room['kind']}). 이어 가는 "
+                              "방은 단체방과 파트방뿐입니다")
         if room["archived_at"] is not None:
-            raise StudioError("precondition_failed", f"보관한 단체방입니다: {id}")
+            raise StudioError("precondition_failed", f"보관한 방입니다: {id}")
         if not group_halted(store, id, tx):
             return room
         room = store.update_room(id, tx=tx, exchange_count=0)
@@ -2249,7 +2250,7 @@ def post_message(id: str, body: NewMessage, store: StudioStore = Depends(get_sto
                 message = store.set_message_attachments(tx, message["id"], _copy_in(copied, taken))
             store.emit(tx, "message.created", {"message": message}, room_id=id, task_id=room["task_id"],
                        project_id=_room_project(store, room, tx))
-            if room["kind"] == "group" and room["exchange_count"]:  # §4.6: the owner's message is counted from anew
+            if room["kind"] in GROUP_KINDS and room["exchange_count"]:  # §4.6: the owner's message is counted from anew
                 room = store.update_room(id, tx=tx, exchange_count=0)
                 store.emit(tx, "room.updated", {"room": room, "members": store.list_room_members(room_id=id, tx=tx)},
                            room_id=id)
@@ -2264,10 +2265,7 @@ def post_message(id: str, body: NewMessage, store: StudioStore = Depends(get_sto
         _ask_turn(room["employee_id"], id)
     elif room["kind"] == "task":  # §6.6: into the task's run, and the read turns of who is mentioned (S-9)
         _tell_task_room(store, room, message)
-    elif room["kind"] == "department":  # §6.6: only who is mentioned answers (S-9)
-        for employee_id in mentions:
-            _ask_turn(employee_id, id)
-    elif room["kind"] == "group":  # §6.6: who is mentioned, else every member, one after the other in the room's order
+    elif room["kind"] in GROUP_KINDS:  # §6.6 (a department room too): who is mentioned, else every member, one after the other in the room's order
         _group_turns(id, mentions or group_order(store, id))
     return message
 

@@ -109,7 +109,7 @@ class Talk:
         """No turn is running or owed any more, and none of them failed in what the test had it do. A turn that
         does not end fails the test with where its thread stands."""
         try:
-            wait(lambda: not self.turns._busy, 30)
+            wait(lambda: not self.turns._busy and not self.turns._rooms, 30)  # the lines of rooms too (group turns)
         except AssertionError:
             self.stuck = True
             names = {thread.ident: thread.name for thread in threading.enumerate()}
@@ -319,7 +319,7 @@ def test_the_owners_message_in_a_task_room_goes_into_the_run_and_is_not_counted(
     assert line.row(task)["exchange_count"] == 0  # the owner's messages are no exchange (§4.6)
 
 
-def test_the_owners_mention_in_a_department_room_starts_that_employees_chat_turn(line, talk):  # noqa: F811
+def test_the_owners_message_in_a_department_room_gives_the_members_a_chat_turn_as_in_a_group_room(line, talk):  # noqa: F811
     mate = line.hire(CHAT)
     rooms = line.store.list_rooms(kind="department", department_id="program")
     room = rooms[0]["id"] if rooms else line.store.create_room("department", title="프로그램",
@@ -332,8 +332,10 @@ def test_the_owners_mention_in_a_department_room_starts_that_employees_chat_turn
         assert r.status_code == 201, r.text
         talk.rested()
 
+    members = [m["employee_id"] for m in line.store.list_room_members(room_id=room)]
     say("다들 수고했다", [])
-    assert talk.seen == []  # nobody was mentioned: nobody answers
+    assert sorted(s["employee_id"] for s in talk.seen) == sorted(members)  # nobody was mentioned: every member has a turn
+    talk.seen.clear()
     say("이건 어떻게 보나?", [mate])
     [seen] = talk.seen
     assert (seen["mode"], seen["employee_id"], seen["room_id"], seen["task_id"]) == ("chat", mate, room, None)

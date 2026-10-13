@@ -345,7 +345,10 @@ def test_room_post_is_for_the_rooms_of_8_5(desk):  # noqa: F811
     assert desk.call("room_post", mate, text="내 방")["ok"]  # dm: one's own (the room of this turn)
     failed(desk.call("room_post", assignee, text="남의 방", room=desk.dms[w.mate]), "actor_not_allowed")
 
-    program = room_of(desk, "department", department_id="program")  # department: one's own part's
+    program = room_of(desk, "department", department_id="program")  # department: its members, as a group room
+    failed(desk.call("room_post", mate, text="행이 없다", room=program["id"]), "actor_not_allowed")
+    if store.get_room_member(program["id"], w.mate) is None:
+        store.create_room_member(program["id"], w.mate)
     assert desk.call("room_post", mate, text="파트에 알린다", room=program["id"])["ok"]
     failed(desk.call("room_post", hr_token, text="인사다", room=program["id"]), "actor_not_allowed")
 
