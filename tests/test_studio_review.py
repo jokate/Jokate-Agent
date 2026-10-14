@@ -137,7 +137,10 @@ def test_the_package_of_a_copy_run_is_computed_from_the_run_as_it_is(shop, monke
     assert out["assets"] == [{"path": "Data/curve.blob", "asset": False, "before_bytes": None, "after_bytes": None,
                               "restorable": True, "source": "snapshot"}]
     assert sorted(p["path"] for p in out["out_of_scope"]) == ["Data/curve.blob", "Docs/점프 메모.txt"]  # 담당 밖
-    assert (out["screenshots"], out["harness_checks"], out["cost"]) == ([], [], {"usd": 0})
+    assert (out["screenshots"], out["cost"]) == ([], {"usd": 0})
+    assert [c["id"] for c in out["harness_checks"]] == ["structure_choice", "checklist", "skills", "mcp", "guard_warnings"]
+    assert out["harness_checks"][0]["status"] == "failed"  # a feature changed code with no structure choice decided
+    assert out["harness_checks"][0]["data"]["code_files"] == ["Source/jump.cpp", "Source/old.cpp"]
     assert [(i["kind"], i["reason"]) for i in out["incidents"]] == [("run", "plan 을 건너뛰었다"), ("guard", "명령을 막았다")]
     assert out["incidents"][1]["detail"] == {"rule_id": "rm_rf"} and set(out["incidents"][0]) == {
         "id", "at", "kind", "reason", "detail"}

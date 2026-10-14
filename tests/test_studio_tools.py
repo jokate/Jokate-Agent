@@ -393,8 +393,9 @@ def test_task_request_review_refusals_leave_the_task_working(desk):
                   "missing_fields")["fields"] == ["checklist"]
     assert failed(desk.call("task_request_review", token, **REVIEW, evidence=[{"kind": "url"}]),
                   "missing_fields")["fields"] == ["evidence"]
-    shot = [{"kind": "screenshot", "ref": "shots/jump.png"}]  # a file: checked and copied by S-6 2/2, refused until then
-    assert failed(desk.call("task_request_review", token, **REVIEW, evidence=shot), "precondition_failed")["failed"] == []
+    shot = [{"kind": "screenshot", "ref": "shots/jump.png"}]  # a file: checked (§6.6); this run has no folder for it
+    assert failed(desk.call("task_request_review", token, **REVIEW, evidence=shot),
+                  "precondition_failed")["failed"] == ["attachment_outside_workspace"]
     w.fx.fail[("check", "T6")] = TransitionError("precondition_failed", "완료 기준마다 표기가 없다",
                                                  failed=["checklist_incomplete"])  # the harness gate (S-11)
     assert failed(desk.call("task_request_review", token, **REVIEW), "precondition_failed")["failed"] == [
@@ -462,7 +463,7 @@ def test_ask_owner_says_which_argument_is_missing(desk):
     drawn = [OPTIONS[0], {**OPTIONS[1], "figure": {"svg": "<svg/>"}}]
     assert fields(kind="choice", title="?", body="?", options=drawn) == ["options"]
     assert fields(kind="approval", title="?", what="x", why="y") == ["if_not"]
-    filed = [OPTIONS[0], {**OPTIONS[1], "figure": {"path": "figs/a.png"}}]  # a file: S-6 2/2, refused until then
+    filed = [OPTIONS[0], {**OPTIONS[1], "figure": {"path": "figs/a.png"}}]  # a file: checked (§6.6), none is there
     assert failed(desk.call("ask_owner", token, kind="choice", title="?", body="?", options=filed),
-                  "precondition_failed")["failed"] == []
+                  "precondition_failed")["failed"] == ["attachment_outside_workspace"]
     assert desk.untouched(task)

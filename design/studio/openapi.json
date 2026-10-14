@@ -1515,6 +1515,25 @@
         "title": "ProjectPatch",
         "type": "object"
       },
+      "ProjectPolicyBody": {
+        "additionalProperties": false,
+        "properties": {
+          "base_sha256": {
+            "title": "Base Sha256",
+            "type": "string"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "text",
+          "base_sha256"
+        ],
+        "title": "ProjectPolicyBody",
+        "type": "object"
+      },
       "QuietHours": {
         "additionalProperties": false,
         "properties": {
@@ -4751,6 +4770,102 @@
           }
         },
         "summary": "Stop Editor",
+        "tags": [
+          "studio"
+        ]
+      }
+    },
+    "/studio/projects/{id}/policy": {
+      "get": {
+        "operationId": "get_project_policy_studio_projects__id__policy_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "title": "Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Project Policy Studio Projects  Id  Policy Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Project Policy",
+        "tags": [
+          "studio"
+        ]
+      },
+      "put": {
+        "operationId": "put_project_policy_studio_projects__id__policy_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "title": "Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProjectPolicyBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Put Project Policy Studio Projects  Id  Policy Put",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Put Project Policy",
         "tags": [
           "studio"
         ]

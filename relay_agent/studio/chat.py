@@ -15,7 +15,8 @@ A turn is one run of `relays/employee-chat.yaml` — a single stage, `chat` — 
   conversation the next turn resumes (NULL = a new one), `fed_message_id` the last message a finished turn read;
 - a turn that resumes is made like any run and then told to continue that conversation: the engine resumes the
   conversation `RunState.stage_sessions` names and sends only what `interject` left — the new messages and, for
-  the HR employee, the values of a hire as they are now (§8.4). The whole goal stays the prompt of a conversation
+  the HR employee, the values of a hire as they are now (§8.4) — and, when it changed since the conversation was
+  last sent it, the policy of the project (`_policy_note`) and the employee's GUIDE.md (`_guide_note`, H-6; after a restart nothing is remembered, so the first resumed turn carries both once more). The whole goal stays the prompt of a conversation
   that could not be resumed (`StageCall.fresh_prompt`);
 - when a turn's input passes HANDOFF_TOKENS, or its conversation could not be resumed, the conversation is
   closed: the next turn starts a new one from the hand-over — what the last finished turn said the conversation
@@ -50,6 +51,7 @@ input once per call, so it may hand over early.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import threading
 from collections import deque
@@ -153,6 +155,12 @@ class ChatTurns:
         self._busy: dict[tuple[str, str], bool] = {}  # (room, employee) of a running turn -> asked again meanwhile
         # a group room whose turns are running -> who waits there, in order: (employee, a mention put it in)
         self._rooms: dict[str, deque[tuple[str, bool]]] = {}
+        # (room, employee) -> (project, sha256 of the policy text) last sent to that conversation. In memory: after
+        # a restart the policy is sent once more to a conversation that resumes
+        self._policy_seen: dict[tuple[str, str], tuple[str, str]] = {}
+        # (room, employee) -> sha256 of the GUIDE.md last sent to that conversation (H-6): an approved amendment
+        # reaches a conversation that is open. In memory like the policy's: after a restart the first resumed turn sends it again
+        self._guide_seen: dict[tuple[str, str], str] = {}
 
     def request(self, employee_id: str, room_id: str) -> None:
         key = (room_id, employee_id)
@@ -473,8 +481,49 @@ class ChatTurns:
             said = text + (f"\n첨부 파일 (필요하면 Read 로 읽는다):{files}" if files else "")
             # HR's values are made anew every turn: a project made since the conversation began is in this one,
             # and so are the frames of the parts (`hiring_notes`) — a part made or a frame changed meanwhile
-            self.engine.interject(run.id, f"{said}\n\n{hiring}" if hiring else said)
+            note = self._policy_note(member, where.project_id, True)
+            guide_note = self._guide_note(member, employee, True)
+            self.engine.interject(run.id, "\n\n".join(part for part in (said, note, guide_note, hiring) if part))
+        else:
+            self._policy_note(member, where.project_id, False)
+            self._guide_note(member, employee, False)
         return run
+
+    def _guide_note(self, member: dict, employee: dict, resumed: bool) -> str:
+        """H-6: what a turn that resumes a conversation adds when the employee's GUIDE.md changed since it was last
+        sent to that conversation (the first prompt carries it): the guide as it is now. After a restart nothing is
+        remembered, so the first resumed turn carries it once more (like `_policy_note`). "" when nothing changed
+        and for a turn that starts a conversation."""
+        key = (member["room_id"], member["employee_id"])
+        text = employees._read(employees.folder(self.cfg.studio_dir, employee["id"]) / "GUIDE.md") or ""
+        seen = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        previous = self._guide_seen.get(key)
+        self._guide_seen[key] = seen
+        if not resumed or previous == seen:
+            return ""
+        lead = ("시스템: 서버가 다시 시작돼 네 지침(GUIDE.md)을 다시 싣는다. 아래가 지금 내용이다 — 앞의 것과 다르면 이것을 따른다."
+                if previous is None else
+                "시스템: 네 지침(GUIDE.md)이 대화를 연 뒤 바뀌었다. 아래가 지금 내용이다 — 앞의 것 대신 따른다.")
+        return lead + "\n\n" + (text.strip() or "(지금은 지침이 비어 있다)")
+
+    def _policy_note(self, member: dict, project_id: str | None, resumed: bool) -> str:
+        """What a turn that resumes a conversation adds when the policy changed since it was last sent to that
+        conversation (the first prompt carries it, `_goal`): the policy and the rule to ask for approval as they are
+        now. "" when nothing changed, for a turn that starts a conversation and for a room without a project."""
+        key = (member["room_id"], member["employee_id"])
+        if not project_id:
+            self._policy_seen.pop(key, None)
+            return ""
+        text = employees._read(employees.policy_path(self.cfg.studio_dir, project_id)) or ""
+        seen = (project_id, hashlib.sha256(text.encode("utf-8")).hexdigest())
+        previous = self._policy_seen.get(key)
+        self._policy_seen[key] = seen
+        if not resumed or previous == seen:
+            return ""
+        body = employees.assemble(None, None, None, text.strip() or "(지금은 정책이 비어 있다)",
+                                  rule=employees.APPROVAL_RULE)
+        return ("시스템: 이 프로젝트의 정책이나 결재 규칙이 대화를 연 뒤 바뀌었다. 아래가 지금 내용이다 — 앞의 것 대신 따른다."
+                "\n\n" + body)
 
     def _values(self, store: StudioStore, employee: dict) -> dict:
         """§9.5: the `chat` slot under the cap, `chat_mcp` + `studio`, the two caps. Refused when the file cannot
@@ -539,7 +588,8 @@ class ChatTurns:
         """The new messages first — the session's list of earlier requests shows the head of a goal —, then the
         hand-over of the conversation before, then the employee's part of the prompt (§9.1) and last `hiring`:
         for the HR employee, the values of a hire (§8.4; `_hiring`). The goal is sent when a conversation
-        starts: a turn that resumes sends the new messages, and of the rest only `hiring` again (`_make`)."""
+        starts: a turn that resumes sends the new messages, `hiring` again and, when the policy changed since it was
+        last sent, the policy with the rule to ask for approval (`_policy_note`)."""
         handoff = self._handoff(session_id)
         parts = [text, f"===== {HANDOFF_TITLE} =====\n{handoff}" if handoff else "",
                  employees.prompt_for(store, self.cfg.studio_dir, employee, room["id"], project_id), hiring]

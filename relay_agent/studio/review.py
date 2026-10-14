@@ -42,6 +42,8 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from ..journal import is_asset
+from . import gate as harness  # `gate` below is review's own function
+from . import runlog
 from .store import StudioStore
 from .tasks import TransitionError
 
@@ -542,6 +544,21 @@ def reverted(engine: Any, run: Any) -> Any:
 
 
 # --- the package --------------------------------------------------------------------------------------------------
+def harness_checks(store: StudioStore, task: dict | None, payload: dict, files: list[dict], engine: Any,
+                   run: Any) -> list[dict]:
+    """`harness_checks[]` (§5.4; the judgements are `gate.checks`'): none for a run the engine cannot read. The
+    run's record is read now (`runlog.snapshot`, which writes nothing); one that fails to read is None."""
+    if run is None:
+        return []
+    try:
+        record = runlog.snapshot(engine, run.id)
+    except Exception:  # noqa: BLE001 - a record that cannot be read is told in the checks
+        log.warning("studio: 런 %s 의 기록을 읽지 못했다", run.id, exc_info=True)
+        record = None
+    done = harness.chosen(store, task["id"]) if task else None
+    return harness.checks(task, payload, files, done, record)
+
+
 def package(store: StudioStore, item: dict, task: dict | None, engine: Any, *,
             holds: Callable[[str], bool] | None = None, scopes: dict | None = None) -> dict:
     """`package` of a `final_review` item (§5.4), computed now. `engine` is the RelayEngine to read (None =
@@ -577,7 +594,7 @@ def package(store: StudioStore, item: dict, task: dict | None, engine: Any, *,
         "assets": listed,
         "screenshots": [e["ref"] for e in payload.get("evidence") or []
                         if isinstance(e, dict) and e.get("kind") == "screenshot" and isinstance(e.get("ref"), dict)],
-        "harness_checks": [],  # S-11
+        "harness_checks": harness_checks(store, task, payload, files, engine, run),
         "out_of_scope": out_of_scope([f["path"] for f in files] + [a["path"] for a in listed],
                                      _scope(store, task, scopes)),
         "cost": {"usd": round(run.cost_usd, 4) if run is not None else 0},

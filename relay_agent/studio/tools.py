@@ -35,6 +35,7 @@ the call came from — a tool knows the turn, not the engine.
 
 from __future__ import annotations
 
+import copy
 import logging
 import shutil
 import uuid
@@ -172,23 +173,66 @@ def _legal(task: dict, to: str) -> None:
                               from_status=frm, to_status=to, rule=rule)
 
 
-def _file_args(tool: str, args: dict) -> None:
-    """Where the file arguments of §8.4 are checked and copied (§6.6 '직원의 첨부'): `options[].figure` with
-    a `path`, and `evidence[].ref` of a file kind. The files of an item are copied under its id, which the
-    machine makes inside the transition — S-11 does that (room_post's attachments are done: `files.check`);
-    until then a call that hands in a file is refused whole, so no path is stored unchecked."""
-    found: list[str] = []
-    if tool == "ask_owner":
-        found += [f"options[{i}].figure" for i, option in enumerate(args.get("options") or [])
-                  if isinstance(option, dict) and isinstance(option.get("figure"), dict)
-                  and "path" in option["figure"]]
+def _file_slots(tool: str, kind: str | None, payload: dict, args: dict) -> list[tuple[dict, str]]:
+    """Where the file arguments of §8.4 are (§6.6 '직원의 첨부'): `options[].figure` with a `path` (a
+    `structure_choice`'s) and `evidence[].ref` of a file kind (a review's). [(the dict that holds it, its key)] in
+    payload order — the dicts are the payload's own, so a slot can be set once the file is copied."""
+    slots: list[tuple[dict, str]] = []
+    if tool == "ask_owner" and kind == "structure_choice":
+        slots += [(option, "figure") for option in payload.get("options") or []
+                  if isinstance(option.get("figure"), dict) and "path" in option["figure"]]
     if tool == "task_request_review":
-        found += [f"evidence[{i}].ref" for i, item in enumerate(args.get("evidence") or [])
+        slots += [(item, "ref") for item in payload.get("evidence") or []
                   if isinstance(item, dict) and item.get("kind") in FILE_EVIDENCE]
-    if found:
-        raise Refusal("precondition_failed",
-                      f"파일을 넘기는 인자는 아직 받지 않는다: {', '.join(found)}. 파일 없이 다시 부른다 — "
-                      "그림은 {mermaid} 로, 근거는 kind = url 이나 summary 의 글로 적는다", failed=[])
+    return slots
+
+
+def _file_args(caller: Caller, store: Any, inbox: Inbox, tool: str, kind: str | None, args: dict,
+               payload: dict) -> tuple[str | None, Path | None]:
+    """Check and copy the files an item brings (§6.6 '직원의 첨부'; S-11 ②). Nothing is written when one is refused.
+    The files are copied under `attachments/<the item's id>/` — the id is made here, before the write, and
+    handed to `Inbox.create(item_id=)`; the caller removes the folder when that fails. The payload gets, in place
+    of each path, `{name, path, mime, size}` (a figure keeps its other keys). Returns (the id, the folder), both
+    None without a file."""
+    if tool == "ask_owner" and kind != "structure_choice" and any(
+            isinstance(o, dict) and isinstance(o.get("figure"), dict) and "path" in o["figure"]
+            for o in args.get("options") or []):
+        raise Refusal("precondition_failed", "파일 그림(figure.path)은 kind = choice 의 선택지에만 붙인다. "
+                      "다른 종류는 그림 없이 다시 부른다", failed=[])
+    slots = _file_slots(tool, kind, payload, args)
+    if not slots:
+        return None, None
+    specs = [{"path": holder[key]["path"] if key == "figure" else holder[key]} for holder, key in slots]
+    found, refused = files.check(specs, _attachment_roots(caller, store), caller.workdir)
+    if refused:
+        raise Refusal("precondition_failed", "붙일 수 없는 파일이 있어 올리지 않았다: "
+                      + ", ".join(f"{path} ({code})" for code, path in refused)
+                      + f". 이 런의 작업 폴더나 프로젝트 폴더 안에 있는 {files.MAX_ATTACHMENT_MB}MB 이하 파일만 붙인다",
+                      failed=list(dict.fromkeys(code for code, _ in refused)))
+    item_id = "inb_" + uuid.uuid4().hex[:8]
+    folder = _root(inbox) / "attachments" / item_id
+    try:
+        refs = files.copy(found, folder)
+    except OSError as e:
+        shutil.rmtree(folder, ignore_errors=True)
+        raise Refusal("precondition_failed", f"첨부를 복사하지 못해 올리지 않았다: {e}",
+                      failed=[files.NOT_FOUND]) from e
+    for (holder, key), ref in zip(slots, refs):
+        if key == "figure":
+            holder[key] = {**{k: v for k, v in holder[key].items() if k != "path"}, **ref}
+        else:
+            holder[key] = ref
+    return item_id, folder
+
+
+def _file_filed(folder: Path | None, make: Callable[[], dict]) -> dict:
+    """Run `make` (the write of the item); when it fails the copied files must not stay — the id may be reused."""
+    try:
+        return make()
+    except BaseException:
+        if folder is not None:
+            shutil.rmtree(folder, ignore_errors=True)
+        raise
 
 
 # --- task_propose · followup_propose (C1) -----------------------------------------------------------------
@@ -316,8 +360,10 @@ def task_request_review(caller: Caller, args: dict, machine: TaskMachine, inbox:
         raise Refusal("missing_fields", f"비어 있거나 틀린 인자: {', '.join(bad)}. summary 와 checklist(완료 기준마다 "
                       "{criterion, status, note}, status 는 verified_auto · verified_manual · unverified)가 필수이고 "
                       "evidence 는 각 {kind, ref, caption}, judgment_calls 는 각 {text, why} 다", fields=bad)
-    _file_args("task_request_review", args)
-    item = inbox.create("final_review", caller.actor, payload=payload, task_id=task["id"])
+    payload = copy.deepcopy(payload)  # the file refs below are set in place; the caller's args stay as they were
+    item_id, folder = _file_args(caller, machine.store, inbox, "task_request_review", None, args, payload)
+    item = _file_filed(folder, lambda: inbox.create("final_review", caller.actor, payload=payload,
+                                                    task_id=task["id"], item_id=item_id))
     return ok(f"검수를 요청했다 (결재 {item['id']}). 결과는 이 작업방에 온다.", end_turn=True, inbox_id=item["id"])
 
 
@@ -385,8 +431,9 @@ def ask_owner(caller: Caller, args: dict, machine: TaskMachine, inbox: Inbox) ->
         bad.append("options")
     if bad:
         raise Refusal("missing_fields", f"비어 있거나 틀린 인자: {', '.join(bad)}. {ASK_HINT[kind]}", fields=bad)
-    _file_args("ask_owner", args)
-    item = inbox.create(kind, caller.actor, title=args["title"], payload=payload, task_id=task["id"])
+    item_id, folder = _file_args(caller, store, inbox, "ask_owner", kind, args, payload)
+    item = _file_filed(folder, lambda: inbox.create(kind, caller.actor, title=args["title"], payload=payload,
+                                                    task_id=task["id"], item_id=item_id))
     return ok(f"결재를 올렸다 ({item['id']}). 결정은 이 작업방에 온다.", end_turn=True, inbox_id=item["id"])
 
 
@@ -779,7 +826,7 @@ def policy_draft(caller: Caller, args: dict, machine: TaskMachine, inbox: Inbox)
     project = store.get_project(args["project_id"].strip())
     if project is None:
         raise Refusal("not_found", f"프로젝트 {args['project_id'].strip()} 이 없다")
-    base_text, sha = _base(root / "projects" / project["id"] / "POLICY.md")
+    base_text, sha = _base(employees.policy_path(root, project["id"]))
     draft_id, reason, new_text = drafts.policy_id(project["id"]), args["reason"].strip(), args["policy_md"]
     saved = drafts.save(root, {
         "id": draft_id, "kind": "policy", "action": "policy", "author_id": caller.id, "project_id": project["id"],

@@ -38,8 +38,14 @@ def listed(world, **params):  # noqa: F811
     return [e["id"] for e in ok(world.owner.get("/studio/employees", params=params))["items"]]
 
 
-def other_project(world, archived=False):  # noqa: F811
-    pid = world.store.create_project("다른 게임", "D:/other", "other")["id"]
+def other_project(world, archived=False, harness=True):  # noqa: F811
+    """A second project. Its folder has the harness (S-11 ②: a program employee is placed only there)."""
+    n = len(world.store.list_projects(include_archived=True))
+    folder = world.dir / f"other-project{n}"
+    (folder / "Docs").mkdir(parents=True, exist_ok=True)
+    if harness:
+        (folder / "CLAUDE.md").write_text("# rules", encoding="utf-8")
+    pid = world.store.create_project(f"다른 게임 {n}", str(folder), f"other{n}")["id"]
     if archived:
         world.store.update_project(pid, archived_at="2026-01-01T00:00:00")
     return pid

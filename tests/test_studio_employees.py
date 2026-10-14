@@ -316,7 +316,7 @@ def test_the_seed_files_are_package_data():
 # --- the HR employee's own files (H-1 · H-2) ------------------------------------------------------------------
 HR_STEPS = ("무엇을 맡길지", "담당 범위와 금지", "결재 기준", "일하는 방식 · 말투", "모델 · 노력치")  # H-2, this order
 HIRED_PARTS = ("program", "design_doc", "design_setup")  # the parts of the default DB a hire can be of
-HR_GUIDE_BUDGET = 5632 # bytes of UTF-8: this test's budget for the packaged hr/GUIDE.md, not a limit of the server
+HR_GUIDE_BUDGET = 6656 # (H-6: 5632 + the '프로젝트 정책' section) bytes of UTF-8: this test's budget for the packaged hr/GUIDE.md, not a limit of the server
 HR_NO_EFFORT = "노력치가 없다고 적힌 모델에는 `effort` 를 적지 않는다"  # haiku: a work slot would refuse the pair
 
 
@@ -608,8 +608,9 @@ def test_the_server_makes_the_hr_employee_after_the_seed_and_only_once(tmp_path,
             (employees.SEED_ID, employees.SEED_NAME), (employees.HR_ID, "김인사")]
         assert len(store.list_employees(department_id="hr")) == 1 and len(store.list_rooms(kind="dm")) == 2
         again = TestClient(server.app, headers=AUTH).get(f"/studio/employees/{employees.HR_ID}").json()
-        assert (again["name"], again["files"]["guide_md"]) == ("김인사", "# 고친 지침\n")
-        assert guide.read_bytes() == "# 고친 지침\n".encode("utf-8")
+        # H-6: the owner's text stays as it was; the start only adds the '프로젝트 정책' section after it
+        assert again["name"] == "김인사" and again["files"]["guide_md"].startswith("# 고친 지침\n\n## 프로젝트 정책\n")
+        assert guide.read_bytes().startswith("# 고친 지침\n".encode("utf-8")) and b"policy_draft" in guide.read_bytes()
     finally:
         api.close_store()
 

@@ -259,7 +259,9 @@ def test_routes_are_the_s3_rows_of_the_document():
              ("POST", "/studio/rooms/{id}/archive"),  # the group rooms (the tests of the group rooms below)
              ("POST", "/studio/rooms/{id}/continue")}  # and their turns (tests/test_studio_group.py)
     assert all(f"| `{method} {path}` |" in section for method, path in group)
-    others = members | muted | failed | editor | parts | history | life | memory | group
+    policy = {("GET", "/studio/projects/{id}/policy"), ("PUT", "/studio/projects/{id}/policy")}  # H-6
+    assert "| `GET` · `PUT /studio/projects/{id}/policy` |" in section  # one row for the two (tests/test_studio_policy.py)
+    others = members | muted | failed | editor | parts | history | life | memory | group | policy
     assert len(doc) == 18 and not doc & others and built == doc | others
 
 

@@ -360,8 +360,10 @@ class Jobs:
 
     def __init__(self, studio_dir: Path | str, *, local_file: Path | str, reload: Callable[[], Any],
                  harness_root: Callable[[], Any], run: creator.Run = creator.run_process,
-                 is_open: Callable[[int], bool] = machine.port_open, live: Live | None = None):
+                 is_open: Callable[[int], bool] = machine.port_open, live: Live | None = None,
+                 on_registered: Callable[[Any, dict], None] | None = None):
         self.studio_dir = Path(studio_dir)
+        self.on_registered = on_registered  # (store, project row): asked once for a row this job just made
         self.local_file, self.reload, self.harness_root = Path(local_file), reload, harness_root
         self.run, self.is_open, self.live = run, is_open, live
         self._turn = threading.Lock()  # held by the job that runs: the UE build is heavy, and one port at a time
@@ -672,6 +674,11 @@ class Jobs:
                 events.append(finished_event(job))
             job = _save(self.studio_dir, job)
             self._emit(store, job, events)
+            if name == "register" and status == "done" and project and not kept and self.on_registered is not None:
+                try:  # the project is committed: what the owner asked for does not depend on this
+                    self.on_registered(store, project)
+                except Exception:  # noqa: BLE001
+                    log.exception("studio: 생성 작업 %s 의 등록 뒤 처리가 실패했다", job_id)
             if status == "failed":
                 return
         if job["status"] == "running":  # a retry that found the last step over already

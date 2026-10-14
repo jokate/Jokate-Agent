@@ -131,7 +131,7 @@ def test_the_employees_file_and_the_override_reach_the_run(shop):
     emp = shop.hire()
     policy = Path(shop.cfg.studio_dir) / "projects" / shop.pid / "POLICY.md"
     policy.parent.mkdir(parents=True, exist_ok=True)
-    policy.write_text("main 에 직접 올리지 않는다.\n", encoding="utf-8")
+    policy.write_text("main 에 직접 올리지 않는다.\n기획 문서 변경은 결재\n", encoding="utf-8")
     task = shop.task(emp, stage_models={"build": {"model": "opus", "effort": "high"}, "review": {}})
     assert shop.fx.check_start(task) == []
     row, run = shop.start(task)
@@ -146,11 +146,21 @@ def test_the_employees_file_and_the_override_reach_the_run(shop):
     goal = run.baton.goal
     assert goal.startswith("작업: 2단 점프")
     for text in ("조작감", "공중에서 한 번 더", "테스트 통과", "나는 지수다", "모르면 묻는다", "점프 높이는 300",
-                 "main 에 직접 올리지 않는다"):
+                 "main 에 직접 올리지 않는다", "기획 문서 변경은 결재", "===== 결재 규칙 =====", "ask_owner", "kind=approval"):
         assert text in goal
     shop.engine.advance(run.id)  # the mock runner is handed what the run keeps
     assert [(call.stage, call.model, call.effort) for call in shop.lab.runner.calls[:2]] == [
         ("scout", "sonnet", "medium"), ("plan", "opus", "high")]
+
+
+def test_a_run_started_after_the_guide_changed_carries_the_new_guide(shop):
+    emp = shop.hire()
+    first = shop.start(shop.task(emp))[1].baton.goal
+    assert "모르면 묻는다" in first
+    (employees.folder(shop.cfg.studio_dir, emp) / "GUIDE.md").write_bytes(
+        "# 지침\n새 기준: 점프는 묻고 한다\n".encode("utf-8"))
+    later = shop.start(shop.task(emp))[1].baton.goal  # read from the disk at every start (work.py `_goal`)
+    assert "새 기준: 점프는 묻고 한다" in later and "모르면 묻는다" not in later
 
 
 def test_a_task_run_in_a_repo_without_project_context_still_has_studio(shop):

@@ -48,7 +48,7 @@ import yaml
 
 from ..config import ROOT
 from ..pipeline import RelaySpec, cap_effort, cap_model
-from . import campaigns, cutoff, employees, plugins, review, runs
+from . import campaigns, cutoff, employees, gate, plugins, review, runs
 from . import editor as editor_control
 from . import machine as machine_info
 from .inbox import SYSTEM_ROOM
@@ -282,7 +282,8 @@ class WorkEffects(Effects):
     · T9 · T11 on the task's run, and — T7 · T9 · T11 — the run closed, then its changes applied and committed,
     or reverted. `holds` is the queue's "does that task hold a slot" (`queue.TaskQueue.holds`; server.py sets
     it): a run whose thread has not let go of its slot has not stopped yet (§4.6). None = no queue, so nothing
-    holds one. The harness gate of T6 is still the base's (S-11).
+    holds one. The harness gate of T6 (S-11 ②; `gate.py`) is `check`'s: a feature's code
+    without a decided structure choice.
 
     `campaign` is the look at the studio's campaigns (S-14; `CampaignRunner.advance_studio`, server.py sets it):
     `after` calls it when a change may have made a task of a running campaign ready, or ended the campaign
@@ -486,9 +487,27 @@ class WorkEffects(Effects):
     def check(self, rule: str, task: dict) -> None:
         """§4.3 '언제' of T7 · T9 · T11 (the run has stopped, the changes can be applied or reverted) and of T8
         · T5 (the run can still go on): nothing is done here, a refusal is `precondition_failed` with one of
-        `review.CODES`."""
+        `review.CODES`. T6 (S-11 ②): a `feature` task whose run changed code needs a decided structure choice
+        (`gate.judge`); the run is still at work, so what it changed is read from its edit tools' log."""
         if rule in GATES:
             self._judge(rule, task)
+        elif rule == "T6":
+            self._structure(task)
+
+    def _structure(self, task: dict) -> None:
+        if task.get("type") != gate.FEATURE:
+            return
+        run = _load(self.engine, task.get("run_id"))
+        if run is None:  # a run nobody can read is not held against the request
+            return
+        paths = gate.edited(self.engine, run.id)
+        try:
+            paths += [f["path"] for f in review.changed_files(run, self.engine.patch_text(run.id))]
+        except (OSError, ValueError, TypeError, KeyError):
+            pass
+        code, why = gate.judge(task, paths, gate.chosen(self.store(), task["id"]))
+        if code:
+            raise TransitionError("precondition_failed", why, from_status=task["status"], rule="T6", failed=[code])
 
     def before(self, rule: str, task: dict) -> str | None:
         """T7 · T9 · T11, before step 1 (§4.5): the run is closed, then its changes are applied and committed

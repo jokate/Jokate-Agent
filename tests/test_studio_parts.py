@@ -287,7 +287,8 @@ def test_a_part_is_archived_only_when_it_is_the_owners_and_nobody_is_in_it(world
 def test_an_archived_part_takes_no_hire_draft(world):
     checks = employees.context(world.cfg)
     row = world.owner.post("/studio/departments", json={"name": "사운드", "default_relay": "quick"}).json()
-    body = {"name": "다온", "department_id": row["id"], "persona_md": "# 다온\n", "guide_md": "# 지침\n",
+    body = {"name": "다온", "department_id": row["id"], "persona_md": "# 다온\n",
+            "guide_md": "# 지침\n\n## 결재 기준\n\n- 묻고 한다: 구조 변경\n- 알아서 한다: 없음\n",
             "employee_yaml": f"version: 1\ndepartment: {row['id']}\n"}
     assert drafts.hire_problems(world.store, body, checks) == []  # while the part is there it takes the draft
     r = world.owner.post(f"/studio/departments/{row['id']}/archive")

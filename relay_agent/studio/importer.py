@@ -153,6 +153,23 @@ def rules(folder: Path | str) -> list[str]:
     return [name for name in INSTRUCTION_FILES if (Path(folder) / name).is_file()]
 
 
+def harness_state(folder: Path | str | None) -> dict:
+    """`{claude_md, docs}` of a project folder — the one place the harness is told from (`detect` and the gate of
+    S-11 ② both use it). A folder that is not there has neither."""
+    if folder is None or not str(folder).strip():
+        return {"claude_md": False, "docs": False}
+    folder = Path(folder)
+    try:
+        return {"claude_md": bool(rules(folder)), "docs": (folder / HARNESS_FOLDER).is_dir()}
+    except OSError:
+        return {"claude_md": False, "docs": False}
+
+
+def harness_ready(folder: Path | str | None) -> bool:
+    """Is the harness laid in that folder: the rules file and the `Docs` folder, both."""
+    return all(harness_state(folder).values())
+
+
 def detect(folder: Path, engines: list[dict], top: Path | None = None) -> dict:
     """What `POST /studio/projects` answers as `detected` (§6.4): `{uproject, engine, mcp, harness, git,
     missing}`. `engines` is `machine.engines()` — `[{version, path, exists}]`; `top` the root of the repository
@@ -168,7 +185,7 @@ def detect(folder: Path, engines: list[dict], top: Path | None = None) -> dict:
         e.get("version") == association and bool(e.get("exists")) for e in engines)
     ini, listed = ini_port(folder), mcp_json_port(folder)
     port = ini if ini is not None else listed
-    harness = {"claude_md": bool(rules(folder)), "docs": (folder / HARNESS_FOLDER).is_dir()}
+    harness = harness_state(folder)
     missing = [name for name, gone in (("mcp", port is None), ("harness", not all(harness.values()))) if gone]
     return {"uproject": uproject.name if uproject is not None else None,
             "engine": {"association": association, "installed": installed},

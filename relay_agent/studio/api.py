@@ -71,7 +71,7 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 from starlette.concurrency import run_in_threadpool
 from starlette.requests import HTTPConnection
 
-from . import creator, devices, employee_git, employees, files, guard, importer, jobs as create_jobs, memory
+from . import creator, devices, employee_git, employees, files, gate, guard, importer, jobs as create_jobs, memory, policy as project_policy
 from . import editor as editor_control
 from . import machine as machine_info, review, sat, staffing, stats, tools, work
 from .inbox import Hooks, Inbox, InboxError
@@ -318,6 +318,10 @@ def ensure_hr() -> dict | None:
     except Exception:  # noqa: BLE001 - a start must not depend on the HR employee
         log.exception("studio: 인사 직원을 만들지 못했다")
     try:
+        _add_policy_talk(store)
+    except Exception:  # noqa: BLE001 - a start must not depend on a section of a guide
+        log.exception("studio: 인사 GUIDE.md 에 정책 면담 절을 덧붙이지 못했다")
+    try:
         for employee_id in employees.hr_guides_behind(store, _cfg.studio_dir):
             log.warning("studio: 인사 %s 의 GUIDE.md 가 옛 문안이다 — '%s' 절을 가리키는 말이 없다 (%s). 서버는 "
                         "덮어쓰지 않는다 — relay_agent/studio/hr/GUIDE.md 를 보고 손으로 맞춘다", employee_id,
@@ -325,6 +329,17 @@ def ensure_hr() -> dict | None:
     except Exception:  # noqa: BLE001 - a start must not depend on this look at a file
         log.exception("studio: 인사의 GUIDE.md 를 살피지 못했다")
     return made
+
+
+def _add_policy_talk(store: StudioStore) -> list[str]:
+    """H-6: the '## 프로젝트 정책' section of hr/GUIDE.md added to the guide of an HR employee that lacks it
+    (`employees.add_policy_talk`; the rest of the guide is not touched), and the folder committed."""
+    def write(folder: Path, text: str) -> None:
+        (folder / "GUIDE.md").write_text(text, encoding="utf-8", newline="")
+        _folder_commit(folder, "guide: 정책 면담 절")
+
+    with employee_git.lock:
+        return employees.add_policy_talk(store, _cfg.studio_dir, write=write)
 
 
 def fill_parts() -> list[dict]:
@@ -756,7 +771,20 @@ def import_project(body: ProjectImport, store: StudioStore = Depends(get_store))
             raise StudioError("conflict", "이름 · 저장소 · 포트가 다른 프로젝트와 겹칩니다",
                               field=_unique_field(str(e))) from e
         store.emit(tx, "project.updated", {"project": row}, project_id=row["id"])
+    _begin_policy_talk(store, row, folder)
     return {**row, "detected": found}
+
+
+def _begin_policy_talk(store: StudioStore, project: dict, rules_from: Path | None = None) -> None:
+    """H-6: HR's 1:1 room gets the system message that opens the policy talk, and HR's chat turn is asked for.
+    The project is committed by now: whatever fails here is logged and the answer of the call does not change."""
+    try:
+        started = project_policy.begin_interview(store, _config().studio_dir, project, rules_from=rules_from)
+    except Exception:  # noqa: BLE001
+        log.exception("studio: 프로젝트 %s 의 정책 면담을 시작하지 못했다", project.get("id"))
+        return
+    if started is not None:
+        _ask_turn(*started)
 
 
 # §6.4 (M-8): make a new UE project. The request is checked here (studio/jobs.py `admit`) and nothing else is done:
@@ -1247,6 +1275,42 @@ def put_employee_file(id: str, name: EmployeeFileName, body: EmployeeFileBody,
         return {"name": name, "sha256": digest, "commit": commit}
 
 
+# The policy of a project (H-6; `studio/policy.py`): studio/projects/<id>/POLICY.md. `base_sha256` is the file's
+# as it was read ("" = no file yet); another one is `precondition_failed`. Written under `employee_git.lock`, as an
+# approval of `policy_draft` writes it (§9.6). No event: the answer carries the new state.
+class ProjectPolicyBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    text: str
+    base_sha256: str
+
+
+@router.get("/projects/{id}/policy")
+def get_project_policy(id: str, store: StudioStore = Depends(get_store)) -> dict:
+    _need(store.get_project(id), "프로젝트", id)
+    return project_policy.read(_config().studio_dir, id)
+
+
+@router.put("/projects/{id}/policy")
+def put_project_policy(id: str, body: ProjectPolicyBody, store: StudioStore = Depends(get_store)) -> dict:
+    _need(store.get_project(id), "프로젝트", id)
+    path = project_policy.path(_config().studio_dir, id)
+    with employee_git.lock:
+        old = _file_bytes(path)
+        if (hashlib.sha256(old).hexdigest() if old is not None else "") != body.base_sha256.strip().lower():
+            raise StudioError("precondition_failed", "읽은 뒤에 정책이 바뀌었습니다. 지금 정책을 다시 읽고 고쳐 보냅니다.",
+                              failed=["base_mismatch"])
+        new = body.text.encode("utf-8")
+        if new != old:
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(new)
+            except OSError as e:
+                _file_restore(path, old)
+                raise StudioError("precondition_failed", f"정책을 쓰지 못했습니다: {e}") from e
+        return project_policy.read(_config().studio_dir, id)
+
+
 # The memory of an employee (H-4; `studio/memory.py`): MEMORY.md as the lines it is made of. An item's id is the
 # hash of its line, so a line the server moved is found and one that was changed meanwhile is `item_unknown`
 # (no `base_sha256` needed). The whole file is written by `PUT …/files/MEMORY.md`. `commit` is the folder's head.
@@ -1461,6 +1525,9 @@ def assign_employee(id: str, body: EmployeeAssign, store: StudioStore = Depends(
                 if project["archived_at"] is not None:
                     raise StudioError("precondition_failed", f"보관된 프로젝트입니다: {project['name']}",
                                       failed=["project_archived"])
+                problem = gate.placement_problem(store.get_department(row["department_id"], tx=tx), project)
+                if problem:
+                    raise StudioError("precondition_failed", problem, failed=[gate.NO_HARNESS])
             _engaged(store, row, tx, "배치를 바꿀")
             row = store.update_employee(id, tx=tx, project_id=target)
             _employee_changed(store, tx, row, "assigned")
@@ -1894,7 +1961,7 @@ def _job_runner() -> Any:
             raise StudioError("unavailable", "프로젝트 생성이 서버에 연결되지 않았습니다 (use_jobs 가 불리지 않았습니다)")
         if _jobs is None or _jobs.studio_dir != cfg.studio_dir:
             _jobs = create_jobs.Jobs(cfg.studio_dir, harness_root=lambda: _config().studio_harness_root,
-                                     live=_say, **_job_parts)
+                                     live=_say, on_registered=_begin_policy_talk, **_job_parts)
         return _jobs
 
 
@@ -2888,6 +2955,8 @@ def mcp_task_request_review(body: McpTaskRequestReview, caller: tools.Caller = D
     """T6: file the final review. `{inbox_id}` and `end_turn: true`."""
     # the same way in as T4, and nothing is cut: T6 is not in `cutoff.TIMED` (§8.3). The docstring is the saved
     # contract's description (design/studio/openapi.json), so this is said here.
+    if body.evidence:  # §6.6 '직원의 첨부': a path of evidence is checked against the folder this run works in
+        caller = dataclasses.replace(caller, workdir=run_workdir(caller.run_id))
     return _tool("task_request_review", body, caller, machine, inbox, rule="T6")
 
 
@@ -2897,6 +2966,8 @@ def mcp_ask_owner(body: McpAskOwner, caller: tools.Caller = Depends(get_caller),
     """T4: file a blocking item (§5.7). `{inbox_id}` and `end_turn: true`."""
     # the task's run is cut when it is still at work after the wait — at once when this turn is not that run
     # (§8.3 '서버의 뒤처리', `answered`)
+    if body.options:  # §6.6 '직원의 첨부': a figure's path is checked against the folder this run works in
+        caller = dataclasses.replace(caller, workdir=run_workdir(caller.run_id))
     return _tool("ask_owner", body, caller, machine, inbox, rule="T4")
 
 

@@ -85,17 +85,23 @@ def yaml_problems(text: object, *, department_id: str | None, department: dict |
 
 def amend_problems(store: StudioStore, target: dict | None, file: str, new_text: object,
                    checks: employees.Checks) -> list[dict]:
-    """What is wrong with the new text of an amendment. Only an `employee.yaml` is checked, against the part
-    of the employee it is for; [] when there is no such employee — the caller reports that one."""
-    if file != "employee.yaml" or target is None:
+    """What is wrong with the new text of an amendment. An `employee.yaml` is checked against the part of the
+    employee it is for; a GUIDE.md must have its '결재 기준' section filled in (H-6), as a hire's does — except
+    the HR employee's, whose own guide has no such section. [] when there is no such employee — the caller
+    reports that one — and for any other file. The approval does not check this again."""
+    if target is None:
         return []
-    return yaml_problems(new_text, department_id=target["department_id"],
-                         department=store.get_department(target["department_id"]), checks=checks)
+    if file == "employee.yaml":
+        return yaml_problems(new_text, department_id=target["department_id"],
+                             department=store.get_department(target["department_id"]), checks=checks)
+    if file == "GUIDE.md" and target["department_id"] != HR:
+        return employees.approval_problems(new_text if isinstance(new_text, str) else "")
+    return []
 
 
 def hire_problems(store: StudioStore, body: dict, checks: employees.Checks) -> list[dict]:
     """What would refuse the approval of this hire now — the rules of Inbox._check_hire (§5.5) — and the
-    check of its employee.yaml (§9.4)."""
+    check of its employee.yaml (§9.4), then the '결재 기준' section of its GUIDE.md being filled in (H-6)."""
     name = (body.get("name") or "").strip()
     department_id = (body.get("department_id") or "").strip()
     project_id = (body.get("project_id") or "").strip()
@@ -119,7 +125,7 @@ def hire_problems(store: StudioStore, body: dict, checks: employees.Checks) -> l
     if project_id and store.get_project(project_id) is None:
         out.append(problem("project_not_found", f"배치할 프로젝트가 없다: {project_id}"))
     return out + yaml_problems(body.get("employee_yaml"), department_id=department_id, department=department,
-                               checks=checks)
+                               checks=checks) + employees.approval_problems(body.get("guide_md") or "")
 
 
 def file_base(path: Path) -> tuple[str, str]:

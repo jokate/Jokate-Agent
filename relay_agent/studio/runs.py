@@ -16,6 +16,9 @@ not open the studio DB (§3.1): a run the CLI drives files nothing while the ser
 the CLI releases is noticed later — `Inbox.sweep_runs`, and `stale_state` at the decision (§5.8 나). At the
 server's start `file_waiting` files the stops no sink heard.
 
+The same call writes the run's record of skills, MCP calls and guard warnings (`runlog`, S-11 ①), whether or
+not a stop was heard.
+
 No FastAPI here: server.py connects it, and tests use it with an engine of their own.
 """
 
@@ -27,7 +30,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..notify import Fanout
-from . import employee_git
+from . import employee_git, runlog
 from .inbox import RUN_KINDS, Hooks, Inbox
 from .tasks import SYSTEM
 
@@ -85,7 +88,13 @@ class RunSink:
                 self._heard[run_id] = (title, dict(detail or {}))
 
     def idle(self, run_id: str) -> None:
-        """`engine.after_advance`: the run is let go. File the stop that was heard while it advanced, if any."""
+        """`engine.after_advance`: the run is let go. First its skill · MCP · guard record is written (S-11 ①,
+        `runlog`; a failure there is logged and changes nothing), then the stop that was heard while it advanced
+        is filed, if any."""
+        try:
+            runlog.record(self.engine, run_id)
+        except Exception:  # noqa: BLE001 - the record is a convenience; the run and its stop go on
+            log.exception("studio: 런 %s 의 런별 기록을 남기지 못했다", run_id)
         with self._lock:
             heard = self._heard.pop(run_id, None)
         if heard is None:

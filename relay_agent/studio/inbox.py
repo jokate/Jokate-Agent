@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..pipeline import EFFORT_ORDER
-from . import employee_git, employees, memory, staffing
+from . import employee_git, employees, gate, memory, staffing
 from .store import StudioStore, Tx, now
 from .tasks import DECISIONS as TASK_DECISIONS
 from .tasks import (BLOCKING_KINDS, EDITABLE, OWNER, STARTED, TASK_TYPES, TEXT_FIELDS, Actor, TaskMachine,
@@ -503,8 +503,9 @@ class Inbox:
 
     # --- filing ---------------------------------------------------------------------------------------------
     def create(self, kind: str, actor: Actor, *, title: str = "", payload: dict | None = None,
-               task_id: str | None = None, project_id: str | None = None) -> dict:
-        """File an item and return its row. The six blocking kinds are T4 and `final_review` is T6 of
+               task_id: str | None = None, project_id: str | None = None, item_id: str | None = None) -> dict:
+        """File an item and return its row. `item_id` (a task's item: T4 · T6) is the id the caller made before
+        it, because it copied files under it (§6.6 '직원의 첨부'); None = the machine makes it. The six blocking kinds are T4 and `final_review` is T6 of
         `task_id`, so the machine's rules decide who may file (TransitionError) and one pending item per task
         holds. `hire` is written here; only the HR employee files it.
 
@@ -543,11 +544,16 @@ class Inbox:
                         payload["options"] = [{"id": o, "label": OPTION_LABEL[o]} for o in QUESTION_OPTIONS[reason]]
         if kind == "final_review":
             payload["exchange_count"] = task["exchange_count"]  # the value at T6 (§5.4)
+            done = gate.chosen(self.store, task["id"])           # the structure choice the review stands on (S-11 ②)
+            if done is not None:
+                payload["structure_choice_inbox_id"] = done["id"]
         problems = validate_payload(kind, payload) + problems
         if problems:
             raise InboxError("missing_fields", f"payload 에 없거나 틀린 값이 있다: {', '.join(problems)}",
                              fields=problems)
         box = {"title": title, "payload": payload}
+        if item_id:
+            box["id"] = item_id
         if kind != "final_review":
             box["kind"] = kind
         return self.machine.transition(task_id, "review" if kind == "final_review" else "blocked", actor,
@@ -1031,8 +1037,13 @@ class Inbox:
                 problems.append("인사 직원은 한 명뿐이다")
             if project_id:
                 problems.append("인사 직원은 프로젝트에 배치하지 않는다")
-        if project_id and self.store.get_project(project_id, tx=tx) is None:
+        project = self.store.get_project(project_id, tx=tx) if project_id else None
+        if project_id and project is None:
             problems.append("배치할 프로젝트가 없다")
+        if department is not None:  # a part proposed anew is judged by its proposed relay (`part_relay`)
+            hint = gate.placement_problem(department, project)
+            if hint:
+                problems.append(hint)
         if problems:
             raise InboxError("precondition_failed", " / ".join(problems))
         if self._name_taken(name, tx):
@@ -1065,7 +1076,7 @@ class Inbox:
         return fresh
 
     def _policy(self, item: dict, payload: dict, comment: str, stored: dict) -> dict:
-        path = self._root() / "projects" / item["project_id"] / "POLICY.md"
+        path = employees.policy_path(self._root(), item["project_id"])
         return self._replace_file(path, payload, lambda tx: self._write_decision(tx, item, "approve", comment, stored))
 
     @staticmethod
@@ -1255,7 +1266,11 @@ class Inbox:
 
     def _marks(self, item: dict) -> None:
         """`judgment_marks` with a `should_have_asked`: HR's 1:1 room and its chat turn; with nobody in HR, the
-        system room (§5.5)."""
+        system room (§5.5, H-6). The text carries what HR writes the amendment from: the employee's id, the
+        project's id, the judgments as the employee wrote them and the id of this review, which HR gives as
+        `source_inbox_id`. With nobody in HR — or an HR employee without a 1:1 room, which the line says apart —
+        no amendment is filed: the owner changes the guide or the policy
+        (REST), and an HR hired later is not told of marks from before."""
         if item["kind"] != "final_review":
             return
         calls = (item["payload"] or {}).get("judgment_calls") or []
@@ -1264,15 +1279,33 @@ class Inbox:
         if not flagged:
             return
         task = self.store.get_task(item["task_id"]) or {}
+        who = self.store.get_employee(task["assignee_id"]) if task.get("assignee_id") else None
+        project_id = item.get("project_id") or task.get("project_id")
         lines = [_compose({**item, "decision_comment": ""}, "묻지 않고 처리한 판단에 '물어봤어야 함' 표시가 붙었다."),
-                 f"작업: {task.get('title', '')} ({item['task_id']})"]
+                 f"작업: {task.get('title', '')} ({item['task_id']})",
+                 f"담당 직원: {who['name']} (id {who['id']})" if who else "담당 직원: 없음"]
+        if project_id:
+            lines.append(f"프로젝트: {project_id}")
+        lines.append("표시된 판단:")
         for mark in flagged:
             call = calls[mark["index"]]
             lines.append(f"- {call.get('text', '')} (이유: {call.get('why', '')})")
         hr = self._hr()
         room = self._dm_room(hr["id"]) if hr else None
         if room is None:
+            lines.append("인사 직원이 없어 수정안은 올라가지 않는다 — owner 가 직원 지침이나 프로젝트 정책을 직접 고친다."
+                         if hr is None else
+                         f"인사 직원 {hr['name']}의 1:1 방이 없어 인사에게 알리지 못했다 — owner 가 직원 지침이나 프로젝트 정책을 직접 고친다.")
             self._say(self.store.get_room(SYSTEM_ROOM), "\n".join(lines), self._meta(item))
             return
+        lines.append(f"할 일: 이 판단을 앞으로 묻고 하도록 수정안을 올린다. 검수 결재 id 는 `{item['id']}` 다 — 수정안을 올릴 때 "
+                     "`source_inbox_id` 에 그대로 적는다.")
+        if who:
+            lines.append(f"- 직원 지침의 '결재 기준' 절을 고친다: employee_draft(target_employee_id=\"{who['id']}\", "
+                         "file=\"GUIDE.md\", guide_md=<고친 전체 본문>) 로 초안을 만들고 employee_submit(draft_id, reason, "
+                         f"source_inbox_id=\"{item['id']}\") 로 올린다.")
+        if project_id:
+            lines.append(f"- 프로젝트 전체의 기준이면 정책을 고친다: policy_draft(project_id=\"{project_id}\", policy_md=<고친 전체 "
+                         f"본문>, reason=…, submit=True, source_inbox_id=\"{item['id']}\").")
         self._say(room, "\n".join(lines), self._meta(item))
         self.hooks.chat_turn(hr["id"], room["id"])

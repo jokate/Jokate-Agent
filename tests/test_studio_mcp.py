@@ -22,7 +22,9 @@ from test_studio_tools import desk, failed  # noqa: F401 - `desk` is that file's
 
 ROOT = Path(__file__).resolve().parent.parent
 YAML = "version: 1\ndepartment: program\n"
-DRAFT = dict(name="하늘", department_id="program", persona_md="# 하늘\n", guide_md="# 지침\n", employee_yaml=YAML)
+GUIDE = "# 지침\n\n## 결재 기준\n\n- 묻고 한다: 구조를 바꾸는 선택\n- 알아서 한다: 없음\n"
+NEWER = "# 지침\n먼저 묻는다\n\n## 결재 기준\n\n- 묻고 한다: 구조를 바꾸는 선택\n- 알아서 한다: 없음\n"
+DRAFT = dict(name="하늘", department_id="program", persona_md="# 하늘\n", guide_md=GUIDE, employee_yaml=YAML)
 GONE = "2026-10-11T09:00:00"
 
 
@@ -547,7 +549,7 @@ def test_an_amendment_is_drafted_against_the_file_of_now(desk, studio_dir):  # n
     guide = studio_dir / "employees" / target / "GUIDE.md"
     guide.parent.mkdir(parents=True)
     guide.write_bytes("# 지침\n묻지 않는다\n".encode("utf-8"))
-    amend = dict(target_employee_id=target, file="GUIDE.md", guide_md="# 지침\n먼저 묻는다\n")
+    amend = dict(target_employee_id=target, file="GUIDE.md", guide_md=NEWER)
     failed(desk.call("employee_draft", token, **{**amend, "target_employee_id": "emp_nobody"}), "not_found")
     assert failed(desk.call("employee_draft", token, **{**amend, "file": "MEMORY.md"}),
                   "missing_fields")["fields"] == ["file"]
@@ -571,7 +573,7 @@ def test_an_amendment_is_drafted_against_the_file_of_now(desk, studio_dir):  # n
         desk.call("employee_submit", token, draft_id=out["draft_id"], reason="물어야 했다")["inbox_id"])
     payload = item["payload"]
     assert (payload["action"], payload["target_employee_id"], payload["file"], payload["new_text"]) == (
-        "guide_amend", target, "GUIDE.md", "# 지침\n먼저 묻는다\n")
+        "guide_amend", target, "GUIDE.md", NEWER)
     assert payload["base_sha256"] == hashlib.sha256(b"# changed by the owner\n").hexdigest()
     assert item["project_id"] == desk.w.pid and "+먼저 묻는다" in payload["diff"]
 

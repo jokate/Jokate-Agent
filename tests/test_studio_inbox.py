@@ -650,6 +650,17 @@ def test_the_mark_goes_when_the_marked_task_leaves_what_it_had_started(world, ru
     assert len(lines) == 1
 
 
+def test_an_hr_employee_without_a_dm_room_is_told_apart_from_no_hr(world):
+    marks = [{"index": 0, "mark": "should_have_asked"}]
+    world.store.create_employee("인사팀장", "hr")  # in service, but nobody made its 1:1 room
+    task, item = world.review()
+    ok(world.decide(item, "pass", data={"judgment_marks": marks}))
+    note = world.said("room_system")[-1]
+    assert "1:1 방이 없어" in note["body"] and "인사팀장" in note["body"] and task["id"] in note["body"]
+    assert "인사 직원이 없어" not in note["body"] and "source_inbox_id" not in note["body"]
+    assert note["meta"]["inbox_id"] == item["id"] and world.hk.calls == []
+
+
 def test_judgment_marks_reach_hr_or_the_system_room(world):
     marks = [{"index": 0, "mark": "should_have_asked"}, {"index": 1, "mark": "ok"}]
     task, item = world.review()
@@ -661,10 +672,14 @@ def test_judgment_marks_reach_hr_or_the_system_room(world):
     note = world.said("room_system")[-1]  # nobody in HR yet: the system room is told
     assert "점프 높이를 1.5배로" in note["body"] and "입력 버퍼" not in note["body"] and task["id"] in note["body"]
     assert note["meta"]["inbox_id"] == item["id"] and world.hk.calls == []
+    assert "인사 직원이 없어 수정안은 올라가지 않는다" in note["body"] and "source_inbox_id" not in note["body"]
+    assert f"id {task['assignee_id']}" in note["body"] and f"프로젝트: {world.pid}" in note["body"]  # H-6 (2)
 
     hr, hr_dm = world.hr()
     _, item = world.review()
     ok(world.decide(item, "rework", comment="다시", data={"judgment_marks": marks}))
+    text = world.said(hr_dm)[-1]["body"]
+    assert f'source_inbox_id="{item["id"]}"' in text and "인사 직원이 없어" not in text
     assert "점프 높이를 1.5배로" in world.said(hr_dm)[-1]["body"] and ("chat_turn", hr, hr_dm) in world.hk.calls
     _, item = world.review()
     ok(world.decide(item, "pass", data={"judgment_marks": marks[1:]}))  # nothing to learn from an `ok`

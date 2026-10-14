@@ -16,7 +16,7 @@ from test_studio_tools import bearer
 
 YAML = "version: 1\ndepartment: program\nchat: {model: sonnet, effort: medium}\n"  # what a draft of these tests writes
 PERSONA = "# 하늘\n\n게임 프로젝트의 프로그래머다. 짧게 답한다.\n"
-GUIDE = "# 지침\n\n- 맡은 일: 전투 코드\n"
+GUIDE = ("# 지침\n\n- 맡은 일: 전투 코드\n\n## 결재 기준\n\n- 묻고 한다: 구조를 바꾸는 선택\n- 알아서 한다: 이름 · 주석\n")
 TITLE = f"===== {employees.HIRING_TITLE} ====="
 
 
@@ -52,6 +52,10 @@ class Office:
         self.desk = Desk(lab, monkeypatch, self.waiting.append)
         studio_on(self.desk)
         self.lab, self.store, self.pid = lab, lab.store, lab.world.pid
+        folder = lab.tmp / "harnessed"  # a program employee is placed only in a project the harness is laid in
+        (folder / "Docs").mkdir(parents=True)
+        (folder / "CLAUDE.md").write_text("# rules", encoding="utf-8")
+        lab.store.update_project(self.pid, path=str(folder))
         made = api.ensure_hr()  # what server.py calls at its start
         assert made is not None and made["id"] == employees.HR_ID
         [room] = self.store.list_rooms(kind="dm", employee_id=employees.HR_ID)
@@ -302,4 +306,5 @@ def test_a_start_names_an_hr_guide_made_before_the_section_and_leaves_it(office,
     assert api.ensure_hr() is None  # the server starts again
     [line] = warned
     assert office.hr in line and "GUIDE.md" in line and employees.HIRING_TITLE in line
-    assert guide.read_bytes() == old  # said in the log, never written over (§3.15)
+    # said in the log and not written over (§3.15); H-6 only adds the '프로젝트 정책' section after the owner's text
+    assert guide.read_bytes().startswith(old) and b"policy_draft" in guide.read_bytes()

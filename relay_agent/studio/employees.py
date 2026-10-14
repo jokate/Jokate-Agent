@@ -49,6 +49,10 @@ MEMORY_LIMIT = 4096  # bytes of UTF-8 (§9.1)
 SUMMARY_MESSAGES = 20
 SUMMARY_CHARS = 200
 SECTIONS = ("PERSONA.md", "GUIDE.md", "MEMORY.md", "프로젝트 정책 (POLICY.md)", "방의 최근 글")  # §9.1: this order
+APPROVAL_RULE_TITLE = "결재 규칙"  # H-6: after the policy, before the room's recent messages — only where a project is set
+APPROVAL_RULE = ("무엇을 바꾸기 전에 위 프로젝트 정책(있다면)과 GUIDE.md 의 '결재 기준'에 비춰 본다. 'X 는 결재'처럼 "
+                 "결재를 받고 하라고 적힌 일이거나 '묻고 한다'에 드는 일이면 바꾸지 않는다. `ask_owner`(kind=approval)로 "
+                 "무엇을 · 왜 · 안 하면 어떻게 되는지를 올리고 이 턴을 끝낸다. 결정은 이 방이나 작업방으로 온다.")
 SEED_ID = "emp_5eed0001"
 SEED_NAME = "시드"  # provisional, as are the files of SEED_DIR
 SEED_DEPARTMENT = "program"
@@ -271,6 +275,11 @@ def folder(studio_dir: Path | str, employee_id: str) -> Path:
     return Path(studio_dir) / "employees" / employee_id
 
 
+def policy_path(studio_dir: Path | str, project_id: str) -> Path:
+    """The one place the path of a project's POLICY.md is put together (§2.2)."""
+    return Path(studio_dir) / "projects" / project_id / "POLICY.md"
+
+
 def _read(path: Path) -> str | None:
     try:
         return path.read_text(encoding="utf-8") if path.is_file() else None
@@ -403,11 +412,13 @@ def room_summary(messages: Iterable[dict], names: dict[str, str] | None = None) 
 
 
 def assemble(persona: str | None, guide: str | None, memory: str | None, policy: str | None = None,
-             summary: str | None = None) -> str:
+             summary: str | None = None, *, rule: str | None = None) -> str:
     """The employee's part of a prompt, in the order of §9.1: PERSONA.md -> GUIDE.md -> MEMORY.md (clipped) ->
-    the project's policy -> the room's recent messages. An empty part is left out."""
-    texts = (persona, guide, clip_memory(memory or ""), policy, summary)
-    return "\n\n".join(f"===== {title} =====\n{text.strip()}" for title, text in zip(SECTIONS, texts)
+    the project's policy -> the approval rule (H-6, `rule`) -> the room's recent messages. An empty part is
+    left out."""
+    titles = SECTIONS[:4] + (APPROVAL_RULE_TITLE,) + SECTIONS[4:]
+    texts = (persona, guide, clip_memory(memory or ""), policy, rule, summary)
+    return "\n\n".join(f"===== {title} =====\n{text.strip()}" for title, text in zip(titles, texts)
                        if text and text.strip())
 
 
@@ -415,12 +426,13 @@ def prompt_for(store: StudioStore, studio_dir: Path | str, employee: dict, room_
                project_id: str | None = None) -> str:
     """`assemble()` from what is on disk and in the room now. `employee.yaml` is not part of it (§9.1)."""
     texts = read_files(studio_dir, employee["id"])
-    policy = _read(Path(studio_dir) / "projects" / project_id / "POLICY.md") if project_id else None
+    policy = _read(policy_path(studio_dir, project_id)) if project_id else None
     summary = ""
     if room_id:
         names = {row["id"]: row["name"] for row in store.list_employees(include_retired=True)}
         summary = room_summary(store.list_messages(room_id, limit=SUMMARY_MESSAGES), names)
-    return assemble(texts["PERSONA.md"], texts["GUIDE.md"], texts["MEMORY.md"], policy, summary)
+    return assemble(texts["PERSONA.md"], texts["GUIDE.md"], texts["MEMORY.md"], policy, summary,
+                    rule=APPROVAL_RULE if project_id else None)
 
 
 # --- the derived status (§4.9) ------------------------------------------------------------------------------
@@ -663,6 +675,50 @@ def part_proposal_problems(draft: dict, parts: list[dict], checks: Checks) -> li
 
 HANDOVER_TITLE = "## 인계"
 _APPROVAL_TITLE = "## 결재 기준"
+_APPROVAL_FIXED = "알아서 한 판단은 검수를 올릴 때 적는다."
+_APPROVAL_LABELS = ("묻고 한다", "알아서 한다")
+
+
+def approval_problems(guide: str) -> list[dict]:
+    """H-6 (2): the '결재 기준' section of a hire's GUIDE.md must be filled in. A section that is not there is
+    `approval_section_missing`; one that is the empty frame of the part template is `approval_section_empty`.
+    Empty: a line `- 묻고 한다…:` or `- 알아서 한다:` that ends at its colon with no indented line under it, or no
+    content line at all besides the fixed sentence. A section an owner or HR wrote in its own form passes as long as
+    it has content; 'nothing' is written as `- 알아서 한다: 없음`."""
+    lines = (guide or "").splitlines()
+    start = next((i for i, line in enumerate(lines) if line.startswith(_APPROVAL_TITLE)), None)
+    if start is None:
+        return [_problem("approval_section_missing", f"지침(GUIDE.md)에 `{_APPROVAL_TITLE}` 절이 없다 — 무엇을 묻고 하고 "
+                         "무엇을 알아서 하는지 적는다")]
+    end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("## ")), len(lines))
+    empty: list[str] = []
+    content = 0
+    current: tuple[str, bool] | None = None  # (label, it has content yet) of the label line being read
+    for line in lines[start + 1:end] + ["- "]:  # the sentinel closes the last label
+        if not line.strip():
+            continue
+        if line[0] not in " \t":
+            if current is not None and not current[1]:
+                empty.append(current[0])
+            current = None
+            text = line.strip()
+            if text.removeprefix("-").strip() in ("", _APPROVAL_FIXED):
+                continue
+            label = next((name for name in _APPROVAL_LABELS if text.startswith(f"- {name}")), None)
+            if label is not None and text.endswith((":", "：")):
+                current = (label, False)
+            else:
+                content += 1
+        else:
+            content += 1
+            if current is not None:
+                current = (current[0], True)
+    if not empty and content:
+        return []
+    names = " · ".join(f"`{name}`" for name in dict.fromkeys(empty))
+    why = f"{names} 항목이 비었다" if empty else "내용이 없다"
+    return [_problem("approval_section_empty", f"지침(GUIDE.md)의 `{_APPROVAL_TITLE}` 절이 비어 있다: {why}. "
+                     "채우거나, 해당이 없으면 `없음`이라고 적는다")]
 
 
 def with_handover(guide: str, original: str) -> str:
@@ -685,6 +741,54 @@ def with_handover(guide: str, original: str) -> str:
     if at is None:
         return guide.rstrip() + "\n\n" + section + "\n"
     return "".join(guide_lines[:at]).rstrip() + "\n\n" + section + "\n\n" + "".join(guide_lines[at:])
+
+
+POLICY_TALK_TITLE = "## 프로젝트 정책"
+
+
+def with_policy_talk(guide: str, original: str) -> str:
+    """H-6: `guide` with the '프로젝트 정책' section of `original` (the order of the policy talk) added, only when
+    `original` has one and `guide` has a value but neither a line that starts `## 프로젝트 정책` nor the word
+    `policy_draft`. The section goes before the first `## 새 직원 GUIDE 틀` line, else at the end; the rest of
+    `guide` is not changed, so what an owner rewrote stays. Idempotent: the result has the word."""
+    if not guide.strip() or "policy_draft" in guide:
+        return guide
+    guide_lines = guide.splitlines(keepends=True)
+    if any(line.startswith(POLICY_TALK_TITLE) for line in guide_lines):
+        return guide
+    lines = original.splitlines(keepends=True)
+    start = next((i for i, line in enumerate(lines) if line.startswith(POLICY_TALK_TITLE)), None)
+    if start is None:
+        return guide
+    end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("## ")), len(lines))
+    section = "".join(lines[start:end]).strip()
+    at = next((i for i, line in enumerate(guide_lines) if line.startswith("## 새 직원 GUIDE 틀")), None)
+    if at is None:
+        return guide.rstrip() + "\n\n" + section + "\n"
+    return "".join(guide_lines[:at]).rstrip() + "\n\n" + section + "\n\n" + "".join(guide_lines[at:])
+
+
+def add_policy_talk(store: StudioStore, studio_dir: Path | str, *,
+                    write: Callable[[Path, str], None] | None = None) -> list[str]:
+    """`with_policy_talk` on the GUIDE.md of every HR employee in service whose guide lacks the section. Returns
+    the ids that were changed. A guide that is not there or cannot be read is skipped. `write(folder, text)`
+    writes the file (default: plain write) — the caller commits."""
+    original = hr_texts().get("GUIDE.md", "")
+    done = []
+    for row in store.list_employees(department_id=HR_DEPARTMENT):
+        target = folder(studio_dir, row["id"]) / "GUIDE.md"
+        text = _read(target)
+        if text is None:
+            continue
+        fresh = with_policy_talk(text, original)
+        if fresh == text:
+            continue
+        if write is not None:
+            write(target.parent, fresh)
+        else:
+            target.write_text(fresh, encoding="utf-8", newline="")
+        done.append(row["id"])
+    return done
 
 
 def fill_parts(store: StudioStore) -> list[dict]:

@@ -538,7 +538,8 @@ class TaskMachine:
         when the run cannot be made).
 
         reason   why, for the task_events row. Empty: the comment, the new item's title, or a default sentence.
-        inbox    T4 · T6: the item to file — {"kind" (T4), "title", "payload"}. The requester is the actor.
+        inbox    T4 · T6: the item to file — {"kind" (T4), "title", "payload", "id" (optional: an id the caller made,
+                 `inb_` + 8 hex, for an item whose files are copied under it first)}. The requester is the actor.
         inbox_id T1 · T2 · T5 · T7 · T8 · T9 · T11: the item the caller means; refused if another one is pending.
         decision T5: required, a value of that kind (§5.2). The other deciding rules imply theirs.
         comment · data  stored on the decided item (decision_comment, decision_json).
@@ -745,7 +746,8 @@ class TaskMachine:
         if rule == "T6":
             guard, guard_args = " AND queued_at IS NULL AND assignee_id = ?", (actor.id,)
         cols["updated_at"] = stamp
-        new_id = "inb_" + uuid.uuid4().hex[:8] if rule in CREATES else None
+        new_id = ((inbox or {}).get("id") or "inb_" + uuid.uuid4().hex[:8]) if rule in CREATES else None  # S-11 ②: a
+        # caller whose item brings files makes the id first, so the files are copied under it before the write
         inbox_id = new_id or (pending["id"] if pending else None)
         if inbox_id:
             detail["inbox_id"] = inbox_id
