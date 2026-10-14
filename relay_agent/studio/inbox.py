@@ -761,6 +761,8 @@ class Inbox:
             return {"inbox": self._decide_hire(item, decision, comment, data, via), "task": None}
         if item["kind"] == RECOMMEND:
             return {"inbox": self._decide_recommendation(item, decision, comment, data, via), "task": None}
+        if item["task_id"] is None and (item["payload"] or {}).get("stop_reason") == "usage_hold" and item["kind"] == "budget":
+            return {"inbox": self._decide_hold(item, decision, comment, data, via), "task": None}
         if item["task_id"] is None:
             return {"inbox": self._decide_run(item, decision, comment, data, via), "task": None}
         return self._decide_task(item, decision, comment, data, via)
@@ -882,6 +884,15 @@ class Inbox:
             raise self._closed(fresh)
         self.store.emit(tx, "inbox.decided", {"inbox": fresh}, project_id=fresh["project_id"])
         return fresh
+
+    def _decide_hold(self, item: dict, decision: str, comment: str, data: dict, via: str) -> dict:
+        """V-4: the question of a usage hold (studio/usage.py) has no task and no run — nothing goes to the engine.
+        `approve` lets the queue start tasks again while that window lasts, `reject` keeps it held until the window
+        is reset; either way the item is closed (the caller looks at the queue again). No `revise`."""
+        if decision == "revise":
+            raise InboxError("invalid_decision", "사용량 보류 결재는 approve · reject 만 결정한다", allowed=["approve", "reject"])
+        with self.store.transaction() as tx:
+            return self._write_decision(tx, item, decision, comment, {**data, "via": via})
 
     def _decide_run(self, item: dict, decision: str, comment: str, data: dict, via: str) -> dict:
         """§5.8 나: the decision of a run's stop goes to the engine there and then, so `delivery` stays 'none'.

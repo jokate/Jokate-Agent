@@ -107,6 +107,14 @@ class Config(BaseModel):
     # once, and the owner is pushed at once (V-3 — ARCHITECTURE.md §5.9 디스크 경고). 0 or less = no warning. Read
     # at every look (the server's start, then every ten minutes).
     studio_disk_min_free_gb: float = 5.0
+    # Katae Studio: the usage of a Claude window (0-1; `providers.py` `status`, the windows it gates on) at which the
+    # system room says so once per window and the owner is pushed at once (V-4 — ARCHITECTURE.md §5.9 사용량 한도).
+    # Below `switch_at_utilization` (0.95) so that it is told before the switch. 0 or less = no warning. Read at every
+    # look (every minute).
+    studio_usage_warn_at: float = 0.90
+    # Katae Studio: True = while a window is at `studio_usage_warn_at` the queue does not start a new task (T3) until
+    # the owner approves (a `budget` item, V-4 — ARCHITECTURE.md §4.6). Off by default: the push is all. Read at every look.
+    studio_usage_hold: bool = False
     # Katae Studio: the light model that words the daily report, one call a day ("" = no AI: the three lines are
     # made by rule). An answer that is not the three lines, or a call that fails, leaves the rule's lines too.
     studio_report_model: str = "haiku"

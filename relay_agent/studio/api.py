@@ -67,13 +67,14 @@ from typing import TYPE_CHECKING, Annotated, Any, Callable, Literal
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, StringConstraints
 from starlette.concurrency import run_in_threadpool
 from starlette.requests import HTTPConnection
 
 from . import app_release, creator, devices, employee_git, employees, files, gate, guard, importer, jobs as create_jobs, memory, policy as project_policy
 from . import editor as editor_control
-from . import machine as machine_info, review, sat, staffing, stats, tools, work
+from . import usage
+from . import limits as machine_limits, machine as machine_info, review, sat, staffing, stats, tools, work
 from .inbox import Hooks, Inbox, InboxError
 from .store import StudioStore, StudioStoreError, Tx, now
 from .tasks import (OWNER, STATES, TERMINAL, TEXT_FIELDS, CampaignNotFound, Effects, TaskMachine, TaskNotFound,
@@ -2096,7 +2097,12 @@ def get_inbox_item(id: str, inbox: Inbox = Depends(get_inbox)) -> dict:
 def decide_inbox(id: str, body: Decide, inbox: Inbox = Depends(get_inbox)) -> dict:
     """The one way a decision is made (§5.1): `{inbox, task}`. A second decision of the same item is 409
     `already_decided` with the item as it is now."""
-    return inbox.decide(id, body.decision, comment=body.comment, data=body.data, via=body.via)
+    result = inbox.decide(id, body.decision, comment=body.comment, data=body.data, via=body.via)
+    if usage.is_hold(result["inbox"]):  # V-4: the owner answered the hold of the line — look at it again
+        kick = getattr(_queue, "kick", None)
+        if kick is not None:
+            kick()
+    return result
 
 
 # --- stats (S-13, studio/stats.py) ------------------------------------------------------------------------
@@ -3166,6 +3172,40 @@ def machine_brief() -> dict:
 @router.get("/machine")
 def read_machine(store: StudioStore = Depends(get_store)) -> dict:
     return machine_info.report(_config(), store.list_projects(), _machine)
+
+
+class MachineLimits(BaseModel):
+    """V-4: the limits the owner may change, each a whole number in its range — a text, a bool, 0 or a negative
+    one is 422. At least one is named."""
+    model_config = ConfigDict(extra="forbid")
+
+    max_runs: StrictInt | None = Field(default=None, ge=1, le=20)
+    max_exchanges: StrictInt | None = Field(default=None, ge=1, le=200)
+    group_max_exchanges: StrictInt | None = Field(default=None, ge=1, le=100)
+
+
+@router.get("/machine/limits")
+def read_machine_limits() -> dict:
+    """The three limits the owner may change, as the running server holds them (§6.4; `GET /studio/machine` has them too, but runs the checks of the computer)."""
+    return machine_limits.read(_config())
+
+
+@router.patch("/machine/limits")
+def change_machine_limits(body: MachineLimits) -> dict:
+    """V-4 (§4.6 · §6.4): the named limits take effect at once — the line and the exchange checks read them at every use — and are kept in this machine's settings file (`relay.config.local.yaml`), so they hold after a restart. The answer is the three limits afterwards. None named: 422. The file cannot be written: 500 and nothing changed."""
+    changes = body.model_dump(exclude_none=True)
+    if not changes:
+        raise HTTPException(422, "바꿀 한도가 없습니다 (max_runs · max_exchanges · group_max_exchanges)")
+    try:
+        done = machine_limits.save(_config(), changes)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    except OSError as e:
+        raise HTTPException(500, f"한도를 설정 파일에 적지 못했습니다: {e}")
+    kick = getattr(_queue, "kick", None)
+    if kick is not None and "max_runs" in changes:
+        kick()  # a larger number of slots starts what waited
+    return done
 
 
 # --- devices: pairing · list · revoke (§6.5, M-2) ---------------------------------------------------------

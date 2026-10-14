@@ -506,6 +506,53 @@
         "title": "HTTPValidationError",
         "type": "object"
       },
+      "MachineLimits": {
+        "additionalProperties": false,
+        "description": "V-4: the limits the owner may change, each a whole number in its range — a text, a bool, 0 or a negative\none is 422. At least one is named.",
+        "properties": {
+          "group_max_exchanges": {
+            "anyOf": [
+              {
+                "maximum": 100.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Group Max Exchanges"
+          },
+          "max_exchanges": {
+            "anyOf": [
+              {
+                "maximum": 200.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Exchanges"
+          },
+          "max_runs": {
+            "anyOf": [
+              {
+                "maximum": 20.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Runs"
+          }
+        },
+        "title": "MachineLimits",
+        "type": "object"
+      },
       "McpAskOwner": {
         "additionalProperties": false,
         "description": "`kind` is question · choice · approval (§1.5). question: body, options `{id, label}`. choice: body,\noptions `{id, label, detail, figure}` (two or more), recommended, fix_points. approval: what, why, if_not,\npolicy_ref.",
@@ -3689,6 +3736,72 @@
           }
         },
         "summary": "Read Machine",
+        "tags": [
+          "studio"
+        ]
+      }
+    },
+    "/studio/machine/limits": {
+      "get": {
+        "description": "The three limits the owner may change, as the running server holds them (§6.4; `GET /studio/machine` has them too, but runs the checks of the computer).",
+        "operationId": "read_machine_limits_studio_machine_limits_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Read Machine Limits Studio Machine Limits Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Read Machine Limits",
+        "tags": [
+          "studio"
+        ]
+      },
+      "patch": {
+        "description": "V-4 (§4.6 · §6.4): the named limits take effect at once — the line and the exchange checks read them at every use — and are kept in this machine's settings file (`relay.config.local.yaml`), so they hold after a restart. The answer is the three limits afterwards. None named: 422. The file cannot be written: 500 and nothing changed.",
+        "operationId": "change_machine_limits_studio_machine_limits_patch",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MachineLimits"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Change Machine Limits Studio Machine Limits Patch",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Change Machine Limits",
         "tags": [
           "studio"
         ]

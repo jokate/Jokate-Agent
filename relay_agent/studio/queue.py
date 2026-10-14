@@ -13,6 +13,8 @@ advanced a run does when it is back, how a run goes on), §6.4 (`start` · `stop
   `retry_after` seconds), and when its run cannot be taken up (gone, `done` or `running` — it stays in line).
 - With its slot a backlog task does T3 and its new run is advanced; a working task (T5 · T8) leaves the line
   and its run goes on — `approve` + `advance` from `awaiting_approval`, else `advance(resume=True)`.
+- V-4: while `hold()` is true (`studio/usage.py`: the usage window is at its threshold and the owner has not approved)
+  a backlog task is not started; a working one is taken up as before. The owner is asked once (`on_held`).
 - `kick()` is called when a task joins the line (`WorkEffects.after`), when a slot is let go (the end of
   `_work`) and when the server starts (server.py). It never raises.
 - `stop()` is the owner's (§6.4): a task leaves the line; a working one ends in blocked — its run is cancelled
@@ -78,8 +80,12 @@ class TaskQueue:
 
     def __init__(self, engine, effects, inbox: Callable[[], Any], *, limit: Callable[[], int] | int = 3,
                  spawn: Callable[[Callable[[], None]], Any] | None = None, retry_after: float | None = 5.0,
-                 awake: studio_awake.Awake | None = None):
+                 awake: studio_awake.Awake | None = None, hold: Callable[[], bool] | None = None,
+                 on_held: Callable[[], Any] | None = None):
         self.engine, self.effects, self.inbox = engine, effects, inbox
+        # V-4: `hold()` True = no backlog task is started (T3) now — asked at every look; a task that works already
+        # goes on. `on_held()` is called (outside the lock) after a look that held a task back: it asks the owner.
+        self.hold, self.on_held = hold, on_held
         self.awake = awake or studio_awake.KEEPER  # V-3: the PC stays awake while a slot's thread is at work
         self.limit = limit if callable(limit) else (lambda: limit)
         self.spawn = spawn or _thread
@@ -125,12 +131,17 @@ class TaskQueue:
         slot. Never raises: what goes wrong is logged, and the line is looked at again at the next occasion."""
         try:
             waiting = self._stopped_elsewhere()  # first: a run that stopped elsewhere may put its task in line
-            picked, busy = self._pick()
+            picked, busy, deferred = self._pick()
         except Exception:  # noqa: BLE001 - a commit, a thread's end or the server's start called this
             log.exception("studio: 줄을 보지 못했다")
             return []
         if busy or waiting:
             self._later()
+        if deferred and self.on_held is not None:
+            try:
+                self.on_held()
+            except Exception:  # noqa: BLE001 - the owner is asked at the next look
+                log.exception("studio: 보류한 작업의 결재를 올리지 못했다")
         for task in picked:
             try:
                 self.spawn(lambda task_id=task["id"]: self._work(task_id))
@@ -140,11 +151,20 @@ class TaskQueue:
                     self._slots.pop(task["id"], None)
         return [task["id"] for task in picked]
 
-    def _pick(self) -> tuple[list[dict], bool]:
+    def _held(self) -> bool:
+        try:
+            return bool(self.hold()) if self.hold is not None else False
+        except Exception:  # noqa: BLE001 - a hold that cannot be told does not stop the line
+            log.exception("studio: 사용량 보류를 확인하지 못했다")
+            return False
+
+    def _pick(self) -> tuple[list[dict], bool, bool]:
+        """(the tasks that got a slot, a folder was held from outside, a backlog task was held back by `hold`)."""
         inbox = self.inbox()
         if inbox is None:
-            return [], False
-        picked, busy = [], False
+            return [], False, False
+        held = self._held()  # outside the lock: the answer reads the store
+        picked, busy, deferred = [], False, False
         with self._lock:
             line = inbox.store.list_queued_tasks()
             self._stuck = {task["id"]: self._stuck[task["id"]] for task in line if task["id"] in self._stuck}
@@ -154,6 +174,9 @@ class TaskQueue:
                     break
                 if task["id"] in self._slots or task["status"] not in LINED:
                     continue  # its run has not stopped yet (§4.6 '건너뛴다')
+                if held and task["status"] == "backlog":
+                    deferred = True  # V-4: T3 waits for the owner's approval
+                    continue
                 if self._stuck.get(task["id"]) == task["queued_at"]:
                     continue
                 if any(slot.project_id == task["project_id"] for slot in self._slots.values()):
@@ -166,7 +189,7 @@ class TaskQueue:
                     continue
                 self._slots[task["id"]] = Slot(task["project_id"], run_id)
                 picked.append(task)
-        return picked, busy
+        return picked, busy, deferred
 
     def _status(self, run_id: str | None) -> str | None:
         """That run's status on this engine; None when it has no such run."""

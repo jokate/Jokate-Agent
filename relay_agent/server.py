@@ -989,7 +989,12 @@ studio_api.use_effects(task_runs, models=task_runs.catalog)
 # thread of its own. The import is down here too: the lines above are cited by number.
 from .studio import queue as studio_queue  # noqa: E402
 
-task_queue = studio_queue.TaskQueue(engine, task_runs, studio_api.run_inbox, limit=lambda: cfg.studio_max_runs)
+# V-4: `usage_watch` (down at the V-4 block) holds the line while a usage window is at its threshold; its answer is
+# asked at every look, so the queue gets the two functions before the watch exists.
+_usage: list = []
+task_queue = studio_queue.TaskQueue(engine, task_runs, studio_api.run_inbox, limit=lambda: cfg.studio_max_runs,
+                                    hold=lambda: bool(_usage) and _usage[0].held(),
+                                    on_held=lambda: _usage[0].ask() if _usage else None)
 task_runs.kick, task_runs.holds = task_queue.kick, task_queue.holds  # holds: T7 · T9 · T11 wait for the slot (S-12)
 studio_api.use_queue(task_queue)
 
@@ -1115,6 +1120,28 @@ def start_awake_and_disk() -> None:
 def stop_awake_and_disk() -> None:
     disk_watch.unwatch()
     studio_awake.KEEPER.disable()
+
+
+# V-4 (design/studio/ARCHITECTURE.md §4.6 · §5.9): the Claude usage window (`providers.py` status — its 95% switch is
+# not touched) is looked at every minute. At `cfg.studio_usage_warn_at` the system room says so once per window and
+# the owner is pushed at once (studio/usage.py); with `cfg.studio_usage_hold` the line also starts no new task until
+# the owner approves.
+from .studio import usage as studio_usage  # noqa: E402
+
+usage_watch = studio_usage.UsageWatch(
+    studio_api.get_store, status=lambda: [engine.providers.status("claude")], warn_at=lambda: cfg.studio_usage_warn_at,
+    hold_on=lambda: cfg.studio_usage_hold, kick=lambda: task_queue.kick())
+_usage.append(usage_watch)
+
+
+@app.on_event("startup")
+def start_usage_watch() -> None:
+    usage_watch.watch()
+
+
+@app.on_event("shutdown")
+def stop_usage_watch() -> None:
+    usage_watch.unwatch()
 
 
 # Making a new UE project (M-8; design/studio/ARCHITECTURE.md §6.4 · §7.4): the `register` step of a job writes the
