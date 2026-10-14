@@ -92,7 +92,9 @@ def check(caller: Caller, tool: str, command: str, rule_id: str, *, machine: Tas
 # --- what a stage of a studio run is given (§10.1, §10.2, §11.4) -----------------------------------------------
 def profile(mode: str) -> list[str]:
     """`studio-full` (§10.1): what is approved ahead for a run of that `mode`. It adds no tool — a stage whose
-    relay gives it no Bash gets none. The attached MCP servers are approved by the runner."""
+    relay gives it no Bash gets none; the engine only keeps a relay's Bash that a repo without a verification
+    command would otherwise drop, when this profile approves Bash. The attached MCP servers are approved by the
+    runner."""
     return list(WORK_TOOLS if mode == "work" else TURN_TOOLS)
 
 

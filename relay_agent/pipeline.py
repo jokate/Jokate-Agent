@@ -1803,8 +1803,14 @@ class RelayEngine:
                 except Exception as e:  # noqa: BLE001 - closed side: a guarded run does not go on without its guard
                     return self._fail(run, stage.name, f"가드를 걸지 못했습니다 — {type(e).__name__}: {e}"[:300])
                 if guard:  # pre-approvals, the hook's settings file, where the hook asks, Claude Code only
+                    # a repo without a verification command lost Bash to Grep/Glob (_stage_tools). A guarded run
+                    # whose profile approves Bash keeps the Bash its relay's stage lists: the hook judges each
+                    # command (owner's decision of 2026-10-14, §10.1)
+                    kept = (call.tools + ["Bash"] if call.tools and "Bash" not in call.tools
+                            and "Bash" in (stage.tools or []) and "Bash" in (guard.get("allowed_tools") or [])
+                            else call.tools)
                     call = replace(
-                        call, claude_only=bool(guard.get("claude_only")),
+                        call, claude_only=bool(guard.get("claude_only")), tools=kept,
                         allowed_tools=call.allowed_tools + [t for t in guard.get("allowed_tools") or []
                                                             if t not in call.allowed_tools],
                         env={**call.env, **(guard.get("env") or {})},

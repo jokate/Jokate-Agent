@@ -305,6 +305,44 @@ def test_a_guarded_stage_runs_on_claude_code_or_not_at_all(tmp_path, monkeypatch
     assert engine.advance(mock.id).status == "done" and runner.seen[-1].claude_only is True
 
 
+def test_a_guarded_task_run_keeps_the_bash_its_relay_gave(desk, tmp_path, monkeypatch):  # noqa: F811
+    """A repo without a verification command loses Bash to Grep · Glob (`pipeline._stage_tools`). A studio task
+    run keeps the Bash its relay's stage lists — the profile approves it and the hook judges each command (§10.1,
+    owner's decision of 2026-10-14). A chat turn, whose profile has no Bash, a stage its relay gives no Bash and
+    every run outside studio stay as they were."""
+    engine, relay, runner, _ = engine_setup(tmp_path, monkeypatch)
+    monkeypatch.delenv("KATAE_TOKEN", raising=False)
+    shell = tmp_path / "shell.yaml"
+    shell.write_text("name: s\nworkspace: none\nstages:\n  - {name: build, provider: mock, prompt: role.md, "
+                     "tools: [Read, Bash]}\n", encoding="utf-8")
+    engine.guard_stage = api.guard_stage  # what server.py registers
+    engine.advance(engine.create(shell, "g", repo="game").id)
+    outside = runner.seen[-1].tools
+    assert "Bash" not in outside and "Grep" in outside  # the repo has no verification command: as it was
+
+    desk.turn(desk.w.emp)  # a chat turn's run: its profile approves no Bash
+    turn = engine.create(shell, "g", repo="game")
+    api.track_run(turn.id, mode="chat", employee_id=desk.w.emp, room_id=desk.dms[desk.w.emp])
+    desk.tracked.append(turn.id)
+    engine.advance(turn.id)
+    assert runner.seen[-1].tools == outside
+
+    task, work = desk.working(), engine.create(shell, "g", repo="game")  # a task run: tasks.run_id is the ledger
+    with desk.store.transaction() as tx:
+        tx.exec("UPDATE tasks SET run_id = ? WHERE id = ?", (work.id, task["id"]))
+    engine.advance(work.id)
+    call = runner.seen[-1]
+    assert call.tools == outside + ["Bash"] and "Bash" in call.allowed_tools and call.claude_only
+    args = ClaudeCliRunner(exe="claude").build_args(call, None)
+    assert "Bash" in args[args.index("--tools") + 1].split(",")
+
+    plain = engine.create(relay, "g", repo="game")  # a stage whose relay gives no Bash gets none
+    with desk.store.transaction() as tx:
+        tx.exec("UPDATE tasks SET run_id = ? WHERE id = ?", (plain.id, task["id"]))
+    engine.advance(plain.id)
+    assert "Bash" not in runner.seen[-1].tools and runner.seen[-1].claude_only
+
+
 def test_a_stage_with_the_hook_is_never_started_in_safe_mode(tmp_path):
     def args(**over):
         call = StageCall(stage="s", model=None, effort=None, system="s", prompt="p", cwd=tmp_path, isolate=True, **over)
