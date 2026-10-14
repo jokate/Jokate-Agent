@@ -901,6 +901,16 @@ def test_owner_posts_a_message_once_per_client_msg_id(world):
     assert world.post("room_dep_program", body="파트 공지").status_code == 201  # no mention needed
 
 
+def test_a_device_token_answers_into_a_room_as_the_owner(world):
+    token = "sdt_" + "r" * 43  # the notification's reply (N-3): the same path the app's room uses
+    world.store.create_device("폰", hashlib.sha256(token.encode()).hexdigest())
+    phone = TestClient(world.owner.app, client=("192.168.0.7", 50000), headers={"Authorization": f"Bearer {token}"})
+    r = world.post(client=phone, body="알겠습니다", client_msg_id="n-1")
+    msg = r.json()
+    assert r.status_code == 201 and (msg["room_id"], msg["author_kind"], msg["body"]) == (world.dm["id"], "owner", "알겠습니다")
+    assert world.post(client=phone, body="알겠습니다", client_msg_id="n-1").status_code == 200  # a retry is no second
+
+
 def test_post_refusals_write_nothing(world):
     assert refused(world.post(body="  \n"), 422, "missing_fields")["fields"] == ["body"]
     assert refused(world.post("room_system", body="공지"), 409, "precondition_failed")["failed"] == []

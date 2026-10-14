@@ -485,6 +485,52 @@ def test_a_notification_decides_only_a_plain_approve(world):
     refused(world.decide(review, "pass", via="notification"), 422, "invalid_decision")
 
 
+def phone_of(world):
+    """A paired phone (§6.4): another device with its `sdt_` token and no shared token, as the app's notification
+    button calls (N-3)."""
+    token = "sdt_" + "n" * 43
+    world.store.create_device("폰", hashlib.sha256(token.encode()).hexdigest())
+    return TestClient(world.owner.app, client=("192.168.0.7", 50000), headers={"Authorization": f"Bearer {token}"})
+
+
+def test_a_device_token_approves_from_a_notification(world):
+    phone = phone_of(world)
+    item = world.file("pre_approval")
+    r = phone.post(f"/studio/inbox/{item['id']}/decide", json={"decision": "approve", "via": "notification"})
+    assert ok(r)["inbox"]["decision_data"] == {"via": "notification"} and world.item(item)["status"] == "decided"
+    # the app learns it is late from the same answer it would get anywhere: the item is already decided
+    again = phone.post(f"/studio/inbox/{item['id']}/decide", json={"decision": "approve", "via": "notification"})
+    refused(again, 409, "already_decided")
+    refused(world.decide(item, "approve"), 409, "already_decided")
+
+
+def test_a_device_token_cannot_decide_more_than_a_plain_approve_from_a_notification(world):
+    phone = phone_of(world)
+
+    def send(item, decision, **body):
+        return phone.post(f"/studio/inbox/{item['id']}/decide",
+                          json={"decision": decision, "via": "notification", **body})
+
+    _, review = world.review()
+    refused(send(review, "pass"), 422, "invalid_decision")
+    for kind in ("risky_command", "structure_choice", "question"):
+        refused(send(world.file(kind), "approve"), 422, "invalid_decision")
+    budget = world.file("budget")
+    refused(send(budget, "approve", comment="좋다"), 422, "invalid_decision")
+    refused(send(budget, "approve", data={"edits": {"title": "다른 제목"}}), 422, "invalid_decision")
+    refused(send(budget, "reject"), 422, "invalid_decision")
+    # a hiring recommendation is decided in the app only: "approve" is no choice of its own, and
+    # the two real choices (interview, skip) are refused from a notification by the NOTIFY_OK rule
+    rec = world.box.create("hire_recommendation", SYSTEM, title="아트 파트 채용", project_id=world.pid, payload={
+        "reason": "아트 작업이 쌓인다", "role": "배경 아티스트", "model": "sonnet", "effort": "medium",
+        "department_id": "art", "task_ids": ["task_1"], "numbers": {"waiting": 6, "limit": 5}})
+    assert refused(send(rec, "approve"), 422, "invalid_decision")["allowed"] == ["interview", "skip"]
+    for d in ("interview", "skip"):
+        refused(send(rec, d), 422, "invalid_decision")
+    assert world.item(review)["status"] == world.item(budget)["status"] == world.item(rec)["status"] == "pending"
+    assert ok(send(budget, "approve"))["inbox"]["status"] == "decided"
+
+
 # --- task_proposal: T1 · T2 -------------------------------------------------------------------------------
 def test_a_proposal_approved_with_edits_becomes_a_backlog_task(world):
     first, task = world.task("backlog"), world.task("proposed")

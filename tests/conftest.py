@@ -81,3 +81,14 @@ def no_memory_model_from_a_tests_server(monkeypatch):
     from relay_agent.studio import memory
 
     monkeypatch.setattr(memory, "writer", lambda model: None)
+
+
+@pytest.fixture(autouse=True)
+def no_awake_or_disk_look_from_a_tests_server(monkeypatch):
+    """A test that starts the server app must not ask the real power API to keep this PC awake, nor look at the
+    real disk (V-3, studio/awake.py · studio/disk.py). tests/test_studio_awake.py and tests/test_studio_disk.py keep
+    the real classes and give them a setter, a disk and timers of their own."""
+    from relay_agent.studio import awake, disk
+
+    monkeypatch.setattr(awake.KEEPER, "enable", lambda *args, **kwargs: None)  # this instance only
+    monkeypatch.setattr(disk.DiskWatch, "watch", lambda self, *args, **kwargs: None)

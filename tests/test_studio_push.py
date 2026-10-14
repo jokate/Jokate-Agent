@@ -19,7 +19,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
 
 from relay_agent import notify
-from relay_agent.studio import api, push
+from relay_agent.studio import api, inbox, push
 from relay_agent.studio.store import StudioStore, now
 
 LOAD_KEY = push.load_key  # the real one: conftest.py lets no test read a key file
@@ -122,9 +122,9 @@ def fcm_error(status, code=None, name="INVALID_ARGUMENT", headers=None):
     return httpx.Response(status, json=body, headers=headers)
 
 
-def fcm(token, title, body, link=None, grade="urgent"):
+def fcm(token, title, body, link=None, grade="urgent", **more):
     """One push as FCM HTTP v1 is asked for it (§5.9): the grade is in `data`, the priority and the channel."""
-    data = {"grade": grade, **({"type": link[0], "id": link[1]} if link else {})}
+    data = {"grade": grade, **({"type": link[0], "id": link[1]} if link else {}), **more}
     drawer = {"channel_id": f"katae_{grade}", **({"tag": "katae_digest"} if grade == "digest" else {})}
     return {"token": token, "notification": {"title": title, "body": body}, "data": data,
             "android": {"priority": "HIGH" if grade == "urgent" else "NORMAL", "notification": drawer}}
@@ -278,6 +278,11 @@ def test_a_push_carries_a_title_one_line_the_deep_link_and_its_grade(account, ht
         "priority": "NORMAL", "notification": {"channel_id": "katae_digest", "tag": "katae_digest"}}
     assert sender.send("fcm-1", "제목", "한 줄", grade="loud") == "sent"  # a grade nobody knows: not lost
     assert http.messages()[-1] == fcm("fcm-1", "제목", "한 줄")
+    assert sender.send("fcm-1", "민수", "다 했습니다", {**room, "action": "reply", "room_id": "room_1"}, "quiet") == "sent"
+    assert http.messages()[-1]["data"] == {"grade": "quiet", "type": "room", "id": "room_1", "action": "reply",
+                                           "room_id": "room_1"}  # N-3: every key of the link, as a string
+    assert sender.send("fcm-1", "설계", "승인", {"type": "inbox", "id": 7, "action": "approve"}) == "sent"
+    assert http.messages()[-1]["data"] == {"grade": "urgent", "type": "inbox", "id": "7", "action": "approve"}
 
 
 def test_a_dead_token_is_told_apart_and_not_tried_again(account, http):
@@ -390,7 +395,7 @@ def test_a_new_inbox_item_is_pushed_to_every_device_with_a_token(studio, http):
 
     item = studio.file("로그인 화면 설계")
     assert sorted(http.messages(), key=lambda m: m["token"]) == [
-        fcm(token, "로그인 화면 설계", "설계 승인", ("inbox", item["id"])) for token in ("fcm-1", "fcm-2")]
+        fcm(token, "로그인 화면 설계", "설계 승인", ("inbox", item["id"]), action="approve") for token in ("fcm-1", "fcm-2")]
     assert len(http.calls) == 3  # one access token for both
     assert "승인 대기" not in json.dumps(http.messages(), ensure_ascii=False)  # nothing of the payload
 
@@ -403,7 +408,7 @@ def test_a_new_inbox_item_is_pushed_to_every_device_with_a_token(studio, http):
 
     budget = studio.file("예산을 넘었다", kind="budget", run_id="run_b")
     assert http.messages()[-1]["notification"] == {"title": "예산을 넘었다", "body": "예산"}
-    assert http.messages()[-1]["data"] == {"grade": "urgent", "type": "inbox", "id": budget["id"]}
+    assert http.messages()[-1]["data"] == {"grade": "urgent", "type": "inbox", "id": budget["id"], "action": "approve"}
 
 
 def test_a_dead_token_is_cleared_and_the_others_keep_theirs(studio, http):
@@ -549,7 +554,7 @@ def test_each_trigger_goes_out_with_the_grade_of_the_table(studio, http, monkeyp
     studio.emit("job.finished", {"job_id": "job_3", "kind": "project_create", "status": "cleaned",
                                  "project_id": None, "error": None})                   # the owner had it cleaned away
     assert http.messages() == [
-        fcm("fcm-1", "민수", "로그인 화면을 고쳤습니다", ("room", dm), "quiet"),
+        fcm("fcm-1", "민수", "로그인 화면을 고쳤습니다", ("room", dm), "quiet", action="reply", room_id=dm),
         fcm("fcm-1", "배치 필요", "담당이 없는 작업이 있다", ("task", "task_9")),
         fcm("fcm-1", "실행하지 못함", "턴을 넣지 못했다", ("room", dm)),
         fcm("fcm-1", "일일 보고", "오늘 한 일", ("room", "room_system"), "digest"),
@@ -617,7 +622,7 @@ def test_a_muted_room_keeps_its_employees_words_and_nothing_else(studio, http):
                                                                                  ("inbox", "urgent")]
     studio.store.update_room(dm, muted=False)
     studio.say(dm, "다시 들리는 글", author_id=minsu["id"])
-    assert http.messages()[-1] == fcm("fcm-1", "민수", "다시 들리는 글", ("room", dm), "quiet")
+    assert http.messages()[-1] == fcm("fcm-1", "민수", "다시 들리는 글", ("room", dm), "quiet", action="reply", room_id=dm)
 
 
 def test_quiet_hours_are_read_on_the_devices_own_clock():
@@ -646,8 +651,8 @@ def test_inside_its_quiet_hours_a_device_hears_an_urgent_push_quietly(studio, ht
     studio.clock.at = at("2026-10-12T23:30", 540)
     item = studio.file()
     by = {m["token"]: m for m in http.messages()}
-    assert by["fcm-1"] == fcm("fcm-1", "로그인 화면 설계", "설계 승인", ("inbox", item["id"]), "quiet")  # lowered,
-    assert by["fcm-2"] == fcm("fcm-2", "로그인 화면 설계", "설계 승인", ("inbox", item["id"]))           # not dropped
+    assert by["fcm-1"] == fcm("fcm-1", "로그인 화면 설계", "설계 승인", ("inbox", item["id"]), "quiet", action="approve")  # lowered,
+    assert by["fcm-2"] == fcm("fcm-2", "로그인 화면 설계", "설계 승인", ("inbox", item["id"]), action="approve")           # not dropped
 
     studio.clock.at = at("2026-10-13T07:00", 540)  # the night is over
     studio.file("둘째", run_id="run_b")
@@ -662,7 +667,7 @@ def test_an_item_that_still_waits_is_told_of_again_after_two_hours(studio, http)
     studio.look(made + 7199)
     assert studio.reminded(item) is None and len(http.sent()) == 1
     studio.look(made + 7200)
-    assert http.messages()[-1] == fcm("fcm-1", "로그인 화면 설계", "설계 승인 · 다시 알림", ("inbox", item["id"]))
+    assert http.messages()[-1] == fcm("fcm-1", "로그인 화면 설계", "설계 승인 · 다시 알림", ("inbox", item["id"]), action="approve")
     first = studio.reminded(item)
     assert first == datetime.fromtimestamp(made + 7200).isoformat(timespec="seconds") and len(http.sent()) == 2
     assert len(studio.seen) == 1  # the stamp is no stream event: nothing for the app to draw anew
@@ -690,7 +695,7 @@ def test_a_reminder_passes_over_a_device_in_its_quiet_hours(studio, http):
     due = seconds(item["created_at"]) + 7200
     studio.store.update_device(asleep["id"], settings=hours_around(due))
     studio.look(due)
-    assert http.messages()[2:] == [fcm("fcm-2", "로그인 화면 설계", "설계 승인 · 다시 알림", ("inbox", item["id"]))]
+    assert http.messages()[2:] == [fcm("fcm-2", "로그인 화면 설계", "설계 승인 · 다시 알림", ("inbox", item["id"]), action="approve")]
     first = studio.reminded(item)
     assert first is not None  # one device heard it: the two hours begin anew
 
@@ -731,14 +736,14 @@ def test_an_item_made_inside_the_quiet_hours_is_told_of_again_two_hours_after_it
     studio.store.update_device(asleep["id"], settings=hours_around(moment))
     studio.clock.at = moment
     item = studio.file()
-    assert http.messages() == [fcm("fcm-1", "로그인 화면 설계", "설계 승인", ("inbox", item["id"]), "quiet")]
+    assert http.messages() == [fcm("fcm-1", "로그인 화면 설계", "설계 승인", ("inbox", item["id"]), "quiet", action="approve")]
     made = seconds(item["created_at"])
 
     studio.look(made + 60 * 60 + 60)  # the quiet hours are over: its making was told, quietly — their end is not
     studio.look(made + 7199)
     assert studio.reminded(item) is None and len(http.sent()) == 1
     studio.look(made + 7200)  # counted from its making, not from the end of the quiet hours
-    assert http.messages()[1:] == [fcm("fcm-1", "로그인 화면 설계", "설계 승인 · 다시 알림", ("inbox", item["id"]))]
+    assert http.messages()[1:] == [fcm("fcm-1", "로그인 화면 설계", "설계 승인 · 다시 알림", ("inbox", item["id"]), action="approve")]
     assert studio.reminded(item) == datetime.fromtimestamp(made + 7200).isoformat(timespec="seconds")
 
 
@@ -761,7 +766,7 @@ def test_the_reminders_go_on_from_the_database_after_a_restart(studio, http):
 
         studio.clock.at = made + 7200 + 7200
         assert timers.fire() == 60.0 and again.drain()  # the minute's look: two hours after the reminder
-        assert http.messages()[-1] == fcm("fcm-1", "로그인 화면 설계", "설계 승인 · 다시 알림", ("inbox", item["id"]))
+        assert http.messages()[-1] == fcm("fcm-1", "로그인 화면 설계", "설계 승인 · 다시 알림", ("inbox", item["id"]), action="approve")
         assert len(http.sent()) == 3 and len(timers.waits) == 1  # and the next look is set
 
         again.unwatch()
@@ -836,7 +841,7 @@ def test_the_server_pushes_a_new_inbox_item_once_a_key_is_named(server, key_file
     item = api.run_inbox().file_run("design_approval", "run_push", title="설계 확인", payload=dict(STOP))
     assert server.pusher.drain()
     (url, kw), = http.sent()
-    assert url == SEND_URL and kw["json"] == {"message": fcm("fcm-1", "설계 확인", "설계 승인", ("inbox", item["id"]))}
+    assert url == SEND_URL and kw["json"] == {"message": fcm("fcm-1", "설계 확인", "설계 승인", ("inbox", item["id"]), action="approve")}
 
 
 def test_the_server_looks_at_the_waiting_items_from_its_start_to_its_stop(server, monkeypatch):
@@ -876,11 +881,11 @@ def test_a_room_is_muted_over_rest_and_its_employees_words_are_not_pushed(server
     say("조용한 글")
     item = api.run_inbox().file_run("design_approval", "run_muted", title="설계 확인", payload=dict(STOP))
     assert server.pusher.drain()
-    assert http.messages() == [fcm("fcm-1", "설계 확인", "설계 승인", ("inbox", item["id"]))]  # an item is not muted
+    assert http.messages() == [fcm("fcm-1", "설계 확인", "설계 승인", ("inbox", item["id"]), action="approve")]  # an item is not muted
 
     assert owner.patch(f"/studio/rooms/{dm}", json={"muted": False}).json()["muted"] is False
     say("들리는 글")
-    assert http.messages()[-1] == fcm("fcm-1", "민수", "들리는 글", ("room", dm), "quiet")
+    assert http.messages()[-1] == fcm("fcm-1", "민수", "들리는 글", ("room", dm), "quiet", action="reply", room_id=dm)
 
     assert owner.patch("/studio/rooms/room_nope", json={"muted": True}).status_code == 404
     for bad in ({}, {"muted": None}, {"muted": True, "title": "새 이름"}):
@@ -894,3 +899,40 @@ def test_a_hiring_recommendation_is_pushed_quietly_and_is_not_reminded_of(studio
     assert [m["data"]["grade"] for m in http.messages()] == [push.QUIET] and len(http.sent()) == 1
     studio.look(seconds(item["created_at"]) + 7200 * 3)  # long past the two hours: the reminder is urgent
     assert len(http.sent()) == 1 and studio.reminded(item) is None
+
+
+# --- the notification action (N-3) ---------------------------------------------------------------------------
+NOT_FROM_A_NOTIFICATION = {"risky_command", "final_review", "structure_choice", "question", "hire_recommendation"}
+
+
+def test_each_inbox_kind_is_pushed_with_what_its_notification_can_do_and_again_the_same(studio, http):
+    assert set(push.KIND_LABEL) == set(inbox.NOTIFY_OK) | NOT_FROM_A_NOTIFICATION  # a new kind is decided here
+    studio.device(1, "fcm-1")
+    first, items = {}, {}
+    for kind in push.KIND_LABEL:
+        item = studio.file(f"{kind} 결재", kind=kind, run_id=None if kind == push.QUIET_KIND else "run_a")
+        data = http.messages()[-1]["data"]
+        grade = push.QUIET if kind == push.QUIET_KIND else push.URGENT
+        action = "approve" if kind in inbox.NOTIFY_OK else "open"
+        assert data == {"grade": grade, "type": "inbox", "id": item["id"], "action": action}, kind
+        assert all(isinstance(v, str) for v in data.values())  # FCM data holds strings only
+        first[item["id"]], items[kind] = data, item
+    assert len(http.sent()) == len(push.KIND_LABEL)
+
+    studio.look(max(seconds(item["created_at"]) for item in items.values()) + 7200)
+    again = http.messages()[len(push.KIND_LABEL):]
+    assert len(again) == len(push.KIND_LABEL) - 1  # a hiring recommendation is never reminded of
+    for message in again:
+        assert message["data"] == {**first[message["data"]["id"]], "grade": "urgent"}
+
+
+def test_an_employees_words_are_pushed_with_a_reply_and_the_room_and_nothing_else_is(studio, http):
+    studio.device(1, "fcm-1")
+    minsu, dm = studio.employee()
+    studio.say(dm, "로그인 화면을 고쳤습니다", author_id=minsu["id"])
+    assert http.messages()[-1]["data"] == {"grade": "quiet", "type": "room", "id": dm, "action": "reply", "room_id": dm}
+    studio.say(dm, "턴을 넣지 못했다", "system", meta={"event": "run_error"})
+    assert http.messages()[-1]["data"] == {"grade": "urgent", "type": "room", "id": dm}
+    studio.say("room_system", "오늘 한 일", author_id=minsu["id"], meta={"event": "daily_report"})
+    assert http.messages()[-1]["data"] == {"grade": "digest", "type": "room", "id": "room_system"}
+    assert len(http.sent()) == 3

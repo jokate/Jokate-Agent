@@ -47,7 +47,7 @@ from typing import Any, Callable
 
 from ..config import ROOT
 from ..notify import NOTIFY_KINDS, Fanout
-from .inbox import KIND_LABEL
+from .inbox import KIND_LABEL, NOTIFY_OK
 
 try:  # not named in pyproject.toml: they come with `mcp`. Without them only this sender is off (load_key)
     import httpx
@@ -80,6 +80,7 @@ CHANNELS = {URGENT: "katae_urgent", QUIET: "katae_quiet", DIGEST: "katae_digest"
 DIGEST_TAG = "katae_digest"  # one entry in the drawer: a later digest takes the place of the one before
 NOTICE_EVENTS = {  # `meta.event` of the notices of §5.9 that are pushed at once -> the title of the push
     "needs_assignment": "배치 필요", "upstream_rejected": "선행 반려 · 거절", "run_error": "실행하지 못함",
+    "disk_low": "디스크 부족",  # V-3: studio/disk.py
     "invariant_broken": "불변식 깨짐", "group_exchange_limit": "직원 대화 멈춤",  # the second: a group room held (§4.6)
 }
 DAILY_REPORT = "daily_report"  # `meta.event` of the daily report (S-13): the one digest
@@ -233,17 +234,29 @@ def _timer(delay: float, fn: Callable[[], None]) -> threading.Timer:
 
 
 # --- what a stream event is pushed as (§5.9) ------------------------------------------------------------------
-Told = tuple[str, str, str, "dict | None"]  # (grade, title, one line, deep link)
+Told = tuple[str, str, str, "dict | None"]  # (grade, title, one line, deep link + notification action, N-3)
+ACTION_APPROVE = "approve"  # the item can be approved from the notification itself (`inbox.NOTIFY_OK`); the app opens too
+ACTION_OPEN = "open"        # an item the notification cannot decide: the button only opens it
+ACTION_REPLY = "reply"      # an employee's words: the notification can answer into `room_id`
+
+
+def inbox_link(item: dict) -> dict:
+    """The link of an inbox item's push, first or again (N-3): the deep link plus `action` — `approve` for a kind
+    in `inbox.NOTIFY_OK` (a plain approve with `via=notification`), `open` for every other. One function, so a
+    reminder carries what the first push did."""
+    action = ACTION_APPROVE if item["kind"] in NOTIFY_OK else ACTION_OPEN
+    return {"type": "inbox", "id": item["id"], "action": action}
 
 
 def classify(event: dict, store) -> Told | None:
     """What a stream event is pushed as, or None for one that is not pushed: the table of §5.9. Read when the
     push's turn comes, so an item decided meanwhile and a room muted meanwhile are not told of.
 
-    - `inbox.created`: urgent, while the item still waits. Title = the item's, the line = its kind.
+    - `inbox.created`: urgent, while the item still waits. Title = the item's, the line = its kind. The link
+      carries `action` (N-3): `approve` or `open`, see `inbox_link`.
     - `message.created`: the daily report is the digest; a system message whose `meta.event` is one of
       `NOTICE_EVENTS` is urgent and opens its task (`meta.task_id`) or else its room; an employee's words are
-      quiet — title = the employee's name — and not pushed at all for a muted room. The owner's own words and
+      quiet — title = the employee's name, the link carries `action` = `reply` and `room_id` (N-3) — and not pushed at all for a muted room. The owner's own words and
       every other system message (the line of an item or a decision: the item's push tells) are not pushed.
     - a task's start (`task.transitioned`, T3) and a `progress` note (`task.updated`): quiet.
     - `job.finished`: urgent; it opens the project that was made, or the job that failed. One that was
@@ -273,7 +286,7 @@ def _of_inbox(data: dict, store) -> Told | None:
         return None  # decided or cancelled before its turn came: nothing to ask any more
     label = KIND_LABEL.get(item["kind"], "")
     grade = QUIET if item["kind"] == QUIET_KIND else URGENT  # a hiring recommendation waits for no one (§5.9)
-    return grade, _line(item["title"]) or label, label, {"type": "inbox", "id": item["id"]}
+    return grade, _line(item["title"]) or label, label, inbox_link(item)
 
 
 def _of_message(data: dict, store) -> Told | None:
@@ -299,7 +312,8 @@ def _of_message(data: dict, store) -> Told | None:
         return None
     employee = store.get_employee(message["author_id"]) if message.get("author_id") else None
     title = _line((employee or {}).get("name")) or _line(room["title"]) or EMPLOYEE_TITLE
-    return QUIET, title, line or ATTACHED, room_link
+    reply = {**room_link, "action": ACTION_REPLY, "room_id": message["room_id"]}
+    return QUIET, title, line or ATTACHED, reply
 
 
 def _of_task(data: dict, line: str) -> Told | None:
@@ -414,13 +428,15 @@ class Sender:
         project's or the address's: a token cleared by mistake is a phone to pair again, one kept by mistake only
         a request in vain.
 
+        `link` is the deep link `{type, id}` and may carry the notification action (N-3: `action`, `room_id`).
+
         `grade` is how loud the push is (§5.9): `data.grade` for the app in the foreground, the Android priority
         (HIGH for an urgent one only) and the channel for the system. A digest has one tag, so the drawer holds
         one. A grade nobody knows is sent as urgent."""
         grade = grade if grade in CHANNELS else URGENT
         data = {"grade": grade}
-        if link:
-            data.update(type=str(link["type"]), id=str(link["id"]))
+        if link:  # FCM data holds strings only: every key of the link (`action`, `room_id`: N-3) goes as one
+            data.update({str(key): str(value) for key, value in link.items()})
         drawer = {"channel_id": CHANNELS[grade]}
         if grade == DIGEST:
             drawer["tag"] = DIGEST_TAG
@@ -689,7 +705,7 @@ class Pusher:
 
     def _remind(self, sender: Sender, store, after: float) -> None:
         """The look of `remind`: every pending item whose `reminded_at` — `created_at` while it has none — is
-        `after` seconds back or more is pushed again, urgent, with the same title and link. `reminded_at` is
+        `after` seconds back or more is pushed again, urgent, with the same title and link (`inbox_link`: the same `action` too). `reminded_at` is
         set when a send was tried for one device at least, whatever FCM said: a failure that stays would be
         tried every minute. With every device in its quiet hours nothing is set, so the first look after them
         tells."""
@@ -703,7 +719,7 @@ class Pusher:
                     continue
                 label = KIND_LABEL.get(item["kind"], "")
                 line = f"{label} · {REMIND_NOTE}" if label else REMIND_NOTE
-                link = {"type": "inbox", "id": item["id"]}
+                link = inbox_link(item)
                 if self._deliver(sender, store, URGENT, _line(item["title"]) or label, line, link, hold=True):
                     self._reminded(store, item["id"], at)
         finally:

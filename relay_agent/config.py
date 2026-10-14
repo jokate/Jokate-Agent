@@ -103,6 +103,10 @@ class Config(BaseModel):
     # A server that starts after that time writes the day's report then; one that already has it writes none.
     # Read at every look (the server's start, then once a minute).
     studio_report_at: str = "18:00"
+    # Katae Studio: the free space (GB) of the drive the runs are written to below which the system room says so
+    # once, and the owner is pushed at once (V-3 — ARCHITECTURE.md §5.9 디스크 경고). 0 or less = no warning. Read
+    # at every look (the server's start, then every ten minutes).
+    studio_disk_min_free_gb: float = 5.0
     # Katae Studio: the light model that words the daily report, one call a day ("" = no AI: the three lines are
     # made by rule). An answer that is not the three lines, or a call that fails, leaves the rule's lines too.
     studio_report_model: str = "haiku"
@@ -113,6 +117,11 @@ class Config(BaseModel):
     # MNYS project's folder, as an absolute path (M-4 — ARCHITECTURE.md §6.4). Each machine has its own, so it
     # goes in relay.config.local.yaml. "" = not set: such a plugin has no source and cannot be chosen.
     studio_plugin_root: str = ""
+    # Katae Studio: the folder the phone's app update is read from (A-13 — ARCHITECTURE.md §6.4, studio/app_release.py):
+    # `latest.json` ({version_name, build_number, notes, apks: {abi: file name}}) and the APKs it names. The server
+    # only reads it, never builds or writes there. "" = `.katae/app` of the user folder; a path that is not absolute
+    # is taken from this repository's folder. Keep it outside every repository.
+    studio_app_dir: str = ""
     # Katae Studio: the folder of the game-harness repository, as an absolute path — where `bootstrap.bat` and
     # `index_build.bat` are (M-5 — ARCHITECTURE.md §6.4, studio/harness.py). Each machine has its own, so it goes
     # in relay.config.local.yaml. "" = not set: the `harness` step of a new project fails unless it is turned off.
@@ -156,6 +165,14 @@ class Config(BaseModel):
     def studio_dir(self) -> Path:
         """Katae Studio data (design/studio/ARCHITECTURE.md §2.2). Derived, so it follows runs_dir."""
         return self.runs_dir / "studio"
+
+    @property
+    def studio_app_folder(self) -> Path:
+        """Where the app update is read from (A-13): `studio_app_dir`, or `~/.katae/app` when it is empty."""
+        if not self.studio_app_dir.strip():
+            return Path.home() / ".katae" / "app"
+        p = Path(self.studio_app_dir).expanduser()
+        return p if p.is_absolute() else ROOT / p
 
     @property
     def studio_db(self) -> Path:

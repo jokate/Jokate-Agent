@@ -325,7 +325,8 @@ def test_an_employees_message_in_a_group_room_is_pushed_as_in_a_dm_room_and_not_
     said = party.store.create_message(party.room, "employee", author_id=a, body="넵")
     dm = party.store.create_message(party.desk.dm, "employee", author_id=party.desk.emp, body="넵")
     grade, title, line, link = push._of_message({"message": said}, party.store)
-    assert (grade, title, line, link) == (push.QUIET, party.names[a], "넵", {"type": "room", "id": party.room})
+    assert (grade, title, line, link) == (push.QUIET, party.names[a], "넵", {
+        "type": "room", "id": party.room, "action": "reply", "room_id": party.room})
     assert push._of_message({"message": dm}, party.store)[0] == push.QUIET  # the same grade
     assert party.owner.patch(f"/studio/rooms/{party.room}", json={"muted": True}).status_code == 200
     assert push._of_message({"message": said}, party.store) is None

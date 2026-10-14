@@ -4,9 +4,18 @@ the same DB and a new queue with an empty book of slots, on the same engine — 
 on disk. The demo relay on the mock runner, whose stages wait at a gate the test opens: no AI is called."""
 import threading
 import time
+from collections import deque
+from datetime import datetime
+from types import SimpleNamespace
 
+from relay_agent.history import HistoryStore
+from relay_agent.pipeline import RelayEngine
+from relay_agent.repos import RepoRegistry
 from relay_agent.runners import RunnerError
-from relay_agent.studio import TaskMachine, api, queue, work
+from relay_agent.studio import TaskMachine, api, chat, push, queue, runs, work
+from relay_agent.usage import UsageStore
+from test_studio_chat import Desk
+from test_studio_group import Party
 from relay_agent.studio.inbox import decision_text
 from relay_agent.studio.tasks import SYSTEM
 from test_studio_inbox import ok
@@ -354,3 +363,171 @@ def test_a_run_that_fails_because_its_folder_was_held_joins_the_line_by_itself(l
     what, row = work.stopped(line.engine, api.run_inbox(), task["id"])  # as the thread of its slot would
     assert what == "requeued" and row["queued_at"] is not None and row["status"] == "working"
     assert line.lab.pending() == [] and work.stopped(line.engine, api.run_inbox(), task["id"]) is None  # in line
+
+
+# --- V-3 (나): the server killed and started again — the engine and the store opened anew on the same folders ----
+def reborn(lab, repos=None):  # noqa: F811
+    """A new engine on the same runs folder and the same two DBs, attached to the inbox as server.py does, and the
+    store opened anew: nothing of the old process is left but what is on disk."""
+    old = lab.engine
+    engine = RelayEngine(lab.tmp / "runs", UsageStore(lab.tmp / "u.sqlite"), HistoryStore(lab.tmp / "h.sqlite"),
+                         runner_factory=lambda _: lab.runner,
+                         repos=RepoRegistry(repos or {"game": {"path": str(lab.tmp / "project")}}))
+    assert engine is not old
+    api.close_store()
+    store = api.get_store()
+    assert store is not lab.store
+    lab.hooks = runs.attach(engine, api.run_inbox, advance=engine.advance)
+    lab.engine, lab.store, lab.world.store = engine, store, store
+    return engine, store
+
+
+def test_a_chat_turn_cut_off_by_the_kill_is_failed_and_its_message_is_read_once_by_the_new_process(lab, monkeypatch):  # noqa: F811
+    held = []
+    desk = Desk(lab, monkeypatch, spawn=held.append)  # the first process: the thread of the turn never gets far
+    desk.say("안녕, 어제 얘기 이어서")
+    assert len(held) == 1 and lab.runner.calls == []
+    begun = desk.turns._begin(desk.emp, desk.dm)  # the run the turn made before it was killed
+    run = lab.engine.load(begun.run.id)
+    run.status = "running"
+    lab.engine.save(run)
+
+    engine, store = reborn(lab)
+    assert engine.recover_interrupted() == [run.id]  # a chat run is the engine's to close (§4.8)
+    cut = engine.load(run.id)
+    assert cut.status == "failed" and cut.error.startswith("서버 재시작으로 중단됨")
+    assert [m["author_kind"] for m in store.list_messages(desk.dm)] == ["owner"]  # nothing was answered
+
+    lab.runner.script.update({"chat": [{"summary": "답했다", "state": "요약", "open_issues": [], "next_steps": [],
+                                        "output": "다시 왔습니다"}]})
+    turns = chat.ChatTurns(engine, desk.cfg, spawn=lambda work: work())
+    monkeypatch.setattr(api, "_hooks", runs.EngineHooks(engine, engine.advance, chat=turns.request))
+    turns.request(desk.emp, desk.dm)  # the owner's next message, or the app asking again
+    assert [(m["author_kind"], m["body"]) for m in store.list_messages(desk.dm)][1:] == [("employee", "다시 왔습니다")]
+    assert len(lab.runner.calls) == 1 and turns._busy == {}
+    turns.request(desk.emp, desk.dm)  # nothing new since: the message is not read twice
+    assert len(lab.runner.calls) == 1 and len(store.list_messages(desk.dm)) == 2
+
+
+def test_a_cut_task_run_is_taken_up_by_the_new_engines_queue(line, monkeypatch):  # noqa: F811
+    line.limit = 0
+    cut = line.backlog(title="새 엔진 앞에서 끊긴 런")
+    ok(line.ask(cut))
+    line.start(cut)
+    run = line.run_of(cut)
+    run.status = "running"
+    line.engine.save(run)
+
+    engine, store = reborn(line.lab, line.repos)  # killed: the engine, the store and the queue are all new
+    line.engine, line.store = engine, store
+    line.fx.engine = engine
+    line.m = TaskMachine(store, line.fx)
+    assert engine.recover_interrupted() == [run.id]
+    line.limit = 3
+    line.gate.go.set()
+    line.q = queue.TaskQueue(engine, line.fx, api.run_inbox, limit=lambda: line.limit, retry_after=None)
+    line.fx.kick = line.q.kick
+    monkeypatch.setattr(api, "_queue", line.q)
+    line.q.spawn = line.held.append
+    out = work.recover(engine, api.run_inbox, kick=line.q.kick)
+    assert out["requeued"] == [cut["id"]]
+    assert line.row(cut)["queued_at"] is not None and set(line.q.slots()) == {cut["id"]}
+    while line.held:
+        line.held.pop()()
+    line.settled(cut)
+    assert engine.load(run.id).status == "done" and line.row(cut)["queued_at"] is None
+    assert asked(line) == {cut["id"]: "no_review_request"}
+
+
+class Phone:
+    """The sender of a push on the fake: what was told."""
+
+    def __init__(self):
+        self.sent = []
+
+    def send(self, token, title, line, link=None, grade="urgent"):  # noqa: F811
+        self.sent.append((token, title, line, link, grade))
+        return push.SENT
+
+
+def test_a_waiting_decision_is_still_pending_after_the_kill_and_the_reminder_goes_on_from_its_time(lab, monkeypatch):  # noqa: F811
+    run = lab.run(repo="game")
+    [item] = lab.pending()
+    lab.store.create_device("폰", "hash-1", platform="android", fcm_token="fcm-1")
+    phone, clock = Phone(), SimpleNamespace(at=0.0)
+    monkeypatch.setattr(push, "load_key", lambda path: {"key": "fake"})
+
+    def pusher(now):
+        clock.at = now
+        return push.Pusher(lambda: SimpleNamespace(store=api.get_store()), lambda: "key.json",
+                           sender=lambda key: phone, clock=lambda: clock.at, remind_after=lambda: 7200)
+
+    made = datetime.fromisoformat(lab.store.get_inbox_item(item["id"])["created_at"]).timestamp()
+    first = pusher(made + 7200)
+    first.remind()
+    assert first.drain() and len(phone.sent) == 1
+    stamp = lab.store.get_inbox_item(item["id"])["reminded_at"]
+    assert stamp is not None
+    first.stop()
+
+    engine, store = reborn(lab)  # killed and started again
+    assert engine.recover_interrupted() == []  # the run waits at its gate, it is not running
+    [again] = lab.pending()
+    assert again["id"] == item["id"] and again["status"] == "pending" and again["run_id"] == run.id
+    assert store.get_inbox_item(item["id"])["reminded_at"] == stamp  # the time of the last reminder is on disk
+    second = pusher(made + 7200 + 3600)
+    second.remind()
+    assert second.drain() and len(phone.sent) == 1  # an hour after the reminder: too early
+    clock.at = made + 7200 + 7200
+    second.remind()
+    assert second.drain() and len(phone.sent) == 2  # two hours after it
+    assert store.get_inbox_item(item["id"])["reminded_at"] != stamp
+    second.stop()
+
+
+def test_a_held_group_room_is_still_held_after_the_kill_and_its_turns_are_those_of_the_new_process(lab, monkeypatch):  # noqa: F811
+    party = Party(lab, monkeypatch)
+    a, b, c = party.order
+    party.hold(monkeypatch)  # the room is held at its limit: b's next turn is owed
+    assert party.count() == 2 and api.group_halted(party.store, party.room)
+    assert api.group_owed(party.store, party.room) == [b]
+    made = len(party.cast.seen)
+    party.desk.turns._rooms[party.room] = deque([(c, False)])  # a turn in the line when the process was killed
+
+    engine, store = reborn(lab)
+    turns = chat.ChatTurns(engine, party.cfg, spawn=party.waiting.append)
+    assert turns._rooms == {}  # the line is memory only: it is gone
+    party.desk.turns, party.store, party.desk.store, party.cast.store = turns, store, store, store
+    monkeypatch.setattr(api, "_hooks", runs.EngineHooks(engine, engine.advance, chat=turns.request, turns=turns))
+    assert store.get_room(party.room)["exchange_count"] == 2  # the count is in the DB
+    assert api.group_halted(store, party.room) and api.group_owed(store, party.room) == [b]  # told by the messages
+    notices = len(party.notices("group_exchange_limit"))
+
+    assert turns.group(party.room, [b], True) == [b]  # a mention in the held room: no turn, no second notice
+    party.go()
+    assert len(party.cast.seen) == made and len(party.notices("group_exchange_limit")) == notices
+    assert api.group_halted(store, party.room)
+
+    party.say("이어서 해 봅시다")  # the owner writes: counted anew, every member has a turn once, in order
+    party.go()
+    assert party.turns()[made:] == [a, b, c] and party.count() == 0 and not api.group_halted(store, party.room)
+
+
+def test_the_employees_are_recomputed_from_the_tasks_after_the_kill(line, monkeypatch):  # noqa: F811
+    line.limit = 0
+    busy, idle = line.backlog(title="일하는 중"), line.backlog(title="줄 밖")
+    ok(line.ask(busy))
+    line.start(busy)  # working: its assignee is 'working'
+    assert line.store.get_employee(busy["assignee_id"])["status"] == "working"
+    with line.store.transaction() as tx:  # the kill came between a task's row and its assignee's status
+        tx.exec("UPDATE employees SET status = 'idle' WHERE id = ?", (busy["assignee_id"],))
+        tx.exec("UPDATE employees SET status = 'blocked' WHERE id = ?", (idle["assignee_id"],))
+
+    engine, store = reborn(line.lab, line.repos)
+    line.engine, line.store = engine, store
+    line.fx.engine = engine
+    out = work.recover(engine, api.run_inbox, kick=lambda: None)
+    assert sorted(out["employees"]) == sorted([busy["assignee_id"], idle["assignee_id"]])
+    assert store.get_employee(busy["assignee_id"])["status"] == "working"
+    assert store.get_employee(idle["assignee_id"])["status"] == "idle"
+    assert work.recover(engine, api.run_inbox, kick=lambda: None)["employees"] == []  # as it should be: no change

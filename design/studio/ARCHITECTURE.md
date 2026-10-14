@@ -192,6 +192,8 @@ runs/
     drafts/<draft_id>.json        인사의 초안 (§8.4)
     audit/guard-<YYYYMMDD>.jsonl  가드 감사 로그 (§10.7)
     runlog/<run_id>.json          런별 기록 — 스킬 · MCP · 가드 경고 (§10.7)
+
+~/.katae/app/                     저장소 밖. 앱 갱신 (A-13, §6.4) — latest.json + APK. owner 가 손으로 두고 서버는 읽기만 한다 (Config.studio_app_dir)
 ```
 
 - 직원 폴더의 자체 git 이력(H-3)은 `employees/<employee_id>/.git` 에 둔다 (H-3 확정. `studio/employee_git.py`). 직원 폴더마다 저장소가 하나이고, 서버는 그 `.git` 만 가리켜 git 을 부른다 — 위 폴더의 저장소(이 저장소)로 올라가지 않는다. 커밋 작성자는 `agent-katae` 로 고정이고 전역 git 설정을 읽지 않는다. `.git` 이 없는 기존 폴더는 서버가 시작할 때 지금 내용 그대로 첫 커밋을 받는다. 커밋하는 때와 순서는 §9.6 이다.
@@ -1097,6 +1099,15 @@ T10 · T11 도 CAMPAIGN.md §2 의 그림에 없는 전이다. owner 가 더했�
 4. 모든 재직 직원의 상태를 §4.9 로 다시 계산한다.
 5. `proposed` · `blocked` · `review` 인데 `pending` 결재가 없는 작업이 있으면 고치지 않고 시스템 방에 알린다 (불변식이 깨진 것이다). 서버를 띄울 때마다 같은 작업을 다시 알리지는 않는다 — 시스템 방에 그 작업의 `invariant_broken` 글이 이미 있고 그 뒤로 작업이 바뀌지 않았으면(`tasks.updated_at` 이 그 글의 `created_at` 보다 늦지 않다) 넘어간다. 고쳤다가 다시 깨진 작업은 다시 알린다 (S-8 확정).
 
+**서버를 죽였다 띄운 뒤 (V-3 확정).** 위 걸음은 이미 있고, 엔진과 저장소를 같은 폴더로 새로 열어 아래가 이어지는지를 `tests/test_studio_recovery.py` 가 못박는다. 새로 만든 복구 코드는 없다 — 빈틈이 없었다.
+- 끊긴 채팅 · 읽기 턴: 그 턴의 런은 엔진의 `recover_interrupted` 가 `failed` 로 닫는다 (걸음 1은 작업 런만 본다). 답이 없던 글은 `room_members.fed_message_id` 가 앞서지 않아 그대로 남고, 새 `ChatTurns` 가 다음 `request` 에서 한 번만 읽는다 — 다시 `request` 해도 새 글이 없으면 런을 만들지 않는다.
+- 끊긴 작업 런: 새 엔진이 `failed` 로 닫은 뒤 걸음 1이 줄에 다시 세우고(`queued`, `resume: true`), 새 `TaskQueue` 가 집어 끝까지 간다.
+- 기다리던 결재: `pending` 으로 남고 `reminded_at` 도 DB 에 있다. 새 `Pusher` 는 그 시각에서 `studio_remind_after` 가 지나기 전에는 보내지 않고 지나면 보낸다 (§5.9).
+- 단체방: 줄(`ChatTurns._rooms`)은 메모리뿐이라 비고, `exchange_count` 와 멈춘 방 판정(`api.group_halted`) · 밀린 차례(`api.group_owed`)는 DB 의 방과 글에서 읽힌다. 멈춘 방에서 멘션해도 두 번째 알림은 쓰이지 않고, owner 가 글을 쓰면 다시 세어 구성원이 차례대로 한 번씩 턴을 받는다.
+- 직원 상태: 걸음 4가 §4.9 로 다시 계산해, 서버가 죽으며 어긋난 `employees.status` 를 바로잡는다.
+
+**절전 방지 (V-3 확정, `studio/awake.py`).** 서버는 며칠씩 떠 있으므로 일하는 동안 PC 가 잠들지 않게 한다. 작업 런이 슬롯을 쥔 동안(`TaskQueue._work`: 시작에서 세고 슬롯을 놓을 때 푼다)과 채팅 · 읽기 턴이 도는 동안(`ChatTurns._work` · `_group_work`)을 세고(`Awake.hold`), 0 에서 1 이 되면 켜고 1 에서 0 이 되면 끈다 — 도는 것이 없으면 시스템이 다시 잠들 수 있다. 시스템 호출은 주입하는 `setter(on)` 이고 기본은 Windows 의 `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)` 다. 그 함수는 부른 스레드에만 걸리고 켜는 스레드와 끄는 스레드가 다르므로 전용 스레드 하나가 모든 호출을 한다. Windows 가 아니거나 호출이 실패하면 로그만 남기고 런은 그대로 간다. `server.py` 는 startup 의 `KEEPER.enable()` 과 shutdown 의 `disable()` 만 연결한다 — `enable` 전에는 아무것도 부르지 않아 테스트가 실제 절전 API 를 건드리지 않는다. 전원 설정 · 시작 프로그램 등록 · `supervise.py` 는 고치지 않는다.
+
 ### 4.9 직원 상태 유도
 
 `employees.status` 는 아래 규칙의 첫 번째로 맞는 값이다. 작업의 전이와 같은 트랜잭션에서 갱신하고, 바뀌면 `employee.status` 를 낸다.
@@ -1207,7 +1218,7 @@ T10 · T11 도 CAMPAIGN.md §2 의 그림에 없는 전이다. owner 가 더했�
 - `edits` (`hire`): `payload` 의 action 별 본문(§5.3)과 같은 키로, 고칠 것만.
 - `option_id` 는 `payload.options[].id` 중 하나여야 한다. 아니면 `invalid_decision`.
 - `judgment_marks`: `[{index, mark}]`. `index` 는 `payload.judgment_calls` 의 순번, `mark` 는 `should_have_asked`(물어봤어야 함) · `ok`(괜찮음) (H-6, A-10).
-- "알림에서 결정"은 코멘트와 `data` 없이 되는 `approve` 만이다. 서버가 `via = notification` 으로 온 그 밖의 결정을 `invalid_decision` 으로 거부한다 (잠정, N-3). `hire_recommendation` 은 이 둘 다 해당하지 않는다: 코멘트는 어느 결정에서도 선택이고 `data` 는 받지 않는다.
+- "알림에서 결정"은 코멘트와 `data` 없이 되는 `approve` 만이다. 서버가 `via = notification` 으로 온 그 밖의 결정을 `invalid_decision` 으로 거부한다 (N-3 확정). 알림의 푸시 `data.action` 이 위 표의 마지막 열과 같다 — 열이 "되는 `approve`"인 종류는 `approve`, "불가"인 종류는 `open` 이다 (§5.9). `hire_recommendation` 은 이 둘 다 해당하지 않는다: 코멘트는 어느 결정에서도 선택이고 `data` 는 받지 않는다.
 
 A-9 는 버튼을 "승인 / 반려 / 수정 요청" 셋으로 적는다. 종류마다 뜻이 달라 이렇게 대응시켰다. `[§12]`
 
@@ -1463,13 +1474,13 @@ CLI 는 서버를 거치지 않고 엔진을 직접 부른다 (S-5 에서 확인
 
 "선행 반려"의 글은 T8 · T9 의 결정 뒤에 쓴다 (`Inbox._upstream`): 표시가 선 뒤 작업마다 그 작업방에 한 줄, `meta` 는 `{event: upstream_rejected, task_id: 뒤 작업, upstream_task_id: 반려된 선행}` 이다. 런에 넣는 결정문이 아니다 — 방의 글일 뿐이고 턴을 만들지 않는다.
 
-푸시 (N-1 · N-2). 푸시에는 제목과 한 줄, 딥링크만 싣는다.
+푸시 (N-1 · N-2 · N-3). 푸시에는 제목 · 한 줄 · 딥링크 · 알림 액션만 싣는다.
 
 | 계기 | 등급 | 딥링크 `{type, id}` |
 |---|---|---|
 | `inbox.created` (`hire_recommendation` 을 뺀 9종) | 즉시 | `inbox` · 결재 id |
 | `inbox.created` (`hire_recommendation`) | 조용히. 재알림 대상이 아니다 | `inbox` · 결재 id |
-| 위 표의 알림 중 일일 보고를 뺀 것 (`message.created`, `author_kind = 'system'`, `meta.event` 가 다섯 중 하나: `needs_assignment` · `upstream_rejected` · `run_error` · `invariant_broken` · `group_exchange_limit`) | 즉시 | `task` · 작업 id (`meta.task_id` 가 있을 때) 또는 `room` · 글이 쓰인 방 id |
+| 위 표의 알림 중 일일 보고를 뺀 것 (`message.created`, `author_kind = 'system'`, `meta.event` 가 여섯 중 하나: `needs_assignment` · `upstream_rejected` · `run_error` · `invariant_broken` · `group_exchange_limit` · `disk_low`) | 즉시 | `task` · 작업 id (`meta.task_id` 가 있을 때) 또는 `room` · 글이 쓰인 방 id |
 | 프로젝트 생성이 끝남 · 실패함 (M-8, §7.4 `job.finished`) | 즉시 | `project` · 프로젝트 id (`status` 가 `done` 일 때) 또는 `job` · job id |
 | 사용량 한도 | 즉시. 계기 없음 — 서버에 사용량 한도를 감지해 알리는 자리가 없어 등급만 정했다 (N-2 확정) | — |
 | 직원이 쓴 글 (`message.created`, `author_kind = 'employee'`) | 조용히. `rooms.muted` 인 방은 보내지 않는다 | `room` · 방 id |
@@ -1478,11 +1489,13 @@ CLI 는 서버를 거치지 않고 엔진을 직접 부른다 (S-5 에서 확인
 | 엔진 알림 가운데 정지가 아닌 것 — `campaign_done` · `campaign_paused`, 그리고 작업 런도 채팅 · 읽기 턴의 런도 아닌 런의 `run_failed` (N-1 이 더한 행) | 즉시 | `task` · 작업 id (그 런이 작업의 런일 때. 아니면 없다) |
 
 - 일일 보고 (S-13 확정, `studio/stats.py`). 서버가 `Config.studio_report_at`(`HH:MM`, 서버 현지 시각. 기본 `18:00`, 빈 값이면 쓰지 않는다)이 지난 뒤의 첫 확인에서 하루 한 번 시스템 방에 쓴다 — 서버 시작 때와 그 뒤 1분마다 본다(`Reporter.watch`. `server.py` 에는 타이머 연결만 있다). 글쓴이는 재직 중인 인사 직원이고, 없으면 system 글이다 — 푸시는 글쓴이가 아니라 `meta.event` 로 가린다. 본문은 정확히 세 줄 `한 일: …` / `막힌 것: …` / `결재 대기: …` 다. 재료는 지난 보고부터 지금까지(첫 보고는 24시간) `done` 이 된 작업, 지금 `blocked` 인 작업, 지금 대기 중인 결재의 제목이다. 문장은 `Config.studio_report_model`(기본 `haiku`, 빈 값이면 부르지 않는다)을 1회 불러 다듬고, 호출이 실패하거나 답이 세 줄 형식(줄마다 200자 이내)을 어기면 규칙으로 만든 세 줄(개수와 제목 3개까지, 없으면 `없음`)을 쓴다. `meta` 는 `{event: daily_report, date, from, to}` 다 (§7.6). `meta.date` 는 `meta.to` 의 날짜, 곧 보고를 시작한 시각의 날짜다 — 모델 호출이 자정을 넘겨도 그 글은 시작한 날의 보고이고, 다음 날의 보고는 따로 쓴다. 같은 날(`meta.date`, 서버 현지 날짜)의 글이 시스템 방에 이미 있으면 쓰지 않는다 — 글이 기록이라 서버를 다시 시작해도 유지된다. 이 모델 호출의 사용량은 usage DB 에 적지 않는다.
+- 디스크 경고 (V-3 확정, `studio/disk.py`). 서버가 `machine.disk(Config.runs_dir)` 로 읽은 여유가 `Config.studio_disk_min_free_gb`(기본 `5.0` GB, 0 이하면 경고가 없다) 아래이면 시스템 방에 system 글 `meta.event = disk_low` 를 쓰고 즉시 푸시한다(`push.NOTICE_EVENTS`. 딥링크는 `room` · `room_system`). 서버 시작 때와 그 뒤 10분마다 본다(`DiskWatch.watch` · `CHECK_EVERY = 600`. `Reporter.watch` 와 같은 모양이고 `server.py` 에는 타이머 연결만 있다). 임계는 볼 때마다 읽는다. 같은 부족 상태에서는 한 번만 알린다 — 시스템 방의 가장 새 디스크 글(`disk_low` · `disk_ok`)이 `disk_low` 이면 쓰지 않는다. 글이 기록이라 서버를 다시 띄워도 되풀이하지 않는다. 여유가 임계 이상으로 돌아오면 `disk_ok` 글을 쓰고(푸시하지 않는다 — 급하지 않다) 그 뒤 다시 모자라면 `disk_low` 를 다시 쓴다. 디스크를 읽지 못했으면(`free_bytes` 가 없다) 아무것도 쓰지 않는다. `meta` 는 `{event, free_bytes, min_free_gb, path}` 다 (§7.6).
 - 등급 (N-2 확정). 서버는 등급을 FCM 메시지의 세 자리에 싣는다: `data.grade`(`urgent` · `quiet` · `digest`), `android.priority`(즉시만 `HIGH`, 나머지는 `NORMAL`), `android.notification.channel_id`(`katae_urgent` · `katae_quiet` · `katae_digest`). 묶음은 `android.notification.tag` 가 `katae_digest` 하나라 서랍에서 한 건으로 겹친다. 소리 · 진동은 앱이 그 채널 셋을 만들 때 정한다 (A-11) — 백그라운드에서는 시스템이 채널로, 포그라운드에서는 앱이 `data.grade` 로 가린다. `data` 는 딥링크가 없어도 `grade` 를 싣는다.
 - 계기 (N-2 확정). 엔진 알림을 뺀 표의 행은 모두 스트림 이벤트라, 결재와 같은 커밋 수신기에서 이벤트를 분류해(`push.classify`) 보낸다 — 글과 이벤트를 쓰는 자리는 고치지 않았다. 직원 글의 제목은 직원 이름(없으면 방 제목)이고 한 줄은 글의 첫 줄 80자다. 시스템 알림의 제목은 알림 이름, 작업 진행의 제목은 작업 제목이고 한 줄은 "작업 시작" 또는 진행 메모의 첫 줄이다. owner 가 쓴 글과 그 밖의 시스템 글(결재 · 결정을 알리는 글 등)은 보내지 않는다. `job.finished` 이벤트는 `studio/jobs.py`(M-8)가, `daily_report` 글은 `studio/stats.py`(S-13)가 쓴다. `job.finished` 의 `status` 가 `cleaned` 면 보내지 않는다 — owner 가 시킨 정리다. `done` 이 아닌 그 밖의 값은 실패로 보낸다 (N-2 마무리). 채팅 · 읽기 턴이 실패하면 방의 `run_error` 글만 푸시가 된다 (N-2 마무리) — 한 사건에 한 번이고, 그 푸시는 방을 연다. 엔진의 `run_failed` 는 알림이 온 순간 그 런이 추적 중인 턴의 런이면(`api.tracked_run`) 발송기가 줄에 넣지 않는다: 추적은 턴이 `advance` 하는 동안만 있고 엔진의 알림은 그 안에서 동기로 온다. 서버 재시작으로 끊긴 턴의 런은 가리지 않는다 — 추적도 `run_error` 글도 없어 푸시는 많아야 `run_failed` 한 건이다(딥링크 없음).
 - 방해 금지 (N-2 확정). 기기마다 `devices.settings_json` 의 `quiet_hours` = `{start, end, utc_offset_min}` 로 둔다 (§3.14). `start` · `end` 는 그 기기 벽시계의 `HH:MM` 이고 `start` 는 포함, `end` 는 제외다. `start` 가 `end` 보다 늦으면 자정을 넘기고, 둘이 같으면 방해 금지가 없다. `utc_offset_min` 은 그 시계가 UTC 보다 앞선 분이고, 없으면 서버 PC 의 현지 시각으로 본다 — IANA 시간대 이름은 받지 않는다(Windows 에는 tzdata 가 없을 수 있다). 서머타임이 있는 지역이나 여행 중에는 앱이 오프셋을 다시 보낸다. 방해 금지인 기기에는 즉시 등급을 버리거나 미루지 않고 조용히로 낮춰 보낸다 — 버린 푸시는 되살릴 수 없다. 조용히 · 묶음은 그대로 간다.
 - 음소거 (N-2 확정). `rooms.muted` 는 그 방의 직원 글 푸시에만 걸린다. 그 방에 쓰인 시스템 알림, 작업 진행, 결재 푸시에는 걸리지 않는다. `PATCH /studio/rooms/{id}` 가 바꾼다 (§6.4).
-- 재알림 (N-2 확정). `pending` 인 결재는 `reminded_at`(없으면 `created_at`)에서 `Config.studio_remind_after` 초(기본 7200 = 2시간. 0 이하면 재알림이 없다)가 지나면 즉시 등급으로 다시 보낸다 — 제목과 딥링크는 같고 한 줄은 종류 이름 뒤에 " · 다시 알림"이 붙는다. 서버가 시작할 때 한 번, 그 뒤 60초마다 훑는다(`Pusher.watch`. 설정값은 훑을 때마다 읽는다). 기준 시각이 DB 에 있어 서버를 다시 띄워도 이어진다. 보내 본 기기가 하나라도 있으면 FCM 의 답과 무관하게 `reminded_at` 을 적는다(스트림 이벤트는 내지 않는다) — 적지 않으면 남아 있는 실패를 1분마다 다시 보낸다. 방해 금지인 기기는 건너뛰고, 모든 기기가 방해 금지면 적지 않는다 — 방해 금지가 끝난 뒤 첫 훑기에 울린다. 일부 기기만 방해 금지면 `reminded_at` 이 적히므로, 건너뛴 기기는 방해 금지가 끝난 직후가 아니라 다음 간격 뒤의 재알림에 울린다 — 그 기기도 만들어질 때의 푸시는 이미 받았고, 기기별 재알림 시각은 두지 않는다 (N-2 마무리). 방해 금지 중에 만들어진 결재는 그때 조용히로 한 번 가고, 다시 울리는 것은 만들어진 때부터 간격이 지난 뒤다. 방 음소거는 결재 푸시에 걸리지 않는다. 채용 권장은 재알림하지 않는다 — 재알림이 즉시 등급이라 조용한 등급이 한 번 뒤에 깨진다 (`push._remind` 가 건너뛴다).
+- 재알림 (N-2 확정). `pending` 인 결재는 `reminded_at`(없으면 `created_at`)에서 `Config.studio_remind_after` 초(기본 7200 = 2시간. 0 이하면 재알림이 없다)가 지나면 즉시 등급으로 다시 보낸다 — 제목 · 딥링크 · `data.action` 은 같고 한 줄은 종류 이름 뒤에 " · 다시 알림"이 붙는다. 서버가 시작할 때 한 번, 그 뒤 60초마다 훑는다(`Pusher.watch`. 설정값은 훑을 때마다 읽는다). 기준 시각이 DB 에 있어 서버를 다시 띄워도 이어진다. 보내 본 기기가 하나라도 있으면 FCM 의 답과 무관하게 `reminded_at` 을 적는다(스트림 이벤트는 내지 않는다) — 적지 않으면 남아 있는 실패를 1분마다 다시 보낸다. 방해 금지인 기기는 건너뛰고, 모든 기기가 방해 금지면 적지 않는다 — 방해 금지가 끝난 뒤 첫 훑기에 울린다. 일부 기기만 방해 금지면 `reminded_at` 이 적히므로, 건너뛴 기기는 방해 금지가 끝난 직후가 아니라 다음 간격 뒤의 재알림에 울린다 — 그 기기도 만들어질 때의 푸시는 이미 받았고, 기기별 재알림 시각은 두지 않는다 (N-2 마무리). 방해 금지 중에 만들어진 결재는 그때 조용히로 한 번 가고, 다시 울리는 것은 만들어진 때부터 간격이 지난 뒤다. 방 음소거는 결재 푸시에 걸리지 않는다. 채용 권장은 재알림하지 않는다 — 재알림이 즉시 등급이라 조용한 등급이 한 번 뒤에 깨진다 (`push._remind` 가 건너뛴다).
+- 알림 액션 (N-3 확정). 앱이 알림 버튼을 추측 없이 만들도록 `data` 에 문자열 키 `action` 을 싣는다 (FCM `data` 는 문자열만 된다). 딥링크 `{type, id}` 와 `grade` 는 그대로다. 결재 푸시: `action` = `approve`(종류가 `inbox.NOTIFY_OK` — `task_proposal` · `hire` · `design_approval` · `pre_approval` · `budget`: 알림에서 승인하고 열 수 있다) 또는 `open`(`risky_command` · `final_review` · `structure_choice` · `question` · `hire_recommendation`: 알림에서 결정할 수 없다, 열기만). 직원이 쓴 글의 푸시: `action` = `reply` 와 `room_id`(답장할 방 id). 그 밖의 푸시(일일 보고 · 시스템 알림 · 작업 진행 · 프로젝트 · 엔진 알림)에는 `action` 이 없다 — 버튼 없이 딥링크만이다. 모든 값은 문자열이고, 재알림도 최초 푸시와 같은 값을 싣는다(`push.inbox_link` 하나가 만든다). 방해 금지로 등급이 낮아져도 `action` 은 그대로다 — 등급은 소리만 정한다. 새 경로는 없다: 앱은 기기 토큰(`sdt_`)으로 승인은 `POST /studio/inbox/{id}/decide` 에 `{decision: approve, via: notification}` 으로, 답장은 `POST /studio/rooms/{room_id}/messages` 에 `{body, client_msg_id}` 로 보낸다 (§6.4). `via = notification` 의 코멘트 · `data` · 그 밖의 결정과 `open` 종류는 `invalid_decision`(§5.2, `inbox.py`의 기존 규칙)이고, 이미 처리된 결재는 `already_decided`(409)다 — 앱은 409 면 결재를 연다.
 - 기존 토스트(`Notifier`, `notify.py` 45–67)는 그대로 두고 채널을 더한다 (N-1). 연결 자리는 §11.3.
 - N-1 이 붙인 것(`studio/push.py`)은 표의 첫 행과 마지막 행이다. 결재는 `inbox.created` 를 쓴 커밋을 듣고(`api.on_commit`) 보낸다 — 제목은 결재의 `title`, 한 줄은 종류 이름(`inbox.KIND_LABEL`)이고, 보낼 차례가 왔을 때 그 결재가 이미 `pending` 이 아니면 보내지 않는다. 엔진 알림 셋은 `Fanout` 의 수신기로 듣는다 — 제목은 `NOTIFY_KINDS` 의 아이콘과 라벨, 한 줄은 토스트 제목의 첫 줄 80자다. 정지 셋(`awaiting_approval` · `budget_exceeded` · `stage_budget_exceeded`)은 그것이 된 결재의 푸시로만 간다 — 한 사건에 한 번. 표의 나머지 행과 등급 · 방해 금지 · 음소거 · 재알림은 N-2 가 붙였다 (위). `run_done` 은 보내지 않는다 — 런의 끝은 검수 결재나 직원의 글로 이미 간다. 작업 런의 `run_failed` 도 보내지 않는다 (N-2 확정): 그 실패는 결재(`question` · `run_failed`)가 되어 그 푸시로 가거나, 자동으로 다시 줄에 선다 (`studio/work.py`).
 - 받는 기기는 폐기되지 않았고 `fcm_token` 이 있는 기기 모두다 (§3.14). FCM 의 오류 본문에 `errorCode` 가 `UNREGISTERED` 일 때만(FCM 은 보통 404 로 준다) 그 기기의 `fcm_token` 을 NULL 로 바꾼다 — 그 사이 다시 페어링해 값이 달라졌으면 두고, 기기를 폐기하지는 않는다. `errorCode` 없는 404 는 그 밖의 4xx 처럼 보내지 못한 것으로 끝내고 토큰을 둔다 (N-1 마무리) — 프로젝트나 주소가 틀려도 404 이고, 잘못 비우면 모든 기기를 다시 페어링해야 하지만 못 비우면 푸시마다 요청 한 번이 헛될 뿐이다. 죽은 토큰에 FCM 이 실제로 `UNREGISTERED` 를 싣는지는 실기기로 확인하지 않았다. 429 · 5xx · 네트워크 오류 · 401(액세스 토큰을 새로 받는다)은 1초 · 3초 뒤에 다시 해 모두 세 번 한다(`Retry-After` 가 있으면 그 값, 30초까지). 액세스 토큰을 받는 요청도 같은 규칙으로 다시 하고, 끝내 받지 못하면 60초 동안 다시 묻지 않는다 (N-1 마무리) — 그 사이의 푸시는 요청 없이 버린다. 기기마다 · 일감마다 다시 물으면 하나뿐인 워커가 묶여 뒤 푸시가 밀리기 때문이다. 그 밖의 4xx 는 보내지 못한 것으로 끝내고 토큰은 둔다 — 400 은 메시지 탓일 수 있다. 보내지 못한 푸시는 버린다: 결재는 결재함에 남아 있다. 발송은 워커 스레드 하나가 줄(1000개까지. 넘치면 버린다)에서 차례로 해서, 커밋한 요청은 Google 을 기다리지 않는다.
@@ -1719,9 +1732,11 @@ CAMPAIGN.md §2(76행), S-5, A-9 가 적은 결재는 모두 9가지이고 이�
 | `POST /studio/rooms/{id}/archive` | — | 행 (`archived_at`). owner 가 단체방에서 나간다. 처음 보관할 때만 `room.updated` 를 낸다 | `precondition_failed` (단체방이 아니다) | 단체방 |
 | `POST /studio/rooms/{id}/continue` | — | 행. 왕복 한도에 멈춘 단체방 · 파트방을 이어 간다 (§4.6): `exchange_count` 를 0 으로 돌리고 시스템 글 하나와 `room.updated` · `message.created` 를 낸 뒤 세워 둔 턴을 넣는다. 멈춘 방이 아니면 아무것도 하지 않고 행을 돌려준다 | `precondition_failed` (단체방도 파트방도 아니다 · 보관한 방이다) | 단체방 · 파트방 |
 | `GET /studio/rooms/{id}/messages` | `?before_id` · `?after_id` · `?limit` (기본 50, 최대 200) | `{items, has_more}` (`id` 오름차순) | | S-3 |
-| `POST /studio/rooms/{id}/messages` | `{body, mentions[], attachments[], client_msg_id}` | 201 글 행 | `missing_fields` · `precondition_failed` (보관한 단체방도 여기에 든다, §6.6) | S-3, S-7, S-9 |
+| `POST /studio/rooms/{id}/messages` | `{body, mentions[], attachments[], client_msg_id}` | 201 글 행 | `missing_fields` · `precondition_failed` (보관한 단체방도 여기에 든다, §6.6) | S-3, S-7, S-9. 알림 답장(N-3)이 그대로 쓴다: 기기 토큰으로 `{body, client_msg_id}` |
 | `POST /studio/attachments` | `{name, data_b64}` | 201 `{id, name, mime, size}` | `payload_too_large` | S-3 |
 | `GET /studio/attachments/{id}/{name}` | — | 파일. `id` 는 글 id, 결재 id 또는 방에 올리지 않은 스크린샷의 `shot_<hex12>` 다 (§6.6) | | S-3 |
+| `GET /studio/app/latest` | `?abi` (앱이 `Build.SUPPORTED_ABIS[0]` 을 보낸다. 없으면 `arm64-v8a`) | 있으면 `{available: true, version_name, build_number, size, sha256, uploaded_at, notes, abi, file, url}`, 없으면 `{available: false, reason}` (`no_folder` · `no_info` · `bad_info` · `no_apk`) — 둘 다 200. 기기 토큰 · owner 토큰 | | A-13, §12.4 #48 |
+| `GET /studio/app/files/{name}` | — | APK 파일(`application/vnd.android.package-archive`). `name` 은 위 `file` 이다. 폴더 밖을 가리키는 이름(`..` · 경로 · 링크) · `.apk` 가 아닌 이름 · 없는 파일은 이유를 가리지 않고 404 | `not_found` | A-13, §12.4 #48 |
 
 - `unread` 는 `id > owner_read_id` 이고 owner 가 쓰지 않은 글의 수다. `last_message` 는 그 방의 마지막 글 행이고 글이 없으면 `null` 이다. `read` 의 `message_id` 가 그 방의 마지막 글 id 보다 크면 마지막 글 id 로 맞추고, 값이 실제로 늘 때만 `room.updated` 를 낸다 (S-3).
 - 글 목록은 `before_id` 만 주면 그보다 앞의 최근 `limit` 개, `after_id` 만 주면 그보다 뒤의 처음 `limit` 개, 둘 다 없으면 가장 최근 `limit` 개다 (§3.8 의 `(room_id, id)` 인덱스). 둘 다 주면 그 사이(`after_id < id < before_id`)의 최근 `limit` 개다 (잠정, S-3). 저장소의 `list_messages` 인자가 같은 뜻이다. `has_more` 는 읽은 방향으로 `limit` 개 밖에 글이 더 있다는 뜻이다. `limit` 이 200 을 넘으면 줄여서 받지 않고 422(검증 오류)다 (S-3).
@@ -1774,7 +1789,7 @@ CAMPAIGN.md §2(76행), S-5, A-9 가 적은 결재는 모두 9가지이고 이�
 |---|---|---|---|---|
 | `GET /studio/inbox` | `?status` (기본 `pending`) · `?kind` · `?project_id` · `?task_id` · `?before` · `?limit` | `{items, has_more, pending_count}` | | S-5 |
 | `GET /studio/inbox/{id}` | — | 행 + `{task, allowed_decisions[]}`. `final_review` 면 `package` (§5.4) | | S-5, S-12 |
-| `POST /studio/inbox/{id}/decide` | `{decision, comment, data, via}` (§5.1) | `{inbox, task}` | `already_decided` · `invalid_decision` · `precondition_failed` · `stale_state` · `conflict` · `engine_error` | S-5 |
+| `POST /studio/inbox/{id}/decide` | `{decision, comment, data, via}` (§5.1) | `{inbox, task}` | `already_decided` · `invalid_decision` · `precondition_failed` · `stale_state` · `conflict` · `engine_error` | S-5. 알림 승인(N-3)이 그대로 쓴다: 기기 토큰, `via=notification` (§5.9) |
 | `GET /studio/stats` | `?project_id` · `?campaign_id` · `?from` · `?to` | `{campaigns[], employees[], inbox}` | | S-13 |
 | `GET /studio/growth` | — | `{studio, employees[], achievements[], today}` | | S-13 |
 
@@ -2042,9 +2057,10 @@ CREATE TABLE stream_events (
 
 | 키 | 뜻 |
 |---|---|
-| `event` | 시스템 글의 종류: `inbox.created` · `inbox.decided` · `needs_assignment` · `upstream_rejected` · `run_error` · `invariant_broken` · `daily_report` · `greeting` · `handoff` · `group_invited` · `group_removed` · `group_renamed` · `group_exchange_limit` · `group_continued` · `staffing.signal` |
+| `event` | 시스템 글의 종류: `inbox.created` · `inbox.decided` · `needs_assignment` · `upstream_rejected` · `run_error` · `invariant_broken` · `daily_report` · `greeting` · `handoff` · `group_invited` · `group_removed` · `group_renamed` · `group_exchange_limit` · `group_continued` · `staffing.signal` · `disk_low` · `disk_ok` |
 | `task_id` · `inbox_id` · `run_id` | 카드가 가리키는 것 |
 | `date` · `from` · `to` | `daily_report` 글이 다룬 날(서버 현지 날짜 `YYYY-MM-DD`)과 구간(`from <= 시각 < to`, 서버 현지 시각). `date` 가 같은 날 다시 쓰지 않는 근거다 (§5.9, S-13) |
+| `free_bytes` · `min_free_gb` · `path` | 시스템 글 `disk_low` · `disk_ok` 를 쓸 때 읽은 여유(바이트)와 그때의 임계(GB), 물어본 드라이브의 경로. 가장 새 디스크 글의 `event` 가 다시 알릴지 가리는 근거다 (§5.9, V-3) |
 | `upstream_task_id` | `upstream_rejected` 의 선행 작업 |
 | `assigned_event_id` | `needs_assignment` 글을 쓸 때 그 작업의 가장 새 `assigned` 이벤트 id (없으면 0). 다시 알릴지 가리는 데 쓴다 (§5.9) |
 | `employee_ids` | 단체방의 시스템 글 `group_invited` · `group_removed` (`event` 의 값이다) 가 가리키는 직원 id 목록. 방을 만들 때의 글은 처음 구성원 전부, 그 뒤는 한 명이다 (§6.4) |
@@ -2395,6 +2411,7 @@ cap:
 | `read` · `chat` | `mcp__studio` · `chat_mcp` 의 서버마다 `mcp__<이름>` | 릴레이 파일의 값 그대로 |
 
 - 사전 승인은 도구를 늘리지 않는다. 러너는 쓸 수 있는 도구를 `--tools` 로, 묻지 않고 실행할 것을 `--allowedTools` 로 따로 넘긴다 (`runners.py` 604–610). `tools: [Read, Grep, Glob]` 인 단계는 `Bash` 가 사전 승인돼도 셸을 쓰지 못한다. S-10 의 "편집 · 셸 · MCP 사전 승인"을 이렇게 읽었다 — 릴레이가 준 도구 안에서는 묻지 않는다.
+- 단, 릴레이 단계가 준 `Bash` 는 작업 런에서 빠지지 않는다 (owner 결정, 2026-10-14). 엔진은 검증 명령도 Bash 허용 항목도 없는 저장소에서 단계의 `Bash` 를 `Grep` · `Glob` 으로 바꾸는데(`pipeline._stage_tools`), 이 때문에 MNYS 같은 저장소의 작업 런에 셸이 없었다(실제 런에서 확인 — 가드까지 가지도 못했다). 가드가 걸린 런의 프로파일이 `Bash` 를 승인하면(`work`) 엔진이 그 `Bash` 를 되돌려 놓고, 명령마다 훅이 판정한다. 채팅 · 읽기 턴(프로파일에 `Bash` 없음)과 릴레이가 `Bash` 를 주지 않은 단계는 그대로다.
 - `mcp__<이름>` 은 러너가 이미 넣는다(606). studio 가 더할 것은 `Bash` 전체와 편집 도구 넷이다. 이름만 적은 `Bash` 가 모든 셸 명령을 승인하는지는 확인 필요 (사람 — `VERIFICATION.md` 의 S-10 "이름만 적은 `Bash` 사전 승인이 모든 셸 명령을 승인하는지") — 저장소의 선례는 `Bash(uv run:*)` 같은 접두사 형식뿐이다.
 - `permission_mode` 를 `bypassPermissions` 로 올리지 않는다. 올리면 모르는 도구까지 열려 훅 한 겹에만 기대게 된다. 사전 승인에 없는 도구는 헤드리스 런에서 거부되고, 그것이 둘째 겹이다.
 - 들어가는 자리는 `StageCall` 의 `allowed_tools` 를 조립하는 줄이다 (`pipeline.py` 1657–1659, §11.4).
@@ -2731,6 +2748,7 @@ S-10: "가드 파일 자체와 서버 설정은 직원이 못 고친다." `prote
 | `RelayEngine.reopen` · `keep_changes` | `pipeline.py` 클래스 끝 (`_let_go` 뒤) | S-12 가 더한 두 함수. 이 문서가 인용한 줄 번호가 밀리지 않게 클래스 끝에 둔다. `reopen(run_id)`: `done` 런을 `pending` 으로 돌려 끝낸 대화로 잇게 한다 (§4.7 의 `done` 행). `keep_changes(run_id)`: `done` · `cancelled` 인 `inplace` 런의 `ready` 변경을 "그대로 둔다"로 결정한다 — `changes_status = applied`, 스냅샷 정리, 폴더는 건드리지 않는다. 조건이 안 맞으면 둘 다 `ValueError` | 읽음 |
 | `recover` | `server.py` 49–66 | `engine.recover_interrupted()` → `campaigns.recover()` → `engine.cleanup_workspaces(…)`. studio 복구를 이 뒤에 넣는다 (§4.8). 작업 없는 런의 결재 채우기(§5.8 나의 "시작할 때")는 이 함수 안이 아니라 `server.py` 맨 아래의 startup 함수 `file_waiting_runs` 가 한다 — 등록 순서대로 돌아 이 함수 뒤다 | 읽음 |
 | `RelayEngine.recover_interrupted` | `pipeline.py` 1016–1029 | 서버가 멈출 때 `running` 이던 런(다른 살아 있는 프로세스가 쥔 것은 제외)을 `failed` 로 바꾸고 오류를 "서버 재시작으로 중단됨 …" 으로 적는다. 다시 잇지는 않는다 | 읽음 |
+| 서버 상시 가동 (V-3) | `server.py` startup · shutdown 맨 끝 | `studio/awake.py` 의 `KEEPER.enable()` · `disable()` 과 `studio/disk.py` 의 `DiskWatch.watch()` · `unwatch()` 만 연결한다. `TaskQueue` · `ChatTurns` 의 생성자 줄은 고치지 않는다 — 둘은 기본으로 `KEEPER` 를 쓴다 (§4.8 절전 방지). `supervise.py` · 전원 설정 · 시작 프로그램은 고치지 않았다 | 읽음 |
 | `/runs/{id}/approve` · `resume` · `cancel` | `server.py` 814–836 | studio 밖에서 런을 조작하는 기존 통로. `resume` 은 `pending` · `failed` · `cancelled` 만 받는다(825) | 읽음 |
 | `CampaignRunner._run_task` | `campaign.py` 380–415 | S-14 는 여기를 고치지 않았다 — 확장 지점은 클래스 끝의 `studio` · `advance_studio` 다 (§4.10). 기존 캠페인은 `engine.create(…, needs_writes=True)` 로 런을 만들고 `_drive_run` 으로 끝까지 민 뒤 `done` 이면 작업을 끝낸다 | 읽음 |
 | `CampaignRunner._drive_run` | `campaign.py` 431–465 | 런을 끝 상태까지 민다. `failed` 의 오류가 "서버 재시작"으로 시작하면 바로 재개, "다른 실행(" 이 있으면 기다렸다 재개, 사용량 한도면 풀릴 때까지 기다렸다 재개, 그 밖에는 `max_attempts` 까지 다시 한다. studio 의 작업 런도 앞의 셋은 같은 방식으로 다시 잇는다 (§4.7). 런을 미는 걸음은 `_settle`(436 에서 호출, 아래 행)이다 | 일부 |
@@ -2862,7 +2880,7 @@ studio MCP 서버(§8)와 가드 훅(§10)이 기대는 자리다. "studio 런"�
 | 26 | §5.4 | S-12: 검수 요청 시 패키지를 "생성"한다 | 직원이 낸 것만 저장하고 나머지는 `GET /studio/inbox/{id}` 가 읽을 때 계산한다 |
 | 27 | §5.5 | 예산 결재의 반려가 무엇을 하는지 적지 않는다 | 런을 끊지 않고 "검수 요청을 올려라"는 지시로 잇는다 |
 | 28 | §5.8 | S-5: 기존 런의 승인 대기 · 예산 초과도 결재로 | 작업 런이 아닌 런(대시보드 · CLI · 기존 캠페인 · 채팅 턴)은 `task_id` 없는 결재를 만든다 |
-| 29 | §5.10 | S-14 "배치 필요로 알림", S-5 "코멘트와 수정 요청", N-3 "위험 명령 · 최종 검수는 알림에서 승인 불가" | §5.10 표의 4 · 5 · 9 다 — 배치 필요는 결재가 아니라 시스템 글과 푸시, 수정 요청은 `revise` · `rework` 결정 값과 `edits`, 알림에서 결정할 수 없는 것에 `structure_choice` · `question` 을 더했다. 그 표의 나머지 항목은 위 23–28 과 같다 |
+| 29 | §5.10 | S-14 "배치 필요로 알림", S-5 "코멘트와 수정 요청", N-3 "위험 명령 · 최종 검수는 알림에서 승인 불가" | §5.10 표의 4 · 5 · 9 다 — 배치 필요는 결재가 아니라 시스템 글과 푸시, 수정 요청은 `revise` · `rework` 결정 값과 `edits`, 알림에서 결정할 수 없는 것에 `structure_choice` · `question` 을 더했다. N-3 서버 쪽에서 `hire_recommendation` 도 알림에서 결정할 수 없다고 정했고 (§5.2), 알림 버튼은 앱이 종류로 추측하지 않고 서버가 푸시 `data.action` 으로 정하며 (§5.9), 답장은 새 경로 없이 기존 방 글 쓰기를 쓴다. 그 표의 나머지 항목은 위 23–28 과 같다 |
 
 ### 12.4 REST · WS · MCP (§6–§8)
 
@@ -2875,6 +2893,7 @@ studio MCP 서버(§8)와 가드 훅(§10)이 기대는 자리다. "studio 런"�
 | 34 | §6.4 | S-10: 물어보고 진행 목록은 "런을 멈추고 결재함으로 보낸다" | 작업 런이 아닌 턴에서는 결재를 만들지 않고 거부만 한다 (S-10 확정 — `guard.check`) |
 | 35 | §6.6 | 직원이 파일을 붙이는 방법을 적지 않는다 | 도구 인자에 파일 경로를 넘기면 서버가 검사한 뒤 복사한다 |
 | 36 | §8.4 | S-6: 정책 도구는 `policy_draft` 하나 | 제출 도구가 따로 없어 `submit` 인자로 받는다 |
+| 48 | §6.4 | A-13: 앱 갱신은 '버전 + 파일'을 준다 (버전 이름 · 빌드 번호 · 크기 · sha256 · 올린 때 · 바뀐 점) | 읽는 곳과 고르는 법을 정했다. ① 폴더는 `Config.studio_app_dir` (기본 `~/.katae/app`, 저장소 밖) 이고 서버는 읽기만 한다. ② 버전 이름 · 빌드 번호 · 바뀐 점 한 줄은 폴더의 `latest.json` `{version_name, build_number, notes, apks: {abi: 파일명}}` 에서 읽는다 (owner 가 빌드 뒤 이 파일을 고친다). 올린 때는 고른 APK 의 파일 시각이다. ③ `--split-per-abi` 로 APK 가 여럿이면 `?abi` 로 `apks` 에서 고르고, 그 abi 가 없으면 `universal` 키, 그것도 없으면 `no_apk` 다. ④ 폴더 · `latest.json` · APK 가 없거나 깨진 것은 오류가 아니라 200 `{available: false, reason}` 이고, 내려받기만 404 다. ⑤ sha256 은 서버 메모리에 (파일 시각 · 크기)와 함께 두어 파일이 바뀔 때만 다시 계산한다 |
 
 ### 12.5 직원 설정 · 권한 · 접점 (§9–§11)
 
@@ -2891,6 +2910,7 @@ studio MCP 서버(§8)와 가드 훅(§10)이 기대는 자리다. "studio 런"�
 | 45 | §10.4 | §7: 1GB 넘는 다운로드 | 크기를 알 수 없으면 통과시킨다 |
 | 46 | §11.1 | S-14: 기존 `campaign.py` 를 확장한다 | 기존 작업 상태 `skipped` 에 맞는 studio 상태가 없다 (S-14 확정 — 대응을 두지 않는다. studio 에는 건너뛰기가 없고, 그만둘 작업은 취소한다) |
 | 47 | §9.4 | S-8: 고를 수 있는 값은 `GET /models` — 지금 쓸 수 있는 모델 전부 | 직원의 칸, 이번만 덮어쓴 칸, 릴레이 단계의 provider 는 Claude Code 만 받고 `/studio/models` 도 그 항목만 내준다. `auto` 의 후보에서도 다른 AI 의 단계를 가진 릴레이를 빼고, 실행 중의 대체(`alternates` · `fallback_chain`)도 Claude Code 로만 넘어간다. 다른 러너에는 가드 훅을 걸 수 없다 (S-10 확정 — `provider_unguarded` 와 `StageCall.claude_only`) |
+| 49 | §4.8 · §5.9 | V-3: 서버 상시 가동 — 절전 방지, 재시작 후 직원 · 큐 · 결재 복구, 디스크 부족 경고 | 절전 방지는 작업 런의 슬롯과 채팅 · 읽기 턴이 도는 동안만 켜고(`studio/awake.py`) 전원 설정은 건드리지 않는다. 복구는 S-8 의 `work.recover` 가 이미 하는 것이라 새 코드 없이 시험으로 못박았다. 디스크 경고는 임계 `studio_disk_min_free_gb`(기본 5.0 GB)와 10분 주기를 이 문서가 정했고, 같은 부족을 한 번만 알리는 근거를 시스템 방의 글로 둔다 (`studio/disk.py`) |
 
 태그는 없지만 §10 이 CAMPAIGN.md §7 을 풀어 읽은 자리가 둘 있다. 차단 글머리 다섯 줄을 `rule_id` 일곱으로 나눴고(§10.3), `git clean -fdx` 를 `-f` 가 있는 `clean` 전부로 넓혔다(§10.4. S-10 확정 — `studio_guard.r_git_risky`. `-n` · `--dry-run` 이 함께 있으면 묻지 않는다).
 
@@ -2962,7 +2982,7 @@ CAMPAIGN.md 의 서버 쪽 작업 31개(S-1–S-14, M-1–M-8, H-1–H-6, N-1–
 | H-6 결재 기준 | §5.3 (`pre_approval` · `hire` 의 `action`), §5.5 (`judgment_marks`) | §2.2 (`POLICY.md`), §5.2, §6.4 (정책 경로), §8.4 (`ask_owner` · `policy_draft`), §9.1 |
 | N-1 FCM 발송기 | §5.9 (푸시) | §3.14, §5.1, §11.3 (`Notifier`) |
 | N-2 알림 정책 | §5.9 (등급 · 재알림) | §3.6, §3.13 (`reminded_at`), §3.14, §6.4 (`PATCH /studio/rooms/{id}` · `PATCH /studio/devices/{id}` 의 `settings`) |
-| N-3 알림 액션 | §5.2 (알림에서 결정), §5.9 (딥링크) | §5.1 (`via`), §6.4 (`decide`) |
+| N-3 알림 액션 | §5.2 (알림에서 결정), §5.9 (딥링크 · 알림 액션) | §5.1 (`via`), §6.4 (`decide`) |
 
 **owner 요청 (2026-10-12) T1–T5** — 31개 작업(CAMPAIGN.md)이 아니라 owner 가 더한 요청이다 (§12.6 의 14–16).
 

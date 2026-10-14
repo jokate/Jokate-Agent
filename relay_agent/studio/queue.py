@@ -43,6 +43,7 @@ import logging
 import threading
 from typing import Any, Callable
 
+from . import awake as studio_awake
 from .tasks import OWNER, SYSTEM, TaskNotFound, TransitionError
 from .work import CANCELLED, STOPPED, ask as file_question, stopped as run_stopped  # noqa: F401 - both bodies
 
@@ -76,8 +77,10 @@ class TaskQueue:
     folder was held from outside; None = not by itself."""
 
     def __init__(self, engine, effects, inbox: Callable[[], Any], *, limit: Callable[[], int] | int = 3,
-                 spawn: Callable[[Callable[[], None]], Any] | None = None, retry_after: float | None = 5.0):
+                 spawn: Callable[[Callable[[], None]], Any] | None = None, retry_after: float | None = 5.0,
+                 awake: studio_awake.Awake | None = None):
         self.engine, self.effects, self.inbox = engine, effects, inbox
+        self.awake = awake or studio_awake.KEEPER  # V-3: the PC stays awake while a slot's thread is at work
         self.limit = limit if callable(limit) else (lambda: limit)
         self.spawn = spawn or _thread
         self.retry_after = retry_after
@@ -285,6 +288,7 @@ class TaskQueue:
         """What a slot is for: T3 or leaving the line, the run until it stops, and then the steps of §4.7 —
         1 the slot is let go, 2 · 3 the decision texts and the table (`_settle`), 4 the line again."""
         error = None  # what `_go` raised that the task machine did not: the run was not advanced (`work.table`)
+        self.awake.acquire()
         try:
             self._go(task_id)
         except TransitionError as e:  # T3 could not be done, or the task left the line meanwhile (`stop`)
@@ -298,6 +302,10 @@ class TaskQueue:
             with self._lock:
                 slot = self._slots.pop(task_id, None)
                 self._after += 1
+            try:
+                self.awake.release()  # the slot is let go: the steps that follow are bookkeeping
+            except Exception:  # noqa: BLE001
+                log.exception("studio: 절전 방지를 풀지 못했다")
             try:
                 advanced = error is not None and self._failed_since(slot)
                 self._settle(task_id, bool(slot and slot.stopped), error, advanced)

@@ -60,7 +60,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..pipeline import RelaySpec
-from . import api, employees
+from . import api, awake as studio_awake, employees
 from .store import StudioStore
 
 log = logging.getLogger(__name__)
@@ -148,8 +148,10 @@ class ChatTurns:
     A group room has one turn at a time for the whole room (`group`): its members wait in a line, and one
     thread takes them one after the other."""
 
-    def __init__(self, engine, cfg, spawn: Callable[[Callable[[], None]], Any] | None = None):
+    def __init__(self, engine, cfg, spawn: Callable[[Callable[[], None]], Any] | None = None,
+                 awake: studio_awake.Awake | None = None):
         self.engine, self.cfg, self.spawn = engine, cfg, spawn
+        self.awake = awake or studio_awake.KEEPER  # V-3: the PC stays awake while a turn's thread is at work
         self.relay = Path(cfg.relays_dir) / RELAY
         self._lock = threading.Lock()
         self._busy: dict[tuple[str, str], bool] = {}  # (room, employee) of a running turn -> asked again meanwhile
@@ -285,7 +287,12 @@ class ChatTurns:
 
     def _group_work(self, room_id: str) -> None:
         """The line of one group room, until it is empty: one turn at a time, so each is made after the one
-        before it has ended and reads what that one left. A turn may add to the line while it runs (a mention)."""
+        before it has ended and reads what that one left. A turn may add to the line while it runs (a mention).
+        The PC is held awake meanwhile (V-3)."""
+        with self.awake.hold():
+            self._group_line(room_id)
+
+    def _group_line(self, room_id: str) -> None:
         while True:
             with self._lock:
                 line = self._rooms.get(room_id)
@@ -328,7 +335,12 @@ class ChatTurns:
                     store.emit(tx, "room.updated", {"room": room, "members": members}, room_id=room_id)
 
     def _work(self, employee_id: str, room_id: str, begun: Begun | None = None) -> None:
-        """The turns of one request, one after the other. `begun` is a first turn whose run `put` has made."""
+        """The turns of one request, one after the other. `begun` is a first turn whose run `put` has made.
+        The PC is held awake meanwhile (V-3)."""
+        with self.awake.hold():
+            self._turns(employee_id, room_id, begun)
+
+    def _turns(self, employee_id: str, room_id: str, begun: Begun | None) -> None:
         key = (room_id, employee_id)
         while True:
             more = False

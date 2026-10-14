@@ -106,7 +106,7 @@
       },
       "Decide": {
         "additionalProperties": false,
-        "description": "§5.1. `decision` and `via` are plain text here: a value that does not fit the item is 422\n`invalid_decision` with `allowed[]`, not the 422 of the request validation.",
+        "description": "§5.1. `decision` and `via` are plain text here: a value that does not fit the item is 422\n`invalid_decision` with `allowed[]`, not the 422 of the request validation.\n`via` = notification takes only a plain approve — no comment, no data — of a kind whose push says\n`data.action` = approve (§5.2 · §5.9).",
         "properties": {
           "comment": {
             "anyOf": [
@@ -1794,6 +1794,94 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/studio/app/files/{name}": {
+      "get": {
+        "description": "The APK that `GET /studio/app/latest` names (`url`). A name that is not a plain `.apk` file of the folder\n(`..`, a path, a link) is `not_found`, like an attachment.",
+        "operationId": "download_app_studio_app_files__name__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Download App",
+        "tags": [
+          "studio"
+        ]
+      }
+    },
+    "/studio/app/latest": {
+      "get": {
+        "description": "The app update on offer: version name, build number, size, sha256, when it was put there, what changed.\n`abi` = the phone's CPU (Build.SUPPORTED_ABIS[0]); it picks the APK. No folder or file is not an error:\n`{available: false, reason}`. The server only reads `Config.studio_app_dir`.",
+        "operationId": "app_latest_studio_app_latest_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "abi",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Abi"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response App Latest Studio App Latest Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "App Latest",
+        "tags": [
+          "studio"
+        ]
+      }
+    },
     "/studio/attachments": {
       "post": {
         "description": "Stage a file for a message (base64 JSON, like POST /attachments). Its `id` goes in `attachments[]`.",

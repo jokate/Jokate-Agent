@@ -71,7 +71,7 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 from starlette.concurrency import run_in_threadpool
 from starlette.requests import HTTPConnection
 
-from . import creator, devices, employee_git, employees, files, gate, guard, importer, jobs as create_jobs, memory, policy as project_policy
+from . import app_release, creator, devices, employee_git, employees, files, gate, guard, importer, jobs as create_jobs, memory, policy as project_policy
 from . import editor as editor_control
 from . import machine as machine_info, review, sat, staffing, stats, tools, work
 from .inbox import Hooks, Inbox, InboxError
@@ -1848,7 +1848,9 @@ InboxKind = Literal["task_proposal", "hire", "design_approval", "structure_choic
 
 class Decide(BaseModel):
     """§5.1. `decision` and `via` are plain text here: a value that does not fit the item is 422
-    `invalid_decision` with `allowed[]`, not the 422 of the request validation."""
+    `invalid_decision` with `allowed[]`, not the 422 of the request validation.
+    `via` = notification takes only a plain approve — no comment, no data — of a kind whose push says
+    `data.action` = approve (§5.2 · §5.9)."""
     model_config = ConfigDict(extra="forbid")
 
     decision: str
@@ -3116,6 +3118,26 @@ def download_attachment(id: str, name: str):
     if path.parent != folder or not path.is_file():
         raise missing
     return FileResponse(path, media_type=_mime(name), headers={"X-Content-Type-Options": "nosniff"})
+
+
+# --- app update (§6.4, A-13) --------------------------------------------------------------------------------
+@router.get("/app/latest")
+def app_latest(abi: str | None = None) -> dict:
+    """The app update on offer: version name, build number, size, sha256, when it was put there, what changed.
+    `abi` = the phone's CPU (Build.SUPPORTED_ABIS[0]); it picks the APK. No folder or file is not an error:
+    `{available: false, reason}`. The server only reads `Config.studio_app_dir`."""
+    return app_release.latest(_config().studio_app_folder, (abi or "").strip() or app_release.DEFAULT_ABI)
+
+
+@router.get("/app/files/{name}", response_class=FileResponse)
+def download_app(name: str):
+    """The APK that `GET /studio/app/latest` names (`url`). A name that is not a plain `.apk` file of the folder
+    (`..`, a path, a link) is `not_found`, like an attachment."""
+    path = app_release.safe_file(_config().studio_app_folder, name)
+    if path is None:
+        raise StudioError("not_found", f"앱 파일을 찾을 수 없습니다: {name}")
+    return FileResponse(path, media_type=app_release.APK_MIME, filename=path.name,
+                        headers={"X-Content-Type-Options": "nosniff"})
 
 
 # --- this computer (§6.4, M-1) ----------------------------------------------------------------------------

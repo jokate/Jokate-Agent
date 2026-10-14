@@ -1095,6 +1095,28 @@ def stop_daily_report() -> None:
     reporter.unwatch()
 
 
+# V-3 (design/studio/ARCHITECTURE.md §4.8 · §5.9): the server stays up for days. While a task run or a chat turn
+# goes on the PC is kept from sleeping (studio/awake.py — queue.py and chat.py hold it; only the switch is here),
+# and when the free space of the runs' drive falls below `cfg.studio_disk_min_free_gb` the system room says so once
+# and the owner is pushed (studio/disk.py; the room itself is the record, so a restart does not say it twice).
+from .studio import awake as studio_awake, disk as studio_disk  # noqa: E402
+
+disk_watch = studio_disk.DiskWatch(studio_api.get_store, folder=lambda: cfg.runs_dir,
+                                   min_free_gb=lambda: cfg.studio_disk_min_free_gb)
+
+
+@app.on_event("startup")
+def start_awake_and_disk() -> None:
+    studio_awake.KEEPER.enable()
+    disk_watch.watch()
+
+
+@app.on_event("shutdown")
+def stop_awake_and_disk() -> None:
+    disk_watch.unwatch()
+    studio_awake.KEEPER.disable()
+
+
 # Making a new UE project (M-8; design/studio/ARCHITECTURE.md §6.4 · §7.4): the `register` step of a job writes the
 # repository in this machine's settings file and has the server read it again, on the job's thread. `_reload_repos`
 # answers None, so the step is given a function that answers the registry it left (studio/harness.py `_reloaded`).

@@ -312,7 +312,8 @@ def test_a_recommendation_is_pushed_quietly(world):
     item = world.box.create("hire_recommendation", SYSTEM, title="아트 파트 채용", payload=rec(), project_id=world.pid)
     event = [e for e in world.store.list_stream_events(limit=50) if e["type"] == "inbox.created"][-1]
     grade, title, line, link = push.classify(event, world.store)
-    assert (grade, title, line, link) == (push.QUIET, "아트 파트 채용", "채용 권장", {"type": "inbox", "id": item["id"]})
+    assert (grade, title, line, link) == (push.QUIET, "아트 파트 채용", "채용 권장", {
+        "type": "inbox", "id": item["id"], "action": "open"})
 
 
 # --- a DB that already holds items goes up to version 5 -------------------------------------------------------
