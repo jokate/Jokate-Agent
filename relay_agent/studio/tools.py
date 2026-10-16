@@ -557,8 +557,8 @@ def _mention_turns(caller: Caller, task: dict, room: dict, message: dict, mentio
 
 
 def _group_posted(room: dict, message: dict, mentions: list[str], inbox: Inbox) -> dict:
-    """§8.4, after the message of a group room is stored: each member it mentions gets a turn at the end of the
-    room's line (`Hooks.group_turns`) — `queued` is who waits there for it. Nothing is refused or counted here:
+    """§8.4, after the message of a group room is stored: each member it mentions gets a turn right after the one
+    that runs, before who waits in the room's line (`Hooks.group_turns`; T5) — `queued` is who waits there for it. Nothing is refused or counted here:
     the limit is looked at when that turn's time comes, and the turn is counted when it left a message (§4.6;
     studio/chat.py). The message stays in the room either way."""
     queued: list[str] = []
@@ -570,7 +570,7 @@ def _group_posted(room: dict, message: dict, mentions: list[str], inbox: Inbox) 
     missed = [m for m in mentions if m not in queued]
     note = "방에 글을 남겼다."
     if queued:
-        note += (f" 멘션한 직원의 턴이 차례에 들어갔다: {', '.join(queued)} — 이 턴이 끝난 뒤에 돌고, 직원 간 왕복 한도에 "
+        note += (f" 멘션한 직원의 턴이 차례에 들어갔다: {', '.join(queued)} — 이 턴 바로 다음에 돌고, 직원 간 왕복 한도에 "
                  "닿아 있으면 owner 가 이어 가게 할 때까지 선다. 답을 기다리지 않는다.")
     if missed:
         note += (f" 턴이 들어가지 않은 직원: {', '.join(missed)} — 퇴사한 직원이거나 턴을 넣을 수 없었다. 글은 방에 남아 "

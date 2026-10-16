@@ -492,7 +492,7 @@ def test_a_held_group_room_is_still_held_after_the_kill_and_its_turns_are_those_
     assert party.count() == 2 and api.group_halted(party.store, party.room)
     assert api.group_owed(party.store, party.room) == [b]
     made = len(party.cast.seen)
-    party.desk.turns._rooms[party.room] = deque([(c, False)])  # a turn in the line when the process was killed
+    party.desk.turns._rooms[party.room] = deque([(c, False, None)])  # a turn in the line when the process was killed
 
     engine, store = reborn(lab)
     turns = chat.ChatTurns(engine, party.cfg, spawn=party.waiting.append)

@@ -231,9 +231,17 @@ class EngineHooks(Hooks):
     def room_turn(self, employee_id: str, room_id: str) -> bool:
         return bool(self._turns.put(employee_id, room_id)) if self._turns is not None else False
 
-    def group_turns(self, room_id: str, employee_ids: list[str], mentioned: bool = False) -> list[str]:
+    def group_turns(self, room_id: str, employee_ids: list[str], mentioned: bool = False,
+                    judged: bool = False) -> list[str]:
         """The turns of a group room (§6.6): `ChatTurns.group` — the room's line, one turn at a time."""
-        return list(self._turns.group(room_id, employee_ids, mentioned)) if self._turns is not None else []
+        return list(self._turns.group(room_id, employee_ids, mentioned, judged)) if self._turns is not None else []
+
+    def room_busy(self, room_id: str) -> list[str]:
+        return list(self._turns.busy(room_id)) if self._turns is not None else []
+
+    def room_forget(self, room_id: str) -> None:
+        if self._turns is not None:
+            self._turns.forget(room_id)
 
     def tell_run(self, run_id: str, text: str) -> bool:
         """Unlike `interject` above, a run at work is what this is for: the engine puts the text into the

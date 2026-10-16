@@ -49,6 +49,7 @@ MEMORY_LIMIT = 4096  # bytes of UTF-8 (§9.1)
 SUMMARY_MESSAGES = 20
 SUMMARY_CHARS = 200
 SECTIONS = ("PERSONA.md", "GUIDE.md", "MEMORY.md", "프로젝트 정책 (POLICY.md)", "방의 최근 글")  # §9.1: this order
+HARNESS_TITLE = "하네스"  # the same text as harness_root.SECTION_TITLE (not imported: no cycle to think of)
 APPROVAL_RULE_TITLE = "결재 규칙"  # H-6: after the policy, before the room's recent messages — only where a project is set
 APPROVAL_RULE = ("무엇을 바꾸기 전에 위 프로젝트 정책(있다면)과 GUIDE.md 의 '결재 기준'에 비춰 본다. 'X 는 결재'처럼 "
                  "결재를 받고 하라고 적힌 일이거나 '묻고 한다'에 드는 일이면 바꾸지 않는다. `ask_owner`(kind=approval)로 "
@@ -412,18 +413,19 @@ def room_summary(messages: Iterable[dict], names: dict[str, str] | None = None) 
 
 
 def assemble(persona: str | None, guide: str | None, memory: str | None, policy: str | None = None,
-             summary: str | None = None, *, rule: str | None = None) -> str:
+             summary: str | None = None, *, rule: str | None = None, harness: str | None = None) -> str:
     """The employee's part of a prompt, in the order of §9.1: PERSONA.md -> GUIDE.md -> MEMORY.md (clipped) ->
-    the project's policy -> the approval rule (H-6, `rule`) -> the room's recent messages. An empty part is
+    the project's policy -> the harness (`harness`, harness_root.section_for) -> the approval rule (H-6, `rule`)
+    -> the room's recent messages. An empty part is
     left out."""
-    titles = SECTIONS[:4] + (APPROVAL_RULE_TITLE,) + SECTIONS[4:]
-    texts = (persona, guide, clip_memory(memory or ""), policy, rule, summary)
+    titles = SECTIONS[:4] + (HARNESS_TITLE, APPROVAL_RULE_TITLE) + SECTIONS[4:]
+    texts = (persona, guide, clip_memory(memory or ""), policy, harness, rule, summary)
     return "\n\n".join(f"===== {title} =====\n{text.strip()}" for title, text in zip(titles, texts)
                        if text and text.strip())
 
 
 def prompt_for(store: StudioStore, studio_dir: Path | str, employee: dict, room_id: str | None = None,
-               project_id: str | None = None) -> str:
+               project_id: str | None = None, harness: str | None = None) -> str:
     """`assemble()` from what is on disk and in the room now. `employee.yaml` is not part of it (§9.1)."""
     texts = read_files(studio_dir, employee["id"])
     policy = _read(policy_path(studio_dir, project_id)) if project_id else None
@@ -432,7 +434,7 @@ def prompt_for(store: StudioStore, studio_dir: Path | str, employee: dict, room_
         names = {row["id"]: row["name"] for row in store.list_employees(include_retired=True)}
         summary = room_summary(store.list_messages(room_id, limit=SUMMARY_MESSAGES), names)
     return assemble(texts["PERSONA.md"], texts["GUIDE.md"], texts["MEMORY.md"], policy, summary,
-                    rule=APPROVAL_RULE if project_id else None)
+                    rule=APPROVAL_RULE if project_id else None, harness=harness)
 
 
 # --- the derived status (§4.9) ------------------------------------------------------------------------------

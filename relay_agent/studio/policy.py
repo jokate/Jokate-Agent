@@ -67,6 +67,22 @@ def interview_text(project: dict, rules_from: Path | str | None = None) -> str:
     return "\n".join(lines)
 
 
+def hr_room(store: StudioStore, tx: Any, project: dict | None = None) -> tuple[dict, dict] | None:
+    """`(employee, room)` of the HR employee a project-level system message is written to: the first of the HR
+    part who is not on leave and has a 1:1 room that is not archived; one on leave only after those. None — and
+    a warning — when there is none."""
+    staff = store.list_employees(department_id=employees.HR_DEPARTMENT, tx=tx)
+    staff.sort(key=lambda row: row.get("status") == "on_leave")  # stable: on leave last
+    for person in staff:
+        rooms = store.list_rooms(kind="dm", employee_id=person["id"], tx=tx)
+        if rooms:
+            return person, rooms[0]
+    if staff:
+        log.warning("no 1:1 room that is not archived for an HR employee: no message for %s",
+                    (project or {}).get("id"))
+    return None
+
+
 def begin_interview(store: StudioStore, studio_dir: Path | str, project: dict, *,
                     rules_from: Path | str | None = None) -> tuple[str, str] | None:
     """Write the system message that opens the policy talk in HR's 1:1 room (`message.created` in the same
@@ -76,18 +92,8 @@ def begin_interview(store: StudioStore, studio_dir: Path | str, project: dict, *
     such employee. Reads `rules_from` and writes nothing there."""
     body = interview_text(project, rules_from)
     with store.transaction() as tx:
-        staff = store.list_employees(department_id=employees.HR_DEPARTMENT, tx=tx)
-        staff.sort(key=lambda row: row.get("status") == "on_leave")  # stable: on leave last
-        chosen = None
-        for person in staff:
-            rooms = store.list_rooms(kind="dm", employee_id=person["id"], tx=tx)
-            if rooms:
-                chosen = person, rooms[0]
-                break
+        chosen = hr_room(store, tx, project)
         if chosen is None:
-            if staff:
-                log.warning("no 1:1 room that is not archived for an HR employee: no policy talk for %s",
-                            project.get("id"))
             return None
         person, room = chosen
         message = store.create_message(room["id"], "system", body=body,

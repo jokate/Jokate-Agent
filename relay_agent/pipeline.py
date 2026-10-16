@@ -33,7 +33,7 @@ from .baton import Baton, StopNote
 from .history import HistoryStore
 from .providers import LEGACY_RUNNER, ProviderRegistry
 from .notify import NOTIFY_KINDS
-from .projctx import ProjectContext, discover
+from .projctx import ProjectContext, discover, game_root, index_allowed
 from .runners import LiveChannel, pid_alive, Runner, RunnerError, StageCall, Usage, make_runner
 from .usage import UsageStore
 from .repos import RepoRegistry, RepoSpec
@@ -59,6 +59,14 @@ def mcp_tool_changes(tool: str) -> bool:
 
 MODEL_ORDER = ["haiku", "sonnet", "opus", "fable"]  # Claude tiers, weakest first
 EFFORT_ORDER = ["low", "medium", "high", "xhigh", "max"]
+
+
+def resolve_root(setting: str | None, home=None):
+    """`studio.harness_root.resolve_root`, imported late (the studio package imports this module). A module-level
+    name so that a test can put another one in its place."""
+    from .studio.harness_root import resolve_root as _resolve
+
+    return _resolve(setting, home)
 
 
 def cap_model(model: str | None, cap: str | None) -> str | None:
@@ -1464,14 +1472,17 @@ class RelayEngine:
         return handle
 
     @staticmethod
-    def _stage_tools(stage: StageSpec, repo, ctx: ProjectContext | None = None) -> list[str] | None:
+    def _stage_tools(stage: StageSpec, repo, ctx: ProjectContext | None = None, game: bool = False) -> list[str] | None:
         tools = stage.tools
         if tools and ctx is not None:
             # the project's instructions and skills name commands to run: keep them working in every stage
-            extra = (["Bash"] if ctx.allowed_bash() else []) + (["Skill"] if ctx.skills else [])
+            extra = (["Bash"] if ctx.allowed_bash() else []) + (["Skill"] if ctx.skills or game else [])
             tools = tools + [t for t in extra if t not in tools]
             if ctx.allowed_bash():
                 return tools
+        if tools and game:
+            # a game project: the user's harness skills (Skill) and the index scripts they run (Bash) stay available
+            return tools + [t for t in ("Skill",) if t not in tools]
         if tools and "Bash" in tools and stage.bash == "auto" and repo is not None:
             needs = repo.verify or any(t.startswith("Bash") for t in repo.allowed_tools)
             if not needs:
@@ -1668,6 +1679,7 @@ class RelayEngine:
         repo_lines = "\n".join(repo.prompt_lines(repo.git_info().get("branch"))) + "\n" if repo else ""
         repo_tools = (repo.verify_tools() + repo.allowed_tools) if repo else []
         ctx = self.project_context(run)
+        game = game_root(Path(run.workdir)) is not None  # a game project: harness skills and index commands (§10.1)
         attached = self._attached_mcp(run, ctx, repo)
         if ctx is not None:
             self._event(run, "-", "project_context", root=ctx.root.as_posix(),
@@ -1745,7 +1757,7 @@ class RelayEngine:
                         effort=effort, reads=stage.reads_outputs, system_mode=stage.system_mode,
                         escalated=escalate and bool(stage.retry_model or stage.retry_effort))
             fresh_prompt = None
-            tools = self._stage_tools(stage, repo, ctx)
+            tools = self._stage_tools(stage, repo, ctx, game)
             if resume_sid:
                 self._event(run, stage.name, "stage_resumed", session=resume_sid)
             stage_mcp = stage.mcp + ([m for m in attached if m not in stage.mcp] if tools else [])
@@ -1776,7 +1788,10 @@ class RelayEngine:
                 + ([ctx.root.as_posix()] if ctx and Path(cwd).resolve() != ctx.root else []),
                 allowed_tools=stage.allowed_tools + (
                     self.extra_allowed_tools + repo_tools + (ctx.allowed_bash() if ctx else [])
-                    if "Bash" in (tools or []) else []) + (ctx.allowed_other() if ctx and tools else []),
+                    if "Bash" in (tools or []) else []) + (ctx.allowed_other() if ctx and tools else [])
+                + ([r for r in (["Skill"] + (index_allowed(resolve_root("")) if "Bash" in tools else []))
+                    if r not in stage.allowed_tools + (ctx.allowed_other() if ctx else [])]
+                   if game and tools else []),
                 mcp_overrides=stage_overrides,
                 project=ctx is not None,
                 # a copy outside the project doesn't see the project's CLAUDE.md by walking up: load it via --add-dir
@@ -1786,7 +1801,7 @@ class RelayEngine:
                 timeout_s=stage.timeout_s,
                 stall_s=stage.stall_s,
                 system_mode=stage.system_mode,
-                isolate=stage.isolate,
+                isolate=stage.isolate and not game,
                 max_budget_usd=(stage.max_budget_usd * run.stage_budget_boost.get(stage.name, 1.0)
                                 if stage.max_budget_usd is not None else None),
                 fallback_model=cap_model(stage.fallback_model, run.model_cap),
@@ -1809,9 +1824,13 @@ class RelayEngine:
                     kept = (call.tools + ["Bash"] if call.tools and "Bash" not in call.tools
                             and "Bash" in (stage.tools or []) and "Bash" in (guard.get("allowed_tools") or [])
                             else call.tools)
+                    # a studio task run (guard 'skills'): the user's harness skills, so the skill-disabling flags go
+                    work = bool(guard.get("skills")) and bool(kept)
                     call = replace(
-                        call, claude_only=bool(guard.get("claude_only")), tools=kept,
-                        allowed_tools=call.allowed_tools + [t for t in guard.get("allowed_tools") or []
+                        call, claude_only=bool(guard.get("claude_only")),
+                        tools=kept + ["Skill"] if work and "Skill" not in kept else kept,
+                        isolate=call.isolate and not work,
+                        allowed_tools=call.allowed_tools + [t for t in (guard.get("allowed_tools") or []) + (["Skill"] if work else [])
                                                             if t not in call.allowed_tools],
                         env={**call.env, **(guard.get("env") or {})},
                         settings_path=guard.get("settings_path") or call.settings_path)

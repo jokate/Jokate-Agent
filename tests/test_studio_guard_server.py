@@ -164,7 +164,7 @@ def test_guard_stage_gives_a_studio_run_the_profile_the_hook_and_its_material(de
     assert not (tmp_path / "other").exists()  # a dashboard · CLI run: nothing is given and nothing is written
 
     out = api.guard_stage(task["run_id"], "build", run_dir=run_dir, cwd=cwd)
-    assert set(out) == {"allowed_tools", "settings_path", "env", "claude_only"} and out["claude_only"] is True
+    assert set(out) == {"allowed_tools", "settings_path", "env", "claude_only", "skills"} and out["claude_only"] is True
     assert out["allowed_tools"] == PROFILE and guard.profile("read") == guard.profile("chat") == ["mcp__studio"]
     assert out["settings_path"] == run_dir / "studio_settings.json"
     assert set(out["env"]) == {"STUDIO_URL", "STUDIO_ACTOR_TOKEN"} and out["env"]["STUDIO_URL"] == api._cfg.server_url
@@ -277,7 +277,8 @@ def test_the_engine_guards_studio_runs_and_leaves_every_other_run_as_it_was(desk
     with desk.store.transaction() as tx:
         tx.exec("UPDATE tasks SET run_id = ? WHERE id = ?", (work.id, task["id"]))
     engine.advance(work.id)
-    assert runner.seen[-1].allowed_tools == before[0][2] + PROFILE and runner.seen[-1].claude_only
+    assert runner.seen[-1].allowed_tools == before[0][2] + PROFILE + ["Skill"] and runner.seen[-1].claude_only
+    assert runner.seen[-1].tools == before[0][0] + ["Skill"] and not runner.seen[-1].isolate  # a task run: user skills
 
     # closed side: a callback that cannot tell fails the stage — the run does not go on without its guard
     def broken(run_id, stage, **given):
@@ -332,7 +333,7 @@ def test_a_guarded_task_run_keeps_the_bash_its_relay_gave(desk, tmp_path, monkey
         tx.exec("UPDATE tasks SET run_id = ? WHERE id = ?", (work.id, task["id"]))
     engine.advance(work.id)
     call = runner.seen[-1]
-    assert call.tools == outside + ["Bash"] and "Bash" in call.allowed_tools and call.claude_only
+    assert call.tools == outside + ["Bash", "Skill"] and "Bash" in call.allowed_tools and call.claude_only
     args = ClaudeCliRunner(exe="claude").build_args(call, None)
     assert "Bash" in args[args.index("--tools") + 1].split(",")
 

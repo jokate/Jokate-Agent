@@ -4976,6 +4976,50 @@
         ]
       }
     },
+    "/studio/projects/{id}/harness": {
+      "post": {
+        "operationId": "set_up_harness_studio_projects__id__harness_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "title": "Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Set Up Harness Studio Projects  Id  Harness Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set Up Harness",
+        "tags": [
+          "studio"
+        ]
+      }
+    },
     "/studio/projects/{id}/policy": {
       "get": {
         "operationId": "get_project_policy_studio_projects__id__policy_get",
@@ -5185,6 +5229,48 @@
       }
     },
     "/studio/rooms/{id}": {
+      "delete": {
+        "operationId": "delete_room_studio_rooms__id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "title": "Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Delete Room Studio Rooms  Id  Delete",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Room",
+        "tags": [
+          "studio"
+        ]
+      },
       "get": {
         "operationId": "get_room_studio_rooms__id__get",
         "parameters": [
@@ -5319,6 +5405,50 @@
           }
         },
         "summary": "Archive Room",
+        "tags": [
+          "studio"
+        ]
+      }
+    },
+    "/studio/rooms/{id}/clear": {
+      "post": {
+        "operationId": "clear_room_studio_rooms__id__clear_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "title": "Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Clear Room Studio Rooms  Id  Clear Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Clear Room",
         "tags": [
           "studio"
         ]

@@ -405,11 +405,21 @@ class Hooks:
         that HR was asked is taken back (`unheard`); True or None = the question was put."""
         return False
 
-    def group_turns(self, room_id: str, employee_ids: list[str], mentioned: bool = False) -> list[str]:
+    def group_turns(self, room_id: str, employee_ids: list[str], mentioned: bool = False,
+                    judged: bool = False) -> list[str]:
         """Put those members' turns in the line of that group room, in that order (§6.6): they run one after
         the other. `mentioned` = an employee's mention asks, not the owner — such a turn is held at the room's
-        limit and counted (§4.6). Who is in the line for it; [] = nobody, or nothing is wired."""
+        limit and counted (§4.6), and put right after the turn that runs. `judged` = the owner's message has no
+        mention: a light model may say which members it is not the business of (T5). Who is in the line for it; [] = nobody, or nothing is wired."""
         return []
+
+    def room_busy(self, room_id: str) -> list[str]:
+        """Why that room cannot be deleted or cleared now (§6.4): `turn_running` · `turn_waiting` — an employee's
+        turn runs there or waits in its line. [] = none, or nothing is wired."""
+        return []
+
+    def room_forget(self, room_id: str) -> None:
+        """Called after a room was deleted or cleared: let go of what the turns remember of it."""
 
     def tell_run(self, run_id: str, text: str) -> bool:
         """Have a run that may be at work read `text` (`RelayEngine.interject`): a message of the task room,

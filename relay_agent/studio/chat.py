@@ -60,7 +60,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..pipeline import RelaySpec
-from . import api, awake as studio_awake, employees
+from . import api, awake as studio_awake, employees, group_judge, harness_root, memory
 from .store import StudioStore
 
 log = logging.getLogger(__name__)
@@ -72,7 +72,7 @@ FEED_MESSAGES = 50        # messages one turn reads; what is left is read by the
 HANDOFF_LOOKBACK = 5      # turns of the session looked through for the last one that finished
 HANDOFF_TITLE = "이전 대화의 인계 (HANDOFF)"
 RUN_ERROR = "run_error"   # `meta.event` of what a turn says about itself (§7.6)
-UNANSWERED = (RUN_ERROR, api.GROUP_LIMIT, api.GROUP_CONTINUED)  # system messages no turn reads: they are the owner's
+UNANSWERED = (RUN_ERROR, api.GROUP_LIMIT, api.GROUP_CONTINUED, api.GROUP_NOBODY)  # system messages no turn reads: they are the owner's
 STAFFING_SIGNAL = "staffing.signal"  # `meta.event` of the server's question to HR (T5): read by the turn, answered quietly
 
 
@@ -138,6 +138,19 @@ def said(messages: list[dict], names: dict[str, str]) -> str:
     return "\n".join(lines)
 
 
+@dataclass
+class Screen:
+    """The quick judgment of one owner message without a mention (T5): who it asks (`ids`), the message (`text`,
+    `message_id`) and, once the judgment has been made, who said yes (`yes`; None = not made yet). `noted` = the
+    room has been told that nobody was found."""
+    room_id: str
+    ids: list[str]
+    message_id: int
+    text: str
+    yes: set[str] | None = None
+    noted: bool = False
+
+
 class ChatTurns:
     """The chat turns of one server. `request` is what `Hooks.chat_turn` calls: it returns at once and the turn
     runs on a thread of its own (`spawn(work)` — tests give one that runs in place).
@@ -149,20 +162,44 @@ class ChatTurns:
     thread takes them one after the other."""
 
     def __init__(self, engine, cfg, spawn: Callable[[Callable[[], None]], Any] | None = None,
-                 awake: studio_awake.Awake | None = None):
+                 awake: studio_awake.Awake | None = None, judge_ask: group_judge.Ask | None = None):
         self.engine, self.cfg, self.spawn = engine, cfg, spawn
+        self._judge_ask = judge_ask  # the light model of a group room's quick judgment; None = `memory.writer` of the setting
         self.awake = awake or studio_awake.KEEPER  # V-3: the PC stays awake while a turn's thread is at work
         self.relay = Path(cfg.relays_dir) / RELAY
         self._lock = threading.Lock()
         self._busy: dict[tuple[str, str], bool] = {}  # (room, employee) of a running turn -> asked again meanwhile
-        # a group room whose turns are running -> who waits there, in order: (employee, a mention put it in)
-        self._rooms: dict[str, deque[tuple[str, bool]]] = {}
+        # a group room whose turns are running -> who waits there, in order: (employee, a mention put it in, the
+        # judgment that decides whether the turn is made: a `Screen`, or None = no judgment)
+        self._rooms: dict[str, deque[tuple[str, bool, Screen | None]]] = {}
+        # a group room -> where a mention puts a turn in its line: right after the turn that runs now (0 when a turn
+        # has just been taken off the line; one more for each turn put in, so the mentions keep their order)
+        self._next: dict[str, int] = {}
         # (room, employee) -> (project, sha256 of the policy text) last sent to that conversation. In memory: after
         # a restart the policy is sent once more to a conversation that resumes
         self._policy_seen: dict[tuple[str, str], tuple[str, str]] = {}
         # (room, employee) -> sha256 of the GUIDE.md last sent to that conversation (H-6): an approved amendment
         # reaches a conversation that is open. In memory like the policy's: after a restart the first resumed turn sends it again
         self._guide_seen: dict[tuple[str, str], str] = {}
+
+    def busy(self, room_id: str) -> list[str]:
+        """`Hooks.room_busy`: why a turn of that room is at work — `turn_running` (a turn runs there) and/or
+        `turn_waiting` (a group room's line has someone in it). [] = none: the room may be deleted."""
+        out: list[str] = []
+        with self._lock:
+            if any(room == room_id for room, _ in self._busy):
+                out.append("turn_running")
+            if self._rooms.get(room_id):
+                out.append("turn_waiting")
+        return out
+
+    def forget(self, room_id: str) -> None:
+        """`Hooks.room_forget`: drop what is remembered of that room — the policy and guide last sent to its
+        conversations (a deleted room's conversations are gone; a cleared room starts over)."""
+        with self._lock:
+            for seen in (self._policy_seen, self._guide_seen):
+                for key in [key for key in seen if key[0] == room_id]:
+                    del seen[key]
 
     def request(self, employee_id: str, room_id: str) -> None:
         key = (room_id, employee_id)
@@ -248,15 +285,21 @@ class ChatTurns:
         return []
 
     # --- the turns of a group room (§6.6 · §4.6) -------------------------------------------------------------
-    def group(self, room_id: str, employee_ids: list[str], mentioned: bool = False) -> list[str]:
-        """`Hooks.group_turns`: put those members' turns at the end of the room's line, in the order given, and
-        return at once — who is in the line now, of the ones asked for. One who waits there already waits once.
+    def group(self, room_id: str, employee_ids: list[str], mentioned: bool = False, judged: bool = False) -> list[str]:
+        """`Hooks.group_turns`: put those members' turns in the room's line and return at once. The owner's turns
+        go to its end, in the order given; a member's mention (`mentioned`) goes right after the turn that is
+        running — before who waits —, and is asked for with no judgment. `judged` = the owner's message has no
+        mention: when the turn of such a member comes, a light model says for all of them at once whether the
+        message is their business (`_screen`; none is called when `studio_group_judge_model` is blank). It
+        returns — who is in the line now, of the ones asked for. One who waits there already waits once; a mention
+        moves such a one to the seat right after the running turn.
         Only who is seated and has not retired gets a turn; a room that is no group room, or that the owner
         left, gives none.
 
         `mentioned` = an employee's mention asks (`room_post`): such a turn is looked at against the limit when
         its time comes and counted when it left a message (`_group_turn`). The owner's asking is neither, and it
-        wins: a member the owner's message put in the line is not a turn a later mention put in."""
+        wins: a member the owner's message put in the line is not a turn a later mention put in, even when the
+        mention moved it to the next seat (its mark stays, so it is not counted)."""
         store = api.get_store()
         room = store.get_room(room_id)
         if room is None or room["kind"] not in api.GROUP_KINDS or room["archived_at"] is not None:
@@ -265,23 +308,38 @@ class ChatTurns:
         asked = [employee_id for employee_id in dict.fromkeys(employee_ids) if employee_id in seated]
         if not asked:
             return []
+        screen = self._screen_of(store, room_id, asked) if judged and not mentioned else None
         with self._lock:
             line = self._rooms.get(room_id)
             start = line is None
             if start:
                 line = self._rooms[room_id] = deque()
-            waiting = {employee_id: at for at, (employee_id, _) in enumerate(line)}
+            waiting = {item[0]: at for at, item in enumerate(line)}
             for employee_id in asked:
-                if employee_id not in waiting:
-                    line.append((employee_id, mentioned))
-                elif not mentioned:
-                    line[waiting[employee_id]] = (employee_id, False)
+                if mentioned:  # right after the running turn, in the order of the mentions
+                    at = min(self._next.get(room_id, 0), len(line))
+                    idx = next((i for i, item in enumerate(line) if item[0] == employee_id), None)
+                    if idx is None:
+                        line.insert(at, (employee_id, True, None))
+                        self._next[room_id] = at + 1
+                    elif idx < at:  # already among the mentioned ones: it stays, asked with no judgment
+                        line[idx] = (employee_id, line[idx][1], None)
+                    else:  # waits behind: it is moved to the next seat, its owner-turn mark kept (not counted)
+                        flag = line[idx][1]
+                        del line[idx]
+                        line.insert(at, (employee_id, flag, None))
+                        self._next[room_id] = at + 1
+                elif employee_id not in waiting:
+                    line.append((employee_id, False, screen))
+                else:
+                    line[waiting[employee_id]] = (employee_id, False, screen)
         if start:
             try:
                 (self.spawn or _thread)(lambda: self._group_work(room_id))
             except BaseException:
                 with self._lock:
                     self._rooms.pop(room_id, None)
+                    self._next.pop(room_id, None)
                 raise
         return asked
 
@@ -298,12 +356,83 @@ class ChatTurns:
                 line = self._rooms.get(room_id)
                 if not line:
                     self._rooms.pop(room_id, None)
+                    self._next.pop(room_id, None)
                     return
-                employee_id, mentioned = line.popleft()
+                employee_id, mentioned, screen = line.popleft()
+                self._next[room_id] = 0
             try:
+                if screen is not None:
+                    yes = self._said_yes(room_id, screen)
+                    self._drop_no(room_id, screen, yes)
+                    if employee_id not in yes:
+                        continue  # the judgment: this message is not that member's business
                 self._group_turn(employee_id, room_id, mentioned)
             except Exception:  # noqa: BLE001 - nobody waits for this thread; the rest of the line goes on
                 log.exception("studio: 직원 %s 의 단체방 턴(방 %s)이 실패했다", employee_id, room_id)
+
+    def _screen_of(self, store: StudioStore, room_id: str, ids: list[str]) -> Screen | None:
+        """The judgment of the owner's message just stored in that room, for those members. None = no judgment:
+        the setting is blank, there is no light model (nothing to ask), or the newest message is not the owner's."""
+        model = (getattr(self.cfg, "studio_group_judge_model", "") or "").strip()
+        if not model or (self._judge_ask is None and memory.writer(model) is None):
+            return None
+        last = store.list_messages(room_id, limit=1)
+        if not last or last[-1]["author_kind"] != "owner":
+            return None
+        return Screen(room_id, list(ids), last[-1]["id"], (last[-1]["body"] or "").strip())
+
+    def _said_yes(self, room_id: str, screen: Screen) -> set[str]:
+        """Who said yes to that message — judged once, when the first of its members has its turn. When nobody
+        did, the room is told so once (`api.GROUP_NOBODY`). Never raises: a judgment that cannot be made says
+        yes for all."""
+        if screen.yes is None:
+            try:
+                screen.yes = self._screen(room_id, screen)
+            except Exception:  # noqa: BLE001 - no judgment is no filter
+                log.exception("studio: 단체방 %s 의 판단을 하지 못해 모두 '예' 로 친다", room_id)
+                screen.yes = set(screen.ids)
+        if not screen.yes and not screen.noted:
+            screen.noted = True
+            store = api.get_store()
+            room = store.get_room(room_id)
+            if room is not None:
+                self._say(store, room, "답할 직원이 없다고 판단했습니다 — 멘션하면 그 직원이 답합니다", event=api.GROUP_NOBODY)
+        return screen.yes
+
+    def _drop_no(self, room_id: str, screen: Screen, yes: set[str]) -> None:
+        """Take the members the judgment said no to off the line now, so a later mention of one of them is a new
+        turn (right after the running one, counted) and not a turn put in its old place."""
+        with self._lock:
+            line = self._rooms.get(room_id)
+            if line:
+                kept = [item for item in line if not (item[2] is screen and item[0] not in yes)]
+                line.clear()
+                line.extend(kept)
+
+    def _screen(self, room_id: str, screen: Screen) -> set[str]:
+        """Ask the light model for each member of the screen at once (`group_judge.decide`): the member's name, part
+        and line of work, the room's recent messages before the new one (§9.1) and the new message. The usage
+        goes in the usage DB as `room:<room id>` · `studio:group_judge`."""
+        store = api.get_store()
+        ask = self._judge_ask or memory.writer(self.cfg.studio_group_judge_model)
+        if ask is None:
+            return set(screen.ids)
+        names = {row["id"]: row["name"] for row in store.list_employees(include_retired=True)}
+        recent = [m for m in store.list_messages(room_id, limit=employees.SUMMARY_MESSAGES + 1)
+                  if m["id"] < screen.message_id]
+        summary = employees.room_summary(recent, names)
+        asks = {}
+        for employee_id in screen.ids:
+            employee = store.get_employee(employee_id)
+            if employee is None:
+                continue
+            department = store.get_department(employee["department_id"]) if employee.get("department_id") else None
+            persona = employees.read_files(self.cfg.studio_dir, employee_id)["PERSONA.md"]
+            asks[employee_id] = group_judge.facts(employee["name"], (department or {}).get("name") or "",
+                                                  group_judge.job_line(persona), summary, screen.text)
+        usage = getattr(self.engine, "usage", None)
+        record = (lambda u: usage.record(f"room:{room_id}", group_judge.USAGE_STAGE, u)) if usage is not None else None
+        return group_judge.decide(asks, ask, record=record) | (set(screen.ids) - set(asks))
 
     def _group_turn(self, employee_id: str, room_id: str, mentioned: bool) -> None:
         """One member's turn in a group room. §4.6: a turn a mention put in is not made when the room's count is
@@ -462,8 +591,9 @@ class ChatTurns:
         return (f"시스템: 이 방은 {kind} `{room['title']}` 이다. 구성원은 owner 와 직원 {who} 이고, 너는 "
                 f"{employee['name']} (id `{employee['id']}`) 이다. 위 글이 네가 답할 일이면 답을 output 에 쓴다. 네 일이 "
                 "아니면 넘어간다 — output 을 비우고 room_post 도 쓰지 않으면 방에 글이 남지 않는다. 다른 직원의 답이 "
-                "필요할 때만 room_post(text, mentions=[그 직원의 id]) 로 쓴다 — 그 직원의 턴이 네 턴 뒤에 들어가고, 같은 "
-                "말을 output 에 또 쓰지 않는다. 자기 자신과 이 방의 구성원이 아닌 직원은 멘션할 수 없다.")
+                "필요할 때만 room_post(text, mentions=[그 직원의 id]) 로 쓴다 — 그 직원의 턴이 네 턴 바로 다음에 들어가고, 같은 "
+                "말을 output 에 또 쓰지 않는다. 다른 구성원의 몫이라 넘길 때도 그 직원을 멘션한다 — 멘션하지 않으면 "
+                "그 직원은 이 글에 답하지 않을 수 있다. 자기 자신과 이 방의 구성원이 아닌 직원은 멘션할 수 없다.")
 
     def _make(self, store: StudioStore, employee: dict, room: dict, member: dict, fresh: list[dict], text: str,
               where: Where):
@@ -600,11 +730,12 @@ class ChatTurns:
         """The new messages first — the session's list of earlier requests shows the head of a goal —, then the
         hand-over of the conversation before, then the employee's part of the prompt (§9.1) and last `hiring`:
         for the HR employee, the values of a hire (§8.4; `_hiring`). The goal is sent when a conversation
-        starts: a turn that resumes sends the new messages, `hiring` again and, when the policy changed since it was
+        starts (the '하네스' section of the employee's part is in it only then): a turn that resumes sends the new messages, `hiring` again and, when the policy changed since it was
         last sent, the policy with the rule to ask for approval (`_policy_note`)."""
         handoff = self._handoff(session_id)
         parts = [text, f"===== {HANDOFF_TITLE} =====\n{handoff}" if handoff else "",
-                 employees.prompt_for(store, self.cfg.studio_dir, employee, room["id"], project_id), hiring]
+                 employees.prompt_for(store, self.cfg.studio_dir, employee, room["id"], project_id,
+                                      harness=harness_root.section_for(self.cfg.studio_harness_root)), hiring]
         return "\n\n".join(part for part in parts if part.strip())
 
     def _hiring(self, store: StudioStore, employee: dict, where: Where) -> str:

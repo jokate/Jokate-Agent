@@ -198,7 +198,7 @@ def test_intervals_codes_and_envelope_are_the_documents():
     example = text[text.index("### 7.3 봉투"):text.index("### 7.4")].split("```json")[1].split("```")[0]
     assert list(json.loads(example)) == list(ws.ENVELOPE)
     events = doc_events()
-    assert len(events) == 16 and [t for t, kept in events.items() if not kept] == ["job.log", "run.live"]
+    assert len(events) == 18 and [t for t, kept in events.items() if not kept] == ["job.log", "run.live"]
 
 
 def test_ws_route_is_on_the_server_and_the_live_alias_is_the_s4_row_of_the_document(world):

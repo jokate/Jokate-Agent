@@ -18,6 +18,58 @@ INSTRUCTION_FILES = ("CLAUDE.md", "CLAUDE.local.md", ".claude/CLAUDE.md")
 # `python Tools/x.py ...` in instructions -> pre-approve "python Tools/x.py" (headless runs can't ask)
 COMMAND = re.compile(r"`((?:python3?|py|uv run|node|npx|pwsh|powershell|dotnet|bash|sh)\s+[^\s`]+)[^`]*`")
 MAX_SCAN = 200_000  # chars per instruction/skill file
+# an Unreal (`*.uproject`) or Unity (`ProjectSettings/ProjectVersion.txt`) project: its runs get the user's harness skills
+GAME_VERSION_FILE = "ProjectSettings/ProjectVersion.txt"
+# The index lookup scripts of the harness. A headless run can't ask, so they are pre-approved in a game project. The
+# real commands are read from the harness' SKILL.md files (`harness_commands`); this is the fallback for when those
+# are not found or the pattern does not catch them (`ue_q`). The paths are an estimate: fix them here if they differ.
+INDEX_COMMANDS = ("python Tools/gq.py", "python Tools/cindex.py", "python Tools/ue_q.py", "ue_q")
+
+
+def game_root(path: Path, home: Path | None = None) -> Path | None:
+    """The nearest folder at or above `path` (never the home folder or above, like `discover`) that is a game
+    project: has a `*.uproject` or a ProjectSettings/ProjectVersion.txt. Independent of the markers `discover`
+    looks for, so a game folder without CLAUDE.md / .claude is still found. None if it isn't in one."""
+    try:
+        path = Path(path).resolve()
+        home = (home or Path.home()).resolve()
+        for d in [path, *path.parents]:
+            if d == home or d in home.parents:
+                break
+            if (d / GAME_VERSION_FILE).is_file() or any(f.is_file() for f in d.glob("*.uproject")):
+                return d
+    except OSError:
+        pass
+    return None
+
+
+def _commands(texts) -> list[str]:
+    """The `python Tools/x.py ...` commands named in `texts`, normalised, de-duplicated, in order."""
+    out: list[str] = []
+    for text in texts:
+        for m in COMMAND.finditer(text):
+            cmd = " ".join(m.group(1).split())
+            script = cmd.split()[-1]
+            if ("/" in script or "." in script) and "<" not in script and cmd not in out:
+                out.append(cmd)
+    return out
+
+
+def harness_commands(root: Path | None) -> list[str]:
+    """The commands named in the harness' skills/*/SKILL.md. [] if there is no harness; never raises."""
+    if root is None:
+        return []
+    try:
+        return _commands(_read(f) for f in sorted((Path(root) / "skills").glob("*/SKILL.md")))
+    except OSError:
+        return []
+
+
+def index_allowed(root: Path | None = None) -> list[str]:
+    """Pre-approvals for the index lookup commands, in the form of `ProjectContext.allowed_bash`: INDEX_COMMANDS
+    plus the commands the harness (`root`) names in its skills."""
+    cmds = list(INDEX_COMMANDS) + [c for c in harness_commands(root) if c not in INDEX_COMMANDS]
+    return [r for c in cmds for r in (f"Bash({c})", f"Bash({c}:*)")] + ["Bash(cd:*)"]
 
 
 @dataclass
@@ -139,12 +191,7 @@ def discover(path: Path, home: Path | None = None, mcp_from: list[str] | None = 
             if skill.parent.name not in ctx.skills:
                 ctx.skills.append(skill.parent.name)
                 texts.append(_read(skill))
-    for text in texts:
-        for m in COMMAND.finditer(text):
-            cmd = " ".join(m.group(1).split())
-            script = cmd.split()[-1]
-            if ("/" in script or "." in script) and "<" not in script and cmd not in ctx.commands:
-                ctx.commands.append(cmd)
+    ctx.commands = _commands(texts)
     for name in ("settings.json", "settings.local.json"):
         allow = (_json(root / ".claude" / name).get("permissions") or {}).get("allow") or []
         ctx.allow += [a for a in allow if isinstance(a, str) and a not in ctx.allow]

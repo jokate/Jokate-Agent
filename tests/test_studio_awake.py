@@ -139,7 +139,7 @@ def test_a_group_rooms_line_holds_the_pc_awake_until_the_line_is_empty():
             raise RuntimeError("one turn fails; the line goes on")
 
     turns._group_turn = group_turn
-    turns._rooms["room"] = deque([("a", False), ("b", False)])
+    turns._rooms["room"] = deque([("a", False, None), ("b", False, None)])
     turns._group_work("room")
     assert seen == [("a", True), ("b", True)]
     assert setter.calls == [True, False] and keeper.count == 0 and "room" not in turns._rooms

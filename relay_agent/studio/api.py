@@ -71,7 +71,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt, StringConstraints
 from starlette.concurrency import run_in_threadpool
 from starlette.requests import HTTPConnection
 
-from . import app_release, creator, devices, employee_git, employees, files, gate, guard, importer, jobs as create_jobs, memory, policy as project_policy
+from . import app_release, creator, devices, employee_git, employees, files, gate, guard, harness_setup, importer,jobs as create_jobs, memory, policy as project_policy
 from . import editor as editor_control
 from . import usage
 from . import limits as machine_limits, machine as machine_info, review, sat, staffing, stats, tools, work
@@ -550,7 +550,8 @@ def guard_stage(run_id: str, stage: str = "", *, run_dir: Path, cwd: Path, setti
     """The engine's guard callback (§11.4 의 1; server.py registers it as `engine.guard_stage`): what a stage of
     a studio run is given on top of its own — `allowed_tools` (`studio-full`, §10.1), `settings_path` (the hook,
     with the backup hook of `settings` when the workspace has one), `env` (where the hook asks and as whom) and
-    `claude_only` (§10.8 의 9). guard_ctx.json and the settings file are written again at every stage.
+    `claude_only` (§10.8 의 9) and `skills` (a task run: the engine adds Skill and drops the flags that switch
+    off the user's skills, §10.1). guard_ctx.json and the settings file are written again at every stage.
 
     When this server was given the shared token by its environment (`KATAE_TOKEN`), `env` also blanks it for the
     run (§10.8 의 4): the employee's shell would otherwise read the owner's token there. The key is not added
@@ -575,7 +576,7 @@ def guard_stage(run_id: str, stage: str = "", *, run_dir: Path, cwd: Path, setti
         env["KATAE_TOKEN"] = ""
     return {"allowed_tools": guard.profile(head["mode"]),
             "settings_path": guard.write_settings(Path(run_dir), ctx_path, settings),
-            "env": env, "claude_only": True}
+            "env": env, "claude_only": True, "skills": head["mode"] == "work"}
 
 
 def run_workdir(run_id: str) -> Path | None:
@@ -772,8 +773,20 @@ def import_project(body: ProjectImport, store: StudioStore = Depends(get_store))
             raise StudioError("conflict", "이름 · 저장소 · 포트가 다른 프로젝트와 겹칩니다",
                               field=_unique_field(str(e))) from e
         store.emit(tx, "project.updated", {"project": row}, project_id=row["id"])
-    _begin_policy_talk(store, row, folder)
+    _bring_in(store, row, folder)
     return {**row, "detected": found}
+
+
+def _bring_in(store: StudioStore, project: dict, folder: Path | None = None) -> None:
+    """A project was just registered (imported, or made by a job): the harness is laid if it is not (T3,
+    `harness_setup`), then the policy talk is opened. The project is committed: nothing here changes the answer."""
+    where = folder if folder is not None else Path(project["path"])
+    try:
+        result = harness_setup.auto(where, _config().studio_harness_root)
+        harness_setup.note(store, project, result)
+    except Exception:  # noqa: BLE001
+        log.exception("studio: 프로젝트 %s 의 하네스 세팅 중 예외", project.get("id"))
+    _begin_policy_talk(store, project, folder)
 
 
 def _begin_policy_talk(store: StudioStore, project: dict, rules_from: Path | None = None) -> None:
@@ -869,6 +882,26 @@ def get_project(id: str, store: StudioStore = Depends(get_store)) -> dict:
     staff = _with_dm_room(store, _project_staff(store, id))  # as `GET /employees?project_id`: HR comes last
     # `editor` stays null (M-7, §6.4): the status is `GET …/editor`'s — here it would read the processes each time
     return {**row, "employees": staff, "task_counts": store.count_tasks_by_status(id), "editor": None}
+
+
+# §6.4 (T3): lay the harness into a project's folder by hand — for one that was registered before the automatic
+# setting, or whose setting failed. Runs whether or not the harness is already there (`bootstrap.py --auto`
+# overwrites nothing). 404 for a project that is not there; 409 `precondition_failed` when there is no harness to
+# run. A setting that fails is a 200 with `status: failed`, and the same system message in HR's room. No docstring.
+@router.post("/projects/{id}/harness")
+def set_up_harness(id: str, store: StudioStore = Depends(get_store)) -> dict:
+    project = _need(store.get_project(id), "프로젝트", id)
+    setting = _config().studio_harness_root
+    if harness_setup.script(setting) is None:
+        raise StudioError("precondition_failed", "하네스를 찾지 못했습니다 — 설정 studio_harness_root 를 확인하세요")
+    folder = Path(project["path"])
+    result = harness_setup.auto(folder, setting, force=True)
+    try:
+        harness_setup.note(store, project, result)
+    except Exception:  # noqa: BLE001
+        log.exception("studio: 프로젝트 %s 의 하네스 세팅 글을 남기지 못했다", id)
+    return {"project_id": id, "status": result["status"], "detail": result["detail"],
+            "harness": importer.harness_state(folder)}
 
 
 # §6.4 · §6.6 (M-7): the project's Unreal editor — how it is, start it, stop it, a picture of its viewport. The
@@ -1964,7 +1997,7 @@ def _job_runner() -> Any:
             raise StudioError("unavailable", "프로젝트 생성이 서버에 연결되지 않았습니다 (use_jobs 가 불리지 않았습니다)")
         if _jobs is None or _jobs.studio_dir != cfg.studio_dir:
             _jobs = create_jobs.Jobs(cfg.studio_dir, harness_root=lambda: _config().studio_harness_root,
-                                     live=_say, on_registered=_begin_policy_talk, **_job_parts)
+                                     live=_say, on_registered=_bring_in, **_job_parts)
         return _jobs
 
 
@@ -2204,6 +2237,7 @@ def mark_room_read(id: str, body: ReadMark, store: StudioStore = Depends(get_sto
 # turns themselves are studio/chat.py's (`ChatTurns.group`, one at a time for a room). Comments, not docstrings,
 # on the four paths: the saved contract (openapi.json) would carry a docstring as the path's description.
 GROUP_LIMIT, GROUP_CONTINUED = "group_exchange_limit", "group_continued"  # `meta.event` of the two notices (§7.6)
+GROUP_NOBODY = "group_nobody"  # `meta.event` of the notice that the quick judgment found nobody to answer (T5 · §6.6)
 GROUP_KINDS = ("group", "department")  # the rooms that take their turns in the room's line (tools.py keeps the same pair)
 
 
@@ -2264,17 +2298,49 @@ def group_owed(store: StudioStore, room_id: str) -> list[str]:
     return owed
 
 
-def _group_turns(room_id: str, employee_ids: list[str], mentioned: bool = False) -> list[str]:
+def _group_turns(room_id: str, employee_ids: list[str], mentioned: bool = False, judged: bool = False) -> list[str]:
     """§6.6: ask for those members' turns in that group room, in that order (`Hooks.group_turns`; `ChatTurns.group`
     behind it), and who is in the room's line for it. Like `_ask_turn` it never fails the call: what was
     written is stored by now, and a hook that raises is logged here."""
     if _hooks is None or not employee_ids:
         return []
     try:
-        return list(_hooks.group_turns(room_id, list(employee_ids), mentioned))
+        return list(_hooks.group_turns(room_id, list(employee_ids), mentioned, judged))
     except Exception:  # noqa: BLE001
         log.exception("studio: 단체방 %s 의 턴을 넣지 못했다", room_id)
         return []
+
+
+def _room_busy(room_id: str) -> list[str]:
+    """Why that room cannot be deleted or cleared now (`Hooks.room_busy`): `turn_running` · `turn_waiting`.
+    [] = none, or nothing is wired. A hook that raises is logged and reads as none — like `_group_turns`."""
+    if _hooks is None:
+        return []
+    try:
+        return list(_hooks.room_busy(room_id))
+    except Exception:  # noqa: BLE001
+        log.exception("studio: 방 %s 의 도는 턴을 알아내지 못했다", room_id)
+        return []
+
+
+def _room_gone(room_id: str, message_ids: list[int]) -> None:
+    """After the commit of a room deleted or cleared: remove the attachment folder of each message gone (named
+    after the message id, like where they were copied to) and let the turns forget the room."""
+    root = _attachment_root()
+    for message_id in message_ids:
+        shutil.rmtree(root / str(message_id), ignore_errors=True)
+    if _hooks is not None:
+        try:
+            _hooks.room_forget(room_id)
+        except Exception:  # noqa: BLE001
+            log.exception("studio: 방 %s 를 턴이 잊게 하지 못했다", room_id)
+
+
+def _refuse_busy(room_id: str, what: str) -> None:
+    busy = _room_busy(room_id)
+    if busy:
+        raise StudioError("precondition_failed", f"이 방에서 직원의 턴이 돌고 있거나 기다리고 있어 {what} 수 없습니다. "
+                          "턴이 끝난 뒤에 다시 하세요", failed=busy)
 
 
 def _group_guest(store: StudioStore, employee_id: str, tx: Tx) -> dict:
@@ -2379,6 +2445,49 @@ def archive_room(id: str, store: StudioStore = Depends(get_store)) -> dict:
         room = store.update_room(id, tx=tx, archived_at=now())  # the owner leaves: members and messages stay
         members = store.list_room_members(room_id=id, tx=tx)
         store.emit(tx, "room.updated", {"room": room, "members": members}, room_id=id)
+    return room
+
+
+# §6.4: the owner deletes a group room (a kept one too) with its messages, members, read marks and the attachment
+# files of its messages. Looked at in this order: the room (404), that it is a group room (a 1:1 room is cleared
+# with `POST …/clear`; a task, part or system room is not deleted), that no employee's turn runs or waits there
+# (`failed` = `turn_running` · `turn_waiting`). Approvals, tasks and employee memory stay.
+@router.delete("/rooms/{id}")
+def delete_room(id: str, store: StudioStore = Depends(get_store)) -> dict:
+    with store.transaction() as tx:
+        room = _need(store.get_room(id, tx=tx), "방", id)
+        if room["kind"] != "group":
+            raise StudioError("precondition_failed", _undeletable(id, room["kind"]))
+        _refuse_busy(id, "지울")
+        gone = store.delete_room(id, tx=tx)
+        store.emit(tx, "room.deleted", {"room": room}, room_id=id)
+    _room_gone(id, gone)
+    return {"id": id, "deleted": True}
+
+
+def _undeletable(id: str, kind: str) -> str:
+    if kind == "dm":
+        return f"1:1 방은 지우지 않습니다: {id}. POST /studio/rooms/{id}/clear 로 대화(글)만 지웁니다"
+    return f"지울 수 없는 방입니다: {id} ({kind}). 방을 지우는 것은 단체방뿐입니다"
+
+
+# §6.4: the owner clears a 1:1 room — its messages and attachment files go, the room stays, and the employee's
+# conversation starts over (session · read mark of `room_members`). Employee memory stays. Same order as above.
+@router.post("/rooms/{id}/clear")
+def clear_room(id: str, store: StudioStore = Depends(get_store)) -> dict:
+    with store.transaction() as tx:
+        room = _need(store.get_room(id, tx=tx), "방", id)
+        if room["kind"] != "dm":
+            hint = "방째 지우려면 DELETE 를 씁니다" if room["kind"] == "group" else "이 방의 글은 지우지 않습니다"
+            raise StudioError("precondition_failed", f"1:1 방이 아닙니다: {id} ({room['kind']}). {hint}")
+        _refuse_busy(id, "비울")
+        gone = store.delete_messages(id, tx=tx)
+        room = store.update_room(id, tx=tx, owner_read_id=0)
+        members = store.list_room_members(room_id=id, include_left=True, tx=tx)
+        members = [store.update_room_member(id, m["employee_id"], tx=tx, session_id=None, conversation_id=None,
+                                            fed_message_id=0) for m in members]
+        store.emit(tx, "room.cleared", {"room": room, "members": members}, room_id=id)
+    _room_gone(id, gone)
     return room
 
 
@@ -2568,7 +2677,7 @@ def post_message(id: str, body: NewMessage, store: StudioStore = Depends(get_sto
     elif room["kind"] == "task":  # §6.6: into the task's run, and the read turns of who is mentioned (S-9)
         _tell_task_room(store, room, message)
     elif room["kind"] in GROUP_KINDS:  # §6.6 (a department room too): who is mentioned, else every member, one after the other in the room's order
-        _group_turns(id, mentions or group_order(store, id))
+        _group_turns(id, mentions or group_order(store, id), judged=not mentions)  # no mention: the members are judged (T5)
     return message
 
 
