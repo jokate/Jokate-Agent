@@ -63,9 +63,25 @@ def test_no_link_and_a_copy_give_none_and_the_default_home_is_not_this_pcs(tmp_p
 
 
 def test_the_section_holds_the_principle_and_a_line_per_skill(tmp_path):
-    text = harness_root.section(fake_harness(tmp_path))
-    assert text.splitlines() == ["행동하기 전에 읽는다.", "원칙은 둘이다.", "- a — a 을 할 때", "- b — b 을 할 때"]
+    text = harness_root.section(fake_harness(tmp_path))  # the README's first paragraph, joined into one line
+    assert text.splitlines() == ["행동하기 전에 읽는다. 원칙은 둘이다.", "- a — a 을 할 때", "- b — b 을 할 때"]
     assert harness_root.section(None) == ""
+
+
+def test_a_skill_line_is_the_first_sentence_shortened_and_the_principle_is_shortened(tmp_path):
+    """On this PC's harness whole description lines let only 2 of 7 skills into the section (2026-10-17)."""
+    root = fake_harness(tmp_path, skills=())
+    (root / "README.md").write_text("# J\n\n" + "**원칙**은 " + "가" * 300 + "\n\n다음 문단\n", encoding="utf-8")
+    for name, description in (("one", "코드를 쓰기 전에 구조를 고른다. 그 뒤의 문장은 뺀다."),
+                              ("two", "English first. Second sentence."), ("long", "나" * 200)):
+        (root / "skills" / name).mkdir()
+        (root / "skills" / name / "SKILL.md").write_text(f"---\nname: {name}\ndescription: {description}\n---\n",
+                                                         encoding="utf-8")
+    lines = harness_root.section(root).splitlines()
+    assert lines[0].startswith("원칙은 가") and lines[0].endswith("…")  # emphasis dropped, cut
+    assert len(lines[0]) == harness_root.PRINCIPLE_CHARS
+    assert lines[1:] == ["- long — " + "나" * (harness_root.WHEN_CHARS - 1) + "…",
+                         "- one — 코드를 쓰기 전에 구조를 고른다.", "- two — English first."]
 
 
 def test_a_skill_with_a_broken_head_is_left_out_and_a_nameless_one_has_its_folder_name(tmp_path):
@@ -74,16 +90,16 @@ def test_a_skill_with_a_broken_head_is_left_out_and_a_nameless_one_has_its_folde
     (root / "skills" / "bad" / "SKILL.md").write_text("---\nname: [oops\n---\n", encoding="utf-8")
     (root / "skills" / "plain").mkdir()
     (root / "skills" / "plain" / "SKILL.md").write_text("---\ndescription: 이름 없이\n---\n", encoding="utf-8")
-    assert harness_root.section(root).splitlines()[2:] == ["- a — a 을 할 때", "- plain — 이름 없이"]
+    assert harness_root.section(root).splitlines()[1:] == ["- a — a 을 할 때", "- plain — 이름 없이"]
 
 
 def test_a_long_list_is_cut_at_whole_lines_within_the_limit(tmp_path):
     root = fake_harness(tmp_path, skills=[f"skill{n:03d}" for n in range(200)])
     text = harness_root.section(root)
-    assert len(text.encode("utf-8")) <= harness_root.SECTION_LIMIT == 1500
+    assert len(text.encode("utf-8")) <= harness_root.SECTION_LIMIT == 2400
     lines = text.splitlines()
-    assert lines[0] == "행동하기 전에 읽는다." and lines[-1].startswith("- skill") and lines[-1].endswith(" 을 할 때")
-    assert len(lines) < 200 and lines[-1] == f"- skill{len(lines) - 3:03d} — skill{len(lines) - 3:03d} 을 할 때"  # from the front
+    assert lines[0] == "행동하기 전에 읽는다. 원칙은 둘이다." and lines[-1].startswith("- skill") and lines[-1].endswith(" 을 할 때")
+    assert len(lines) < 200 and lines[-1] == f"- skill{len(lines) - 2:03d} — skill{len(lines) - 2:03d} 을 할 때"  # from the front
     one = harness_root.section(root, limit=7)  # one line longer than the limit: cut between characters
     assert len(one.encode("utf-8")) <= 7 and one.startswith("행동")
 

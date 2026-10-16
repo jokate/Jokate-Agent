@@ -16,9 +16,11 @@ from pathlib import Path
 import yaml
 
 SECTION_TITLE = "하네스"  # the title of the section (employees.HARNESS_TITLE is the same text)
-SECTION_LIMIT = 1500  # bytes of UTF-8
+SECTION_LIMIT = 2400  # bytes of UTF-8: the principle and all seven skills of today's harness fit (about 2,000)
 LINK = (".claude", "skills", "game-onboard")  # under home: a junction into the harness
-PRINCIPLE_LINES = 2
+PRINCIPLE_CHARS = 170  # the README's first paragraph, as one line
+WHEN_CHARS = 90  # a skill's description: its first sentence, at most this many characters
+# Measured on this PC's harness (2026-10-17): with whole description lines only 2 of 7 skills fitted in 1,500 bytes.
 
 
 def default_home() -> Path:
@@ -59,8 +61,21 @@ def _front(text: str) -> dict:
     return {}
 
 
+def _short(text: str, limit: int) -> str:
+    """`text` without markdown emphasis, at most `limit` characters (cut ones end in '…')."""
+    text = " ".join(text.replace("**", "").split())
+    return text if len(text) <= limit else text[:limit - 1].rstrip() + "…"
+
+
+def _first_sentence(text: str) -> str:
+    """Up to the first '다.' or '. ' (a Korean or an English sentence end), else the whole text."""
+    ends = [i + 2 for i in (text.find("다."), text.find(". ")) if i >= 0]
+    return text[:min(ends)].strip() if ends else text.strip()
+
+
 def _principle(root: Path) -> list[str]:
-    """The first lines of README.md that are prose: no front matter, title, blank line or rule."""
+    """README.md's first paragraph of prose (no front matter, title, rule or code), joined into one line — the
+    README wraps its lines — and shortened to PRINCIPLE_CHARS."""
     try:
         lines = (root / "README.md").read_text(encoding="utf-8", errors="replace").lstrip("﻿").splitlines()
     except OSError:
@@ -68,12 +83,20 @@ def _principle(root: Path) -> list[str]:
     if lines and lines[0].strip() == "---":
         ends = [n for n, line in enumerate(lines[1:], 1) if line.strip() == "---"]
         lines = lines[ends[0] + 1:] if ends else lines
-    prose = [line.strip() for line in lines if line.strip() and not line.lstrip().startswith(("#", "---", "```"))]
-    return prose[:PRINCIPLE_LINES]
+    paragraph: list[str] = []
+    for line in lines:
+        text = line.strip()
+        if not text or text.startswith(("#", "---", "```", "- ", "|")):
+            if paragraph:
+                break
+            continue
+        paragraph.append(text)
+    return [_short(" ".join(paragraph), PRINCIPLE_CHARS)] if paragraph else []
 
 
 def _skills(root: Path) -> list[str]:
-    """`- name — when` for each skills/*/SKILL.md, by folder name. A skill whose head does not parse is left out."""
+    """`- name — when` for each skills/*/SKILL.md, by folder name: `when` is the first sentence of the
+    description's first line, shortened to WHEN_CHARS. A skill whose head does not parse is left out."""
     out = []
     try:
         folders = sorted(p for p in (root / "skills").iterdir() if p.is_dir())
@@ -87,7 +110,8 @@ def _skills(root: Path) -> list[str]:
         if not head:
             continue
         name = str(head.get("name") or folder.name).strip()
-        when = next((line.strip() for line in str(head.get("description") or "").splitlines() if line.strip()), "")
+        first = next((line.strip() for line in str(head.get("description") or "").splitlines() if line.strip()), "")
+        when = _short(_first_sentence(first), WHEN_CHARS)
         out.append(f"- {name} — {when}" if when else f"- {name}")
     return out
 
