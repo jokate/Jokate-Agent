@@ -977,6 +977,14 @@ def commit_studio_folders() -> None:
     studio_api.commit_folders()
 
 
+# T1: the harness-skill lines of the part's template go into the GUIDE.md of an employee already hired, once and as
+# their own commit (`guide: 하네스 스킬 (자동)`). A line the owner deleted is not put back — that commit in the
+# history means it was given. After the startups that make and commit folders; a failure is logged.
+@app.on_event("startup")
+def add_studio_harness_skills() -> None:
+    studio_api.add_harness_skills()
+
+
 # Task runs (S-8, part 1; design/studio/ARCHITECTURE.md §9.5 · §11.2): what T3 makes a task's run with on this
 # engine, and the models `GET /studio/models` lists — this engine's registry, which knows the benched ones. Down
 # here for the reasons given above.

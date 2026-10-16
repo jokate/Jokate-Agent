@@ -17,6 +17,7 @@ Provisional (S-7): the summary of a room is its newest messages listed, each cut
 
 from __future__ import annotations
 
+import logging
 import re
 import shutil
 from dataclasses import dataclass
@@ -28,6 +29,8 @@ import yaml
 from ..pipeline import EFFORT_ORDER, MODEL_ORDER, cap_effort, cap_model
 from ..providers import ProviderRegistry
 from .store import StudioStore
+
+log = logging.getLogger(__name__)
 
 FILES = ("PERSONA.md", "GUIDE.md", "MEMORY.md", "employee.yaml")  # §9.1, in the order they are written
 FILE_KEYS = {"persona_md": "PERSONA.md", "guide_md": "GUIDE.md", "memory_md": "MEMORY.md",
@@ -790,6 +793,66 @@ def add_policy_talk(store: StudioStore, studio_dir: Path | str, *,
         else:
             target.write_text(fresh, encoding="utf-8", newline="")
         done.append(row["id"])
+    return done
+
+
+HARNESS_LINE_MARK = "하네스 스킬"
+HARNESS_AUTO_MESSAGE = "guide: 하네스 스킬 (자동)"
+HARNESS_BEFORE = "## 결재 기준"
+
+
+def with_harness_lines(guide: str, original: str) -> str:
+    """T1: `guide` with the lines of `original` (a part's template, or hr/GUIDE.md) that name the harness skills
+    (`하네스 스킬`), only when `guide` has a value and has no such words yet. The lines go as '- ' bullets before the
+    first `## 결재 기준` line, else at the end; the rest of `guide` is not changed. Idempotent: the result has the
+    words, so the owner who deletes the lines is not undone here either (the caller checks the history)."""
+    if not guide.strip() or HARNESS_LINE_MARK in guide:
+        return guide
+    found = []
+    for line in original.splitlines():
+        if HARNESS_LINE_MARK in line:
+            text = line.strip()
+            found.append(text if text.startswith("- ") else "- " + text)
+    if not found:
+        return guide
+    block = "\n".join(found)
+    guide_lines = guide.splitlines(keepends=True)
+    at = next((i for i, line in enumerate(guide_lines) if line.startswith(HARNESS_BEFORE)), None)
+    if at is None:
+        return guide.rstrip() + "\n\n" + block + "\n"
+    return "".join(guide_lines[:at]).rstrip() + "\n\n" + block + "\n\n" + "".join(guide_lines[at:])
+
+
+def add_harness_lines(store: StudioStore, studio_dir: Path | str, *,
+                      write: Callable[[Path, str], None] | None = None,
+                      already: Callable[[Path], bool] | None = None) -> list[str]:
+    """T1: `with_harness_lines` on the GUIDE.md of every employee in service whose part has harness lines in its
+    original (the bundled part template; hr/GUIDE.md for HR). A part of the owner's own is not touched. `already(folder)`
+    true = the automatic commit is in the folder's history, so the owner has had the lines and may have deleted them:
+    skipped. Each employee is tried apart: one that fails is logged and the others go on. Returns the ids changed.
+    `write(folder, text)` writes the file (default: plain write) — the caller commits."""
+    originals = {part: values.get("guide_template", "") for part, values in part_defaults().items()}
+    originals[HR_DEPARTMENT] = hr_texts().get("GUIDE.md", "")
+    done = []
+    for row in store.list_employees():
+        original = originals.get(row["department_id"])
+        if not original:
+            continue
+        try:
+            target = folder(studio_dir, row["id"]) / "GUIDE.md"
+            text = _read(target)
+            if text is None:
+                continue
+            fresh = with_harness_lines(text, original)
+            if fresh == text or (already is not None and already(target.parent)):
+                continue
+            if write is not None:
+                write(target.parent, fresh)
+            else:
+                target.write_text(fresh, encoding="utf-8", newline="")
+            done.append(row["id"])
+        except Exception:  # noqa: BLE001 - one employee's file or git must not stop the others
+            log.exception("studio: %s 의 GUIDE.md 에 하네스 줄을 덧붙이지 못했다", row["id"])
     return done
 
 

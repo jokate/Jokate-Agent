@@ -343,6 +343,40 @@ def _add_policy_talk(store: StudioStore) -> list[str]:
         return employees.add_policy_talk(store, _cfg.studio_dir, write=write)
 
 
+def _add_harness_skills(store: StudioStore) -> list[str]:
+    """T1: the harness-skill lines of the part's template added to the GUIDE.md of an employee in service that lacks
+    them (`employees.add_harness_lines`), each folder committed and `employee.updated` sent. An employee whose
+    history already has the automatic commit is skipped — the owner who deleted the lines is not undone."""
+    def already(folder: Path) -> bool:
+        return any(h["message"] == employees.HARNESS_AUTO_MESSAGE
+                   for h in employee_git.history(folder, "GUIDE.md", limit=10000))
+
+    def write(folder: Path, text: str) -> None:
+        (folder / "GUIDE.md").write_text(text, encoding="utf-8", newline="")
+        _folder_commit(folder, employees.HARNESS_AUTO_MESSAGE)
+        row = store.get_employee(folder.name)
+        if row is not None:
+            _file_changed(store, row)
+
+    with employee_git.lock:
+        return employees.add_harness_lines(store, _cfg.studio_dir, write=write, already=already)
+
+
+def add_harness_skills() -> list[str]:
+    """T1: add the harness-skill lines to the GUIDE.md of the employees already hired. Called once at the server's
+    start, after `ensure_hr()` · `fill_parts()` · `commit_folders()`. Returns the ids changed; [] when nothing was
+    needed, the store is not open, or it failed (logged — the server starts without it)."""
+    with _lock:
+        store = _store
+    if store is None or _cfg is None:
+        return []
+    try:
+        return _add_harness_skills(store)
+    except Exception:  # noqa: BLE001 - a start must not depend on a line of a guide
+        log.exception("studio: 직원 GUIDE.md 에 하네스 줄을 덧붙이지 못했다")
+        return []
+
+
 def fill_parts() -> list[dict]:
     """Fill the empty defaults of the three other parts from relay_agent/studio/parts/ (H-1; §3.4 · §3.15;
     studio/employees.py `fill_parts`): a cell that has a value is never written over,
