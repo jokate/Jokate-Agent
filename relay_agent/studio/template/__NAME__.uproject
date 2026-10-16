@@ -1,0 +1,14 @@
+{
+	"FileVersion": 3,
+	"EngineAssociation": "__ENGINE__",
+	"Category": "",
+	"Description": "",
+	"Modules": [
+		{
+			"Name": "__NAME__",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		}
+	],
+	"Plugins": []
+}

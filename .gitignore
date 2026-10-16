@@ -5,3 +5,5 @@ __pycache__/
 runs/
 relay.config.local.yaml
 docs/
+# the UE project skeleton has a Docs/ of its own; on Windows the line above matches it too
+!relay_agent/studio/template/Docs/

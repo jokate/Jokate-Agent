@@ -1,8 +1,10 @@
 """A silent AI process is cut and restarted; a resume without a saved conversation starts fresh at once."""
 import sys
+import threading
 import time
 from pathlib import Path
 
+from relay_agent import runners
 from relay_agent.runners import ClaudeCliRunner, LiveDetail, RunnerError, StageCall, run_process
 
 SILENT = "import time, sys; sys.stderr.write('Retrying in 5s (529 overloaded)\\n'); sys.stderr.flush(); time.sleep(30)"
@@ -93,6 +95,34 @@ def test_a_cli_that_never_reads_the_prompt_is_a_stall_not_a_broken_pipe(tmp_path
 
 
 def test_a_cli_that_exits_before_reading_the_prompt_is_explained(tmp_path):
+    call = StageCall(stage="s", model=None, effort=None, system="s", prompt="p", cwd=tmp_path, timeout_s=60)
+    try:
+        run_process([sys.executable, "-c", "import sys; sys.stderr.write('bad flag\n'); sys.exit(2)"], call,
+                    "x" * 300_000, lambda line: None)
+        raise AssertionError("expected an error")
+    except RunnerError as e:
+        assert e.kind == "error" and "프롬프트를 읽기 전에 끝남" in str(e) and "bad flag" in str(e)
+
+
+def test_the_prompt_writer_is_waited_for_when_the_cli_is_already_gone(tmp_path, monkeypatch):
+    # the same CLI, but the thread that writes the prompt gets its turn only after the process is gone and its
+    # output was read to the end: the error is still the explained one, not a bare exit code
+    class Late:
+        """`threading` as runners.py sees it, with the prompt's writer half a second late."""
+
+        def __getattr__(self, name):
+            return getattr(threading, name)
+
+        @staticmethod
+        def Thread(*args, target=None, **kw):
+            if getattr(target, "__name__", "") == "feed":
+                def late(feed=target):
+                    time.sleep(0.5)
+                    feed()
+                target = late
+            return threading.Thread(*args, target=target, **kw)
+
+    monkeypatch.setattr(runners, "threading", Late())
     call = StageCall(stage="s", model=None, effort=None, system="s", prompt="p", cwd=tmp_path, timeout_s=60)
     try:
         run_process([sys.executable, "-c", "import sys; sys.stderr.write('bad flag\n'); sys.exit(2)"], call,

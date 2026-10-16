@@ -1,0 +1,6 @@
+# 검증용 시드 직원 (임시값). 적지 않은 키는 파트 기본값을 따른다 (design/studio/ARCHITECTURE.md §9.2).
+version: 1
+department: program
+chat:
+  model: sonnet
+  effort: medium

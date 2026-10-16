@@ -54,6 +54,103 @@ class Config(BaseModel):
     handoff_model: str = "haiku"  # writes the hand-over when a run stops ("" = no AI, engine-built only)
     # Before a run's first stage, check that the MCP servers it attaches answer (editor closed -> stop, no cost).
     mcp_check: bool = True
+    # Katae Studio: the ceilings of an employee whose file and part name none (ARCHITECTURE.md §9.5 의 6).
+    studio_model_cap: str | None = None   # haiku | sonnet | opus | fable
+    studio_effort_cap: str | None = None  # low | medium | high | xhigh | max
+    studio_max_runs: int = 3  # Katae Studio: task runs at work at once, over all projects (ARCHITECTURE.md §4.6)
+    # Katae Studio: seconds a task run may go on after the answer of a T4 (`ask_owner`, the guard) before the
+    # server cuts it — 기다림 = 런 종료 (ARCHITECTURE.md §8.3 '서버의 뒤처리'). 0 = at once.
+    studio_cut_after: float = 60.0
+    # Katae Studio: seconds the editor check of a task run waits for the project's editor to answer `health_check`
+    # before the system asks the owner (`editor_unresponsive`) — ARCHITECTURE.md §4.3 T3. Read at every check.
+    studio_editor_wait: float = 300.0
+    # Katae Studio: the turns employees may put in for each other in one task (`room_post` mentions) before the
+    # system asks the owner — 왕복 한도 (ARCHITECTURE.md §4.6). Read at every mention; T5 of that item counts anew.
+    studio_max_exchanges: int = 20
+    # Katae Studio: employees a group room may hold, the owner not counted (ARCHITECTURE.md §3.6 · §6.4). Read
+    # at every making of a group room and at every invitation.
+    studio_group_max_members: int = 8
+    # Katae Studio: the turns the members of a group room may put in for each other (`room_post` mentions) after
+    # one message of the owner's, before the room is held and the owner told (ARCHITECTURE.md §4.6). Read before
+    # every such turn; the owner's next message there, or `POST /studio/rooms/{id}/continue`, counts anew.
+    studio_group_max_exchanges: int = 6
+    # Katae Studio: how many tasks may wait (`backlog`) in front of one employee before HR is asked whether to
+    # hire another (ARCHITECTURE.md §5.3 채용 권장). More than this is a trigger. 0 or less = the queue is not looked at.
+    studio_hire_backlog_limit: int = 5
+    # Katae Studio: days a hiring recommendation the owner skipped is not raised again for the same part and
+    # project, and HR is asked about one trigger at most once (ARCHITECTURE.md §5.3 되풀이 막기). 0 or less = no wait.
+    studio_hire_cooldown_days: int = 3
+    # Katae Studio: hosts an employee may upload to without the owner being asked, besides the git remotes of
+    # the registered projects (ARCHITECTURE.md §10.4 의 5). An approved upload does not add to it.
+    studio_known_hosts: list[str] = []
+    # Katae Studio: what each part looks after, by department id — globs of paths from the project folder, any
+    # case; one that ends with `/` is everything under that folder. A file a task run changed that fits none of
+    # its assignee's part is listed as 담당 밖 변경 in the review package (ARCHITECTURE.md §5.4 `out_of_scope`).
+    # A part without a list is not judged.
+    studio_scopes: dict[str, list[str]] = {}
+    # Katae Studio: the Firebase service account key file the pushes are sent with (FCM HTTP v1, N-1 —
+    # ARCHITECTURE.md §5.9). "" = no push. A path that is not absolute is taken from this repository's folder.
+    # Read at the first push, not at the start: a file that is missing or cannot be used leaves the push off and
+    # the server runs as before. Keep the file outside every repository, in `.katae` of the user folder — the
+    # guard keeps the employees out of there. No place is looked in that is not named here.
+    studio_fcm_key: str = ""
+    # Katae Studio: seconds an inbox item may wait before the owner's devices are told of it again, counted from
+    # when it was made or last told of (N-2 — ARCHITECTURE.md §5.9 재알림). 0 or less = no reminder. Read at every
+    # look at the waiting items (the server's start, then once a minute).
+    studio_remind_after: float = 7200.0
+    # Katae Studio: the time of day ("HH:MM", this PC's clock) from which the daily report is written — once a
+    # day, in the system room, in the HR employee's name (S-13 — ARCHITECTURE.md §5.9 일일 보고). "" = no report.
+    # A server that starts after that time writes the day's report then; one that already has it writes none.
+    # Read at every look (the server's start, then once a minute).
+    studio_report_at: str = "18:00"
+    # Katae Studio: the free space (GB) of the drive the runs are written to below which the system room says so
+    # once, and the owner is pushed at once (V-3 — ARCHITECTURE.md §5.9 디스크 경고). 0 or less = no warning. Read
+    # at every look (the server's start, then every ten minutes).
+    studio_disk_min_free_gb: float = 5.0
+    # Katae Studio: the usage of a Claude window (0-1; `providers.py` `status`, the windows it gates on) at which the
+    # system room says so once per window and the owner is pushed at once (V-4 — ARCHITECTURE.md §5.9 사용량 한도).
+    # Below `switch_at_utilization` (0.95) so that it is told before the switch. 0 or less = no warning. Read at every
+    # look (every minute).
+    studio_usage_warn_at: float = 0.90
+    # Katae Studio: True = while a window is at `studio_usage_warn_at` the queue does not start a new task (T3) until
+    # the owner approves (a `budget` item, V-4 — ARCHITECTURE.md §4.6). Off by default: the push is all. Read at every look.
+    studio_usage_hold: bool = False
+    # Katae Studio: the light model that words the daily report, one call a day ("" = no AI: the three lines are
+    # made by rule). An answer that is not the three lines, or a call that fails, leaves the rule's lines too.
+    studio_report_model: str = "haiku"
+    # Katae Studio: the light model that picks 'what to do differently next time' out of a final review's
+    # reason and adds it to the assignee's MEMORY.md (H-4 — ARCHITECTURE.md §9.1). "" = nothing is learned.
+    studio_memory_model: str = "haiku"
+    # Katae Studio: the folder a `source` of `studio_plugins` that is not an absolute path is taken from — the
+    # MNYS project's folder, as an absolute path (M-4 — ARCHITECTURE.md §6.4). Each machine has its own, so it
+    # goes in relay.config.local.yaml. "" = not set: such a plugin has no source and cannot be chosen.
+    studio_plugin_root: str = ""
+    # Katae Studio: the folder the phone's app update is read from (A-13 — ARCHITECTURE.md §6.4, studio/app_release.py):
+    # `latest.json` ({version_name, build_number, notes, apks: {abi: file name}}) and the APKs it names. The server
+    # only reads it, never builds or writes there. "" = `.katae/app` of the user folder; a path that is not absolute
+    # is taken from this repository's folder. Keep it outside every repository.
+    studio_app_dir: str = ""
+    # Katae Studio: the folder of the game-harness repository, as an absolute path — where `bootstrap.bat` and
+    # `index_build.bat` are (M-5 — ARCHITECTURE.md §6.4, studio/harness.py). Each machine has its own, so it goes
+    # in relay.config.local.yaml. "" = not set: the `harness` step of a new project fails unless it is turned off.
+    studio_harness_root: str = ""
+    # Katae Studio: the plugins a new UE project may be given, in the order the making screen lists them (M-4 —
+    # ARCHITECTURE.md §6.4, studio/plugins.py). `id`: what `plugins[]` of the request names. `name`: what the
+    # screen shows. `source`: the plugin's folder, absolute or from `studio_plugin_root`; it is only read.
+    # `folder` (may be left out): the folder's name under the project's `Plugins/` — the last part of `source`
+    # when not given. `engines`: the engine versions it is confirmed on, as quoted strings ("5.7"); [] = all. On
+    # another engine it is listed unchecked with a warning, and may still be chosen. `mcp` (the MCP plugin only):
+    # the server put in the project's `.mcp.json` — `server` (its name; "unreal" when left out), `command` and
+    # `args`, in which `{plugin}` and `{project}` become the absolute paths of the copied plugin's folder and of
+    # the project. A project given a plugin with `mcp` gets an MCP port of its own (55558 and up). The `mcp` of
+    # unreal_mcp is tentative — MNYS's own entry could not be read (design/studio/VERIFICATION.md): correct it
+    # here or in relay.config.yaml, not in the code.
+    studio_plugins: list[dict] = [
+        {"id": "unreal_mcp", "name": "Unreal MCP", "source": "Plugins/Unreal-MCP-main", "engines": [],
+         "mcp": {"server": "unreal", "command": "uv",
+                 "args": ["--directory", "{plugin}/Python", "run", "unreal_mcp_server.py"]}},
+        {"id": "ys_tag_usage", "name": "YSTagUsage", "source": "Plugins/YSTagUsage", "engines": ["5.7"]},
+    ]
 
     @classmethod
     def load(cls, path: Path | None = None) -> "Config":
@@ -72,6 +169,23 @@ class Config(BaseModel):
                 setattr(cfg, name, (ROOT / p).resolve())
         return cfg
 
+    @property
+    def studio_dir(self) -> Path:
+        """Katae Studio data (design/studio/ARCHITECTURE.md §2.2). Derived, so it follows runs_dir."""
+        return self.runs_dir / "studio"
+
+    @property
+    def studio_app_folder(self) -> Path:
+        """Where the app update is read from (A-13): `studio_app_dir`, or `~/.katae/app` when it is empty."""
+        if not self.studio_app_dir.strip():
+            return Path.home() / ".katae" / "app"
+        p = Path(self.studio_app_dir).expanduser()
+        return p if p.is_absolute() else ROOT / p
+
+    @property
+    def studio_db(self) -> Path:
+        return self.studio_dir / "studio.sqlite"
+
     @cached_property
     def mcp_registry(self) -> dict[str, dict]:
         """Built-in MCP servers plus the configured ones (configured entries win)."""
@@ -80,6 +194,8 @@ class Config(BaseModel):
             "docs_read": {"command": py, "args": [str(ROOT / "mcp_servers" / "docs_read.py"), str(self.docs_root)]},
             "handoff": {"command": py, "args": [str(ROOT / "mcp_servers" / "handoff.py"), str(self.runs_dir)]},
             "digest": {"command": py, "args": [str(ROOT / "mcp_servers" / "digest.py"), str(self.runs_dir / "digest-cache")]},
+            # its env (server address, actor token) is filled per stage by RelayEngine.mcp_env, for studio runs only
+            "studio": {"command": py, "args": [str(ROOT / "mcp_servers" / "studio.py")]},
         }
         return builtin | self.mcp_servers
 

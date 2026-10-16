@@ -6,6 +6,8 @@ requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115",
     "uvicorn>=0.30",
+    "anyio>=4",  # studio/ws.py imports it directly: a connection's task group and timeouts
+    "websockets>=13",  # uvicorn upgrades no connection without a WebSocket library: WS /studio/ws needs one
     "pydantic>=2.8",
     "pyyaml>=6.0",
     "anthropic>=0.70",
@@ -19,7 +21,16 @@ dev = ["pytest>=8", "httpx>=0.27"]
 relay = "relay_agent.cli:main"
 
 [tool.setuptools]
-packages = ["relay_agent", "mcp_servers"]
+packages = ["relay_agent", "relay_agent.studio", "mcp_servers"]
+
+[tool.setuptools.package-data]
+"relay_agent.studio" = [
+    "defaults/*",  # what a new UE project is given as it is (plugins.GUARDS_DEFAULT)
+    "hr/*",  # the HR employee's files (employees.HR_DIR): no __init__.py, so not a package
+    "parts/*",  # the guides and the defaults of the four other parts (employees.PARTS_DIR)
+    "seed/*",  # the seed employee's files (employees.SEED_DIR): no __init__.py, so not a package
+    "template/**/*",  # the skeleton of a new UE project (creator.TEMPLATE_DIR): every file, at any depth
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

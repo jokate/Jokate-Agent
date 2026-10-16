@@ -22,22 +22,28 @@ from .campaign import CampaignRunner, to_dict as campaign_dict
 from .config import Config, build_engine
 from .pipeline import RelaySpec, RunState
 from .runners import RunnerError, probe_claude_limits
+from .studio import api as studio_api, chat as studio_chat, runs as studio_runs, work as studio_work, ws as studio_ws
 
 cfg = Config.load()
 engine = build_engine(cfg)
 campaigns = CampaignRunner(engine, cfg.relays_dir)
 app = FastAPI(title="Agent 카태")
+studio_api.install(app, cfg, liveness=lambda run_id: engine.liveness(run_id),  # /studio/* (ARCHITECTURE.md §6)
+                   workdir=lambda run_id: studio_runs.workdir(engine, run_id),
+                   repos=lambda: engine.repos)  # a function: _reload_repos replaces the object
+engine.mcp_env["studio"] = studio_api.mcp_env  # §8.2: the actor token of a studio run's stage; None = not attached
+engine.guard_stage = studio_api.guard_stage  # §11.4: studio-full and the guard hook on a studio run; None = as it was
 DASHBOARD = Path(__file__).with_name("dashboard.html")
 
 
 def code_version() -> str:
-    """Hash of the server's Python code on disk. The dashboard HTML is read fresh per request but the
-    Python code is loaded once, so after an update the page can be new while the server is old."""
+    """Hash of the server's Python code on disk, subpackages (studio/) included. The dashboard HTML is read
+    fresh per request but the code is loaded once: after an update the page can be new, the server old."""
     import hashlib
 
-    h = hashlib.sha1()
-    for f in sorted(Path(__file__).parent.glob("*.py")):
-        h.update(f.name.encode() + f.read_bytes())
+    h, root = hashlib.sha1(), Path(__file__).parent
+    for f in sorted(root.rglob("*.py")):
+        h.update(f.relative_to(root).as_posix().encode() + f.read_bytes())
     return h.hexdigest()[:12]
 
 
@@ -48,7 +54,8 @@ RUNNING_CODE = code_version()
 def recover() -> None:
     engine.recover_interrupted()
     campaigns.recover()  # campaigns running when the server stopped go on (their interrupted run resumes)
-    engine.cleanup_workspaces(cfg.workspace_retention_days)
+    studio_api.open_store()  # a studio DB that cannot start answers 503 on /studio/*; the rest keeps running
+    engine.cleanup_workspaces(cfg.workspace_retention_days)  # after the store: it names the runs under review
 
     def hourly():  # expired workspaces are removed while the server keeps running, not only at start
         import time
@@ -93,11 +100,16 @@ async def guard(request: Request, call_next):
     if request.method != "GET" and origin and urlparse(origin).netloc != request.headers.get("host"):
         # A web page on another site can't drive this server through the user's browser (CSRF).
         return JSONResponse({"detail": "다른 출처의 요청은 거부됩니다"}, 403)
-    if host not in LOOPBACK and cfg.remote_networks and not _in_networks(host, cfg.remote_networks):
+    if not _network_allowed(host):
         # e.g. Tailscale only: other devices on the LAN (or a forwarded port) are refused before the token check
         return JSONResponse({"detail": "허용된 네트워크(remote_networks, 예: Tailscale) 밖에서의 접속은 거부됩니다"}, 403)
+    if request.url.path.startswith("/studio/"):
+        # Studio checks tokens itself (device tokens too) and asks this PC for one as well, so it branches
+        # off before the loopback pass below (design/studio/ARCHITECTURE.md §6.2).
+        denied = await studio_api.authenticate(request, cfg)
+        return denied if denied is not None else await call_next(request)
     if request.url.path != "/" and host not in LOOPBACK:
-        supplied = request.headers.get("authorization", "").removeprefix("Bearer ").strip()
+        supplied =request.headers.get("authorization", "").removeprefix("Bearer ").strip()
         if not cfg.auth_token:
             return JSONResponse({"detail": "원격 접근은 auth_token(또는 KATAE_TOKEN) 설정이 필요합니다"}, 403)
         if not hmac.compare_digest(supplied.encode(), cfg.auth_token.encode()):
@@ -356,12 +368,19 @@ class RepoIn(BaseModel):
     mcp: list[str] = []  # servers attached to every run in this repo (e.g. ["unreal"])
 
 
+# One reload at a time: a request thread (`/repos`) and a job's thread (the `register` step, M-8) both call it. Without
+# the lock the one that read the settings first could assign last, and a repository just registered would be gone
+# from the server until the next reload. Not an RLock: nothing calls it from inside itself.
+_repos_lock = threading.Lock()
+
+
 def _reload_repos() -> None:
     from .repos import RepoRegistry
 
-    fresh = Config.load()
-    cfg.repos = fresh.repos
-    engine.repos = RepoRegistry(fresh.repos)
+    with _repos_lock:
+        fresh = Config.load()
+        cfg.repos = fresh.repos
+        engine.repos = RepoRegistry(fresh.repos)
 
 
 @app.post("/repos")
@@ -805,15 +824,15 @@ def get_patch(run_id: str) -> str:
 
 @app.post("/runs/{run_id}/approve")
 def approve(run_id: str) -> RunState:
-    _load(run_id)
-    run = _conflict(engine.approve, run_id)
+    _outside(run_id)
+    run = _released(_conflict(engine.approve, run_id))
     _advance_bg(run_id)
     return run
 
 
 @app.post("/runs/{run_id}/resume")
 def resume(run_id: str, approval: str | None = None) -> RunState:
-    run = _load(run_id)
+    run = _outside(run_id)
     if run.status not in ("pending", "failed", "cancelled"):
         raise HTTPException(409, f"run is {run.status}")
     if approval:
@@ -825,24 +844,24 @@ def resume(run_id: str, approval: str | None = None) -> RunState:
 @app.post("/runs/{run_id}/cancel")
 def cancel(run_id: str) -> RunState:
     _load(run_id)
-    return _conflict(engine.cancel, run_id)
+    return _released(_conflict(engine.cancel, run_id))
 
 
 @app.post("/runs/{run_id}/changes/apply")
 def apply_changes(run_id: str) -> RunState:
-    _load(run_id)
+    _outside(run_id)
     return _conflict(engine.apply_changes, run_id)
 
 
 @app.post("/runs/{run_id}/changes/discard")
 def discard_changes(run_id: str) -> RunState:
-    _load(run_id)
+    _outside(run_id)
     return _conflict(engine.discard_changes, run_id)
 
 
 @app.post("/runs/{run_id}/changes/rollback")
 def rollback_changes(run_id: str) -> RunState:
-    _load(run_id)
+    _outside(run_id)
     return _conflict(engine.rollback_changes, run_id)
 
 
@@ -880,3 +899,282 @@ def post_cleanup(days: float | None = None) -> dict:
 @app.get("/usage")
 def get_usage(run_id: str | None = None) -> list[dict]:
     return engine.usage.summary(run_id)
+
+
+def _network_allowed(host: str) -> bool:
+    """This PC, or inside `remote_networks` when that is set (e.g. Tailscale only). The guard and the studio
+    WebSocket ask the same question here, so the condition is written once."""
+    return host in LOOPBACK or not cfg.remote_networks or _in_networks(host, cfg.remote_networks)
+
+
+# WS /studio/ws checks origin, network and token itself: the guard is an HTTP middleware and never sees a
+# WebSocket (design/studio/ARCHITECTURE.md §7.1). Down here so the lines that document cites stay where they are.
+studio_ws.install(app, network_allowed=_network_allowed)
+
+
+# The engine's stops and the inbox (design/studio/ARCHITECTURE.md §5.8). Down here for the same reason: the
+# endpoints above changed in place, line for line.
+def _outside(run_id: str) -> RunState:
+    """`_load` for what studio keeps to itself: approve · resume · changes/* of a studio task's run are 409 —
+    the inbox decides those (§5.8 다). cancel · interject stay open to a task's run."""
+    run = _load(run_id)
+    if studio_api.is_task_run(run_id):
+        raise HTTPException(409, "스튜디오 작업의 런이다. 결재함에서 결정하라")
+    return run
+
+
+def _released(run: RunState) -> RunState:
+    """approve · cancel went through here, not through the inbox: the pending inbox items of that run that
+    have no task are closed as cancelled (§5.8 나)."""
+    studio_api.close_run_items(run.id)
+    return run
+
+
+# A run that stops for approval or at a budget files an inbox item (the sink sits beside the toast and hears the
+# same events), and the decision of an item without a task comes back to this engine. The chat turns (S-7; §6.6 ·
+# §9.5) go the same way: the owner's message in a 1:1 room and a decision that asks for one start a turn here.
+chat_turns = studio_chat.ChatTurns(engine, cfg)
+studio_api.use_hooks(studio_runs.attach(engine, studio_api.run_inbox, advance=_advance_bg,
+                                        chat=chat_turns.request, turns=chat_turns,
+                                        learn=studio_api.learn_later))
+
+
+# The stops nobody heard — a run the CLI advanced, or one that stopped while the studio store was not open — are
+# filed once at the start (§5.8 나 "시작할 때"). A startup function of its own, down here: recover() above is cited
+# by line, and startup functions run in the order they were registered, so its open_store() has run by now.
+@app.on_event("startup")
+def file_waiting_runs() -> None:
+    studio_runs.file_waiting(engine, studio_api.run_inbox)
+
+
+# The seed employee (S-7; design/studio/ARCHITECTURE.md §2.2 · §3.15): made once, in a studio DB that has no
+# employee at all. A startup function of its own down here, for the reasons given above.
+@app.on_event("startup")
+def seed_studio_employee() -> None:
+    studio_api.seed_employee()
+
+
+# The HR employee (H-2; design/studio/ARCHITECTURE.md §3.5 · §3.15): made once, in a studio DB that has no row of
+# the HR part. Registered after the seed, so an empty DB starts with both; a startup function of its own as well.
+@app.on_event("startup")
+def ensure_studio_hr() -> None:
+    studio_api.ensure_hr()
+
+
+# The three other parts (H-1; design/studio/ARCHITECTURE.md §3.4 · §3.15): the empty cells of their rows take the
+# originals of relay_agent/studio/parts/ — a DB that already runs as well, and a value that is there is kept. A
+# startup function of its own, right after the HR one: neither waits on the other.
+@app.on_event("startup")
+def fill_studio_parts() -> None:
+    studio_api.fill_parts()
+
+
+# The employees' folders (H-3; design/studio/ARCHITECTURE.md §2.2 · §9.6): one that has no `.git` yet — made
+# before H-3, or by the seed · HR startups above — gets its first commit, with its files as they are. After the
+# startups that make folders; a folder that fails is logged and the server starts.
+@app.on_event("startup")
+def commit_studio_folders() -> None:
+    studio_api.commit_folders()
+
+
+# Task runs (S-8, part 1; design/studio/ARCHITECTURE.md §9.5 · §11.2): what T3 makes a task's run with on this
+# engine, and the models `GET /studio/models` lists — this engine's registry, which knows the benched ones. Down
+# here for the reasons given above.
+task_runs = studio_work.WorkEffects(engine, cfg, studio_api.get_store)
+studio_api.use_effects(task_runs, models=task_runs.catalog)
+
+
+# The line and its slots (S-8, part 2; design/studio/ARCHITECTURE.md §4.6 · §4.7 · §6.4): a task that joins the
+# line reaches the queue through `task_runs.kick`, `stop` through `use_queue`; each slot advances its run on a
+# thread of its own. The import is down here too: the lines above are cited by number.
+from .studio import queue as studio_queue  # noqa: E402
+
+# V-4: `usage_watch` (down at the V-4 block) holds the line while a usage window is at its threshold; its answer is
+# asked at every look, so the queue gets the two functions before the watch exists.
+_usage: list = []
+task_queue = studio_queue.TaskQueue(engine, task_runs, studio_api.run_inbox, limit=lambda: cfg.studio_max_runs,
+                                    hold=lambda: bool(_usage) and _usage[0].held(),
+                                    on_held=lambda: _usage[0].ask() if _usage else None)
+task_runs.kick, task_runs.holds = task_queue.kick, task_queue.holds  # holds: T7 · T9 · T11 wait for the slot (S-12)
+studio_api.use_queue(task_queue)
+
+
+# What follows the answer of a T4 (기다림 = 런 종료; design/studio/ARCHITECTURE.md §4.3 T4 · §8.3 · §5.7): a task run
+# that is still at work `cfg.studio_cut_after` seconds after `ask_owner` — and, with S-10, after the guard's T4 — is
+# cut; a T4 from another turn cuts it at once. The seconds are read each time a wait begins. A server that stops
+# inside the wait loses the timer: the recovery below cuts that run instead (§4.8 의 1). The import is down here for
+# the same reason.
+from .studio import cutoff as studio_cutoff  # noqa: E402
+
+task_cutoff = studio_cutoff.Cutoff(engine, studio_api.run_inbox, wait=lambda: cfg.studio_cut_after)
+studio_api.use_cutoff(task_cutoff)
+
+
+# The studio's campaigns go on by themselves (S-14, part 1; design/studio/ARCHITECTURE.md §4.10 · §4.6): the runner
+# of the campaigns above gets the studio's look as its extension (`campaigns.studio`), and `task_runs` calls it
+# after a change that may have made a task of a running campaign ready or ended the campaign. The tasks it puts
+# in the line are started by the queue: `task_runs.kick` stays the queue's own. The import is down here for the
+# same reason.
+from .studio import campaigns as studio_campaigns  # noqa: E402
+
+campaigns.studio = studio_campaigns.Autopilot(studio_api.run_inbox).look
+task_runs.campaign = campaigns.advance_studio
+
+
+# The studio recovery at the server's start (S-8, part 3; design/studio/ARCHITECTURE.md §4.8), after the engine's
+# own (recover() above) and after the stops nobody heard were filed: the runs a stop cut off stand in the line
+# again, the decision texts still owed go into their runs, the line is looked at once — §4.6 '서버가 시작했을 때':
+# the tasks that stood in it when the server stopped; the book of slots starts empty —, the employees' statuses
+# are worked out anew and a task without its inbox item is told of in the system room. Then the studio's running
+# campaigns are looked at once (S-14, §4.10): what became ready while the server was down. It never raises. A startup
+# function of its own, registered after those above (the reminders of the push follow it, at the bottom).
+@app.on_event("startup")
+def start_task_queue() -> None:
+    studio_work.recover(engine, studio_api.run_inbox, kick=task_queue.kick)
+    campaigns.advance_studio()
+
+
+# This computer (M-1; design/studio/ARCHITECTURE.md §6.4 · §7.1): `GET /studio/machine` and the stream's `hello`
+# get from here what only this process knows — the checks of `relay doctor`, the answer of `GET /providers` above
+# and the hash of the code that was loaded. The registry, the editors and the disk they read themselves
+# (studio/machine.py). Down here for the reasons given above.
+def _doctor_checks() -> list[dict]:
+    from .cli import doctor_checks  # at the call: the terminal's entry point is not needed to serve
+
+    return doctor_checks(cfg)
+
+
+studio_api.use_machine(doctor=_doctor_checks, providers=list_providers, version=lambda: RUNNING_CODE)
+
+
+# The final review (S-12, part 1; design/studio/ARCHITECTURE.md §5.4 · §6.4 · §4.3 T9): the engine that a task's
+# `run`, the package of a final review and the aliases of a run's patch and tokens are read from — a function,
+# because the object is a module variable —, and the runs `cleanup_workspaces` keeps past the retention period:
+# those of the tasks under review (studio/review.py). Down here for the reasons given above.
+studio_api.use_engine(lambda: engine, tokens=lambda run_id: get_tokens(run_id))
+engine.held_runs = studio_api.held_runs
+
+
+# Push (N-1; design/studio/ARCHITECTURE.md §5.9 · §11.3): the FCM sender is put beside whatever `engine.notifier` is
+# by now — the toast and the studio's sink keep hearing — and hears every commit that made an inbox item. The key
+# file is `cfg.studio_fcm_key`, read at the first push: with none (the default), or one that cannot be used, nothing
+# is sent and the server runs as before. Down here for the reasons given above.
+#
+# The policy (N-2; §5.9): the grade of each push, the quiet hours of a device and the muted rooms are the sender's
+# own (studio/push.py `classify` · `quiet_now`). An item that still waits `cfg.studio_remind_after` seconds after it
+# was made or last told of is pushed again — the sender looks at the server's start and every minute from then on.
+# The time is in the DB (`inbox.reminded_at`), so a server that starts again goes on from it.
+from .studio import push as studio_push  # noqa: E402
+
+pusher = studio_push.attach(engine, studio_api.run_inbox, key_path=lambda: cfg.studio_fcm_key,
+                            remind_after=lambda: cfg.studio_remind_after)
+
+
+@app.on_event("startup")
+def start_push_reminders() -> None:
+    pusher.watch()
+
+
+@app.on_event("shutdown")
+def stop_push_reminders() -> None:
+    pusher.unwatch()
+
+
+# The daily report (S-13; design/studio/ARCHITECTURE.md §5.9 일일 보고): once `cfg.studio_report_at` has come, the
+# three lines are written in the system room in the HR employee's name — once a day. Which days have their report
+# is read from the room itself, so a server that starts again writes no second one. Only the timer is here: the
+# counts, the wording and the rule of the day are studio/stats.py. Down here for the reasons given above.
+from .studio import stats as studio_stats  # noqa: E402
+
+reporter = studio_stats.Reporter(studio_api.get_store, at=lambda: cfg.studio_report_at,
+                                 model=lambda: cfg.studio_report_model, sweep=studio_api.staffing_sweep)
+
+
+@app.on_event("startup")
+def start_daily_report() -> None:
+    reporter.watch()
+
+
+@app.on_event("shutdown")
+def stop_daily_report() -> None:
+    reporter.unwatch()
+
+
+# V-3 (design/studio/ARCHITECTURE.md §4.8 · §5.9): the server stays up for days. While a task run or a chat turn
+# goes on the PC is kept from sleeping (studio/awake.py — queue.py and chat.py hold it; only the switch is here),
+# and when the free space of the runs' drive falls below `cfg.studio_disk_min_free_gb` the system room says so once
+# and the owner is pushed (studio/disk.py; the room itself is the record, so a restart does not say it twice).
+from .studio import awake as studio_awake, disk as studio_disk  # noqa: E402
+
+disk_watch = studio_disk.DiskWatch(studio_api.get_store, folder=lambda: cfg.runs_dir,
+                                   min_free_gb=lambda: cfg.studio_disk_min_free_gb)
+
+
+@app.on_event("startup")
+def start_awake_and_disk() -> None:
+    studio_awake.KEEPER.enable()
+    disk_watch.watch()
+
+
+@app.on_event("shutdown")
+def stop_awake_and_disk() -> None:
+    disk_watch.unwatch()
+    studio_awake.KEEPER.disable()
+
+
+# V-4 (design/studio/ARCHITECTURE.md §4.6 · §5.9): the Claude usage window (`providers.py` status — its 95% switch is
+# not touched) is looked at every minute. At `cfg.studio_usage_warn_at` the system room says so once per window and
+# the owner is pushed at once (studio/usage.py); with `cfg.studio_usage_hold` the line also starts no new task until
+# the owner approves.
+from .studio import usage as studio_usage  # noqa: E402
+
+usage_watch = studio_usage.UsageWatch(
+    studio_api.get_store, status=lambda: [engine.providers.status("claude")], warn_at=lambda: cfg.studio_usage_warn_at,
+    hold_on=lambda: cfg.studio_usage_hold, kick=lambda: task_queue.kick())
+_usage.append(usage_watch)
+
+
+@app.on_event("startup")
+def start_usage_watch() -> None:
+    usage_watch.watch()
+
+
+@app.on_event("shutdown")
+def stop_usage_watch() -> None:
+    usage_watch.unwatch()
+
+
+# Making a new UE project (M-8; design/studio/ARCHITECTURE.md §6.4 · §7.4): the `register` step of a job writes the
+# repository in this machine's settings file and has the server read it again, on the job's thread. `_reload_repos`
+# answers None, so the step is given a function that answers the registry it left (studio/harness.py `_reloaded`).
+# The reload itself is under `_repos_lock`; `engine.repos` is read after it, so it is that reload's or a later one's.
+# Down here for the reasons given above.
+from .config import ROOT  # noqa: E402
+
+
+def _reloaded_repos():
+    _reload_repos()
+    return engine.repos
+
+
+studio_api.use_jobs(reload=_reloaded_repos, local_file=ROOT / "relay.config.local.yaml")
+
+
+@app.on_event("startup")
+def recover_studio_jobs() -> None:
+    """A job file left `pending` or `running` by a server that stopped is `failed` from here on (§6.4): it can
+    be retried or cleaned. Not at import, and not in `Jobs.__init__`: only a server that starts may say so."""
+    studio_api.recover_jobs()
+
+
+# The editor of a task's run (M-7; design/studio/ARCHITECTURE.md §4.3 T3 · §4.5 · §4.7): the check before a run
+# goes on is `task_runs.editor_ready`, which the queue calls with its slot and which waits `cfg.studio_editor_wait`
+# seconds for the editor, or until the owner's `stop` (the cancel event of the slot: no question about the editor
+# then). A run that passed is handed to this watch, which looks at the editor while the run is at
+# work and cuts the run of one that stops answering. No timer runs until a run that uses the editor has passed the
+# check. Down here for the reasons given above.
+from .studio import editor_watch as studio_editor_watch  # noqa: E402
+
+task_editor_watch = studio_editor_watch.EditorWatch(engine, task_runs, studio_api.run_inbox, task_queue.holds)
+task_runs.watch = task_editor_watch.begin
+task_runs.staffing_look = studio_api.staffing_on_task  # a task filed: the triggers for a hire (§5.3 가·나)

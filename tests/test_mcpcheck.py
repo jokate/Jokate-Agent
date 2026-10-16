@@ -2,6 +2,7 @@
 import json
 import socket
 import sys
+import time
 from pathlib import Path
 
 from relay_agent import mcpcheck
@@ -37,6 +38,33 @@ def test_a_stdio_server_that_dies_or_hangs_is_down(tmp_path):
     hung = mcpcheck.probe(script(tmp_path, "import time; time.sleep(30)", "b.py"), timeout_s=1)
     assert "응답 없음" in hung
     assert "실행할 수 없음" in mcpcheck.probe({"command": "no-such-mcp-server-xyz"})
+
+
+def test_the_last_words_of_a_dead_stdio_server_are_waited_for(tmp_path, monkeypatch):
+    """stdout closes (the process is gone) before stderr has been read through: the reason still carries it."""
+    real = mcpcheck.subprocess.Popen
+
+    class Late:  # the stderr pipe, but its read() comes back 0.3 s late
+        def __init__(self, pipe):
+            self.pipe = pipe
+
+        def read(self, *args):
+            data = self.pipe.read(*args)
+            time.sleep(0.3)
+            return data
+
+        def __getattr__(self, name):
+            return getattr(self.pipe, name)
+
+    def popen(*args, **kwargs):
+        proc = real(*args, **kwargs)
+        if proc.stderr is not None:
+            proc.stderr = Late(proc.stderr)
+        return proc
+
+    monkeypatch.setattr(mcpcheck.subprocess, "Popen", popen)
+    died = mcpcheck.probe(script(tmp_path, "import sys; sys.stderr.write('editor not found'); sys.exit(1)"))
+    assert "종료" in died and "editor not found" in died
 
 
 def test_an_http_server_is_checked_by_connecting_to_its_port():

@@ -76,6 +76,9 @@ class StageCall:
     add_dirs: list[str] = field(default_factory=list)  # extra readable folders (user attachments)
     project: bool = False  # the folder's own CLAUDE.md / skills / MCP apply (never --safe-mode or skill-less)
     env: dict[str, str] = field(default_factory=dict)  # extra environment for the CLI process
+    # a guarded (studio) run: only Claude Code may run the stage — the PreToolUse hook of settings_path exists
+    # nowhere else, so RelayEngine._run_stage drops every other candidate
+    claude_only: bool = False
     # claude_cli: keep the conversation (session_id) so a cancelled/failed stage can be continued with
     # resume_session instead of re-exploring from scratch
     session_id: str | None = None
@@ -333,9 +336,11 @@ def run_process(args: list[str], call: StageCall, stdin_text: str | None,
         except OSError as e:
             input_error.append(str(e))
 
+    feeder: threading.Thread | None = None
     try:
         if stdin_text is not None:
-            threading.Thread(target=feed, daemon=True).start()
+            feeder = threading.Thread(target=feed, daemon=True)
+            feeder.start()
         elif live is None:
             proc.stdin.close()
         if live is not None:
@@ -364,6 +369,10 @@ def run_process(args: list[str], call: StageCall, stdin_text: str | None,
         tail = "".join(stderr_chunks)[-300:].strip()
         raise RunnerError(f"AI 프로세스가 {call.stall_s // 60}분간 아무 출력이 없어 중단" + (f" (stderr: {tail})" if tail else ""),
                           "stalled")
+    if feeder is not None and proc.returncode not in (0, None):
+        # The CLI is gone, so the write ends at once — with the Broken pipe, if the prompt was not read. `feed` may
+        # get its turn only after stdout closed: without this wait the check below could come before its note.
+        feeder.join(timeout=5)
     if input_error and proc.returncode not in (0, None):
         tail = "".join(stderr_chunks)[-300:].strip()
         raise RunnerError(f"AI 프로세스가 프롬프트를 읽기 전에 끝남 (exit {proc.returncode}): {tail or input_error[0]}")

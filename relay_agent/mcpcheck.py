@@ -73,7 +73,8 @@ def _probe_stdio(config: dict, timeout_s: float) -> str | None:
     err: list[bytes] = []
     threading.Thread(target=read, daemon=True).start()
     # drain stderr too: a chatty server would otherwise block on a full pipe before it answers
-    threading.Thread(target=lambda: err.append(proc.stderr.read()), daemon=True).start()
+    drain = threading.Thread(target=lambda: err.append(proc.stderr.read()), daemon=True)
+    drain.start()
     try:
         proc.stdin.write((json.dumps(INITIALIZE) + "\n").encode())
         proc.stdin.flush()
@@ -89,6 +90,7 @@ def _probe_stdio(config: dict, timeout_s: float) -> str | None:
         return None if "result" in msg else f"initialize 오류: {str(msg.get('error'))[:200]}"
     if msg == "timeout":
         return f"{timeout_s:.0f}초 안에 응답 없음 ({command})"
+    drain.join(2.0)  # stdout can close before stderr is read through: wait (briefly) for the last words
     tail = b"".join(err).decode("utf-8", "replace").strip()[-300:]
     return f"시작 직후 종료됨 ({command})" + (f": {tail}" if tail else "")
 

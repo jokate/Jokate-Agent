@@ -41,7 +41,7 @@ from .journal import JournalWorkspace
 from .workspace import DEFAULT_EXCLUDES, Workspace, WorkspaceError, _remove, check_shadow, dir_size, gc_shadow, shadow_dir_for
 
 WRITE_TOOLS = {"Edit", "Write", "Bash", "NotebookEdit"}
-READ_ONLY_MCP = {"docs_read", "handoff", "digest"}  # every other MCP server may change the real project
+READ_ONLY_MCP = {"docs_read", "handoff", "digest", "studio"}  # every other MCP server may change the real project
 # Words in an MCP tool name that mean it changes the project/editor (create_blueprint, set_actor_property,
 # SpawnActor …). Read tools (get/list/find/search/describe) have none of them. A heuristic: unknown names pass.
 MCP_CHANGE_WORDS = {
@@ -209,6 +209,7 @@ class RunState(BaseModel):
     # auto: never pause AND the AI is told everything is pre-approved (it must not defer work "until approved")
     approval: Literal["auto", "ai", "always", "never"] = "ai"
     mcp: list[str] | None = None  # extra MCP servers picked for this run (None = the repo's `mcp` list)
+    mcp_only: list[str] | None = None  # of `mcp` and the project's own servers, keep these only (None = all of them)
     model_cap: str | None = None  # strongest Claude tier any stage may use (haiku|sonnet|opus|fable), None = relay's
     effort_cap: str | None = None  # highest effort (low|medium|high|xhigh|max), None = relay's
     owner_pid: int | None = None
@@ -304,6 +305,13 @@ class RelayEngine:
         self.extra_allowed_tools = extra_allowed_tools or []
         self.repos = repos or RepoRegistry()
         self.mcp_registry = mcp_registry or {}
+        # server name -> (run id, stage) -> its env for that stage, or None = do not attach it to this run.
+        # Empty unless a layer registers one (studio: the actor token of a studio run); see _env_mcp.
+        self.mcp_env: dict[str, Callable[[str, str], dict | None]] = {}
+        # (run id, stage, run_dir=, cwd=, settings=) -> what a guarded run's stage gets on top of its own
+        # ({allowed_tools, settings_path, env, claude_only}), or None = this run's call stays as it is. None
+        # unless a layer registers one (studio: design/studio/ARCHITECTURE.md §11.4). If it raises, the stage fails.
+        self.guard_stage: Callable[..., dict | None] | None = None
         self.notifier = notifier
         self.handoff_writer = handoff_writer  # lightweight model that writes the stop hand-over
         self.router = router  # (prompt, model) -> (answer, usage): picks the relay for an `auto` run
@@ -463,31 +471,39 @@ class RelayEngine:
                    for n, v in ctx.optional_mcp.items()])
 
     @staticmethod
-    def _run_mcp_names(workdir: Path, repo: RepoSpec | None, picked: list[str] | None) -> list[str]:
+    def _run_mcp_names(workdir: Path, repo: RepoSpec | None, picked: list[str] | None,
+                       only: list[str] | None = None) -> list[str]:
         """Servers a run in this folder will attach besides the stages' own: the run's pick (or the repo's
-        default) and the project's own servers. Used before the run exists to decide copy vs in place."""
+        default) and the project's own servers. Used before the run exists to decide copy vs in place.
+        `only` (create's `mcp_only`): the names that are kept, the others are dropped — as `_attached_mcp` does."""
         names = list(picked if picked is not None else (repo.mcp if repo else []))
-        if repo is not None and not repo.project_context:
-            return names
-        try:
-            ctx = discover(Path(workdir), mcp_from=repo.mcp_from if repo else None)
-        except OSError:
-            ctx = None
-        return names + (list(ctx.mcp) if ctx else [])
+        if repo is None or repo.project_context:
+            try:
+                ctx = discover(Path(workdir), mcp_from=repo.mcp_from if repo else None)
+            except OSError:
+                ctx = None
+            names += list(ctx.mcp) if ctx else []
+        return names if only is None else [name for name in names if name in only]
 
     def _attached_mcp(self, run: RunState, ctx: ProjectContext | None, repo: RepoSpec | None) -> dict[str, dict]:
-        """name -> config of every project/optional MCP server this run uses (stage `mcp:` entries come on top)."""
-        if ctx is None:
-            return {}
-        attached = dict(ctx.mcp)
+        """name -> config of every project/optional MCP server this run uses (stage `mcp:` entries come on top).
+        Without a project context there is none — unless the run picked a server an `mcp_env` callback speaks
+        for (studio: an employee's turn or task run). The registry servers it picked are then attached all the
+        same; the project's and the user's own are not looked for, so a pick of those is an `mcp_missing`."""
+        if ctx is None and not any(name in self.mcp_env for name in run.mcp or []):
+            return {}  # a run that picked no such server (dashboard · CLI · campaign): no MCP, as it was
+        attached = dict(ctx.mcp) if ctx is not None else {}
+        optional = ctx.optional_mcp if ctx is not None else {}
         for name in (run.mcp if run.mcp is not None else (repo.mcp if repo else [])):
             if name in attached or name in self.mcp_registry:
                 if name in self.mcp_registry and name not in attached:
                     attached[name] = self.mcp_registry[name]
-            elif name in ctx.optional_mcp:
-                attached[name] = ctx.optional_mcp[name]["config"]
+            elif name in optional:
+                attached[name] = optional[name]["config"]
             else:
                 self._event(run, "-", "mcp_missing", server=name)
+        if run.mcp_only is not None:  # the same narrowing as _run_mcp_names; a stage's own `mcp:` is not narrowed
+            attached = {name: config for name, config in attached.items() if name in run.mcp_only}
         return attached
 
     # --- lifecycle ---------------------------------------------------------
@@ -503,11 +519,17 @@ class RelayEngine:
                stage_models: dict[str, dict] | None = None, attachments: list[Path] | None = None,
                approval: str | None = None, mcp: list[str] | None = None,
                model_cap: str | None = None, effort_cap: str | None = None,
-               needs_writes: bool = False) -> RunState:
+               needs_writes: bool = False, mcp_only: list[str] | None = None,
+               pin_copy: bool = False, routed: dict | None = None) -> RunState:
         """Start a run as a new turn. Without session_id a new session is opened.
         With a registered repo, its path, default workspace mode, verify commands and notes apply.
         model_cap / effort_cap: ceilings for every stage (e.g. never Fable, never above high).
-        needs_writes: the work must change the target, so an `auto` relay never routes to a read-only relay."""
+        needs_writes: the work must change the target, so an `auto` relay never routes to a read-only relay.
+        mcp_only: of `mcp` and the project's own MCP servers, only these are attached (None = all, as before).
+        pin_copy: the run must not write in the folder itself — it is refused (ValueError) instead of made when
+        it would work in place: `inplace`, `none` with a stage that writes, or `copy` that a live MCP would switch.
+        routed: what `route()` returned for an `auto` relay, given with `relay_path` the relay it picked — the
+        choice is recorded (`relay_routed`, the router's usage) as if it had been made here."""
         if model_cap and model_cap not in MODEL_ORDER:
             raise ValueError(f"model_cap 은 {', '.join(MODEL_ORDER)} 중 하나 (받음: {model_cap})")
         if effort_cap and effort_cap not in EFFORT_ORDER:
@@ -540,7 +562,10 @@ class RelayEngine:
             workdir = Path(session["workdir"]) if session else None
         if workdir is None:
             raise ValueError("workdir 또는 repo 가 필요합니다")
-        routed = None
+        if routed is not None and spec.router is not None:
+            raise ValueError(f"{spec.name} 은 릴레이를 고르는 릴레이입니다 — routed 는 route() 가 고른 릴레이의 "
+                             "경로와 함께 넘깁니다")
+        routed = {k: v for k, v in routed.items() if k != "path"} if routed else None  # the caller's dict stays whole
         if spec.router is not None:
             # an `auto` relay: pick the relay for this request, then everything below runs as if it was chosen
             routed = self._route(spec, relay_path, goal, Path(workdir), session_id, repo_spec, attachments,
@@ -578,8 +603,17 @@ class RelayEngine:
             chosen[stage_name] = {"provider": provider, "model": choice.get("model") or None}
             if effort:
                 chosen[stage_name]["effort"] = effort
-        live_mcp = sorted((set(m for s in spec.stages for m in s.mcp) | set(self._run_mcp_names(workdir, repo_spec, mcp)))
+        live_mcp = sorted((set(m for s in spec.stages for m in s.mcp) | set(self._run_mcp_names(workdir, repo_spec, mcp, mcp_only)))
                           - READ_ONLY_MCP)
+        if pin_copy:
+            # the folder itself must stay as it is (studio: a project that holds this server's code): a run that
+            # would write in it is not made — rather than made and switched to it below, or cancelled afterwards
+            if mode == "inplace" or (mode == "none" and any(s.writes for s in spec.stages)):
+                raise ValueError(f"복사본에서만 작업해야 하는 런인데 작업 공간이 {mode} 입니다 — "
+                                 "원본 폴더에서 파일을 고치게 됩니다")
+            if mode == "copy" and live_mcp:
+                raise ValueError(f"복사본에서만 작업해야 하는 런인데 MCP({', '.join(live_mcp)}) 가 실제 프로젝트를 "
+                                 "바꿉니다 — 복사본 대신 원본에서 작업하게 됩니다")
         forced = None
         if mode == "copy" and live_mcp:
             # MCP tools (e.g. the Unreal editor) change the real project, not a copy: results would split
@@ -598,7 +632,7 @@ class RelayEngine:
             auto_apply=bool(auto_apply),
             stage_models=chosen,
             approval=approval if approval in ("auto", "ai", "always", "never") else self.DEFAULT_APPROVAL,
-            mcp=mcp,
+            mcp=mcp, mcp_only=mcp_only,
             model_cap=model_cap or None,
             effort_cap=effort_cap or None,
         )
@@ -618,11 +652,11 @@ class RelayEngine:
                 run.baton.attachments.append(dst.as_posix())
         self.history.add_turn(session_id, goal, spec.name, run.id)
         if routed:
-            usage = routed.pop("usage")
+            usage = routed.pop("usage", None)
             if usage is not None:
                 self.usage.record(run.id, "-:router", usage)
-            self._event(run, "-", "relay_routed", relay=routed["relay"], reason=routed["reason"], by=routed["by"],
-                        router=routed["from"], cost_usd=usage.cost_usd if usage else None)
+            self._event(run, "-", "relay_routed", relay=routed.get("relay"), reason=routed.get("reason"),
+                        by=routed.get("by"), router=routed.get("from"), cost_usd=usage.cost_usd if usage else None)
         self._event(run, "-", "run_created", relay=spec.name, workdir=run.workdir, workspace=mode, repo=repo,
                     auto_apply=run.auto_apply, stages=[s.name for s in spec.stages], stage_models=chosen,
                     **{k: v for k, v in (("model_cap", run.model_cap), ("effort_cap", run.effort_cap)) if v})
@@ -631,13 +665,40 @@ class RelayEngine:
         self.save(run)
         return run
 
+    def route(self, relay_path: Path, goal: str, workdir: Path | None = None, *, session_id: str | None = None,
+              repo: str | None = None, attachments: list[Path] | None = None, needs_writes: bool = False,
+              exclude: list[str] | None = None) -> dict:
+        """The relay an `auto` relay picks for this request, without making a run: what `_route` returns —
+        `{path, relay, reason, by, usage, from}`. `exclude`: relay names left out on top of the router's own.
+        For a caller that must look at the picked relay before the run exists (studio): it then calls
+        `create(picked["path"], …, routed=picked)`, which records the choice as if it had been made there.
+        A model may be called, so two calls can differ. ValueError: the relay has no router, there is no folder,
+        or no candidate is left."""
+        relay_path = Path(relay_path)
+        spec, _ = RelaySpec.load(relay_path)
+        if spec.router is None:
+            raise ValueError(f"{spec.name} 은 릴레이를 고르는 릴레이가 아닙니다 (router 없음)")
+        repo_spec = None
+        if repo:
+            try:
+                repo_spec = self.repos.get(repo)
+            except KeyError as e:
+                raise ValueError(str(e)) from e
+            workdir = workdir or repo_spec.resolved
+        if workdir is None:
+            raise ValueError("workdir 또는 repo 가 필요합니다")
+        return self._route(spec, relay_path, goal, Path(workdir), session_id, repo_spec, attachments,
+                           needs_writes, exclude)
+
     def _route(self, spec: RelaySpec, relay_path: Path, goal: str, workdir: Path, session_id: str | None,
-               repo_spec: RepoSpec | None, attachments: list[Path] | None, needs_writes: bool = False) -> dict:
+               repo_spec: RepoSpec | None, attachments: list[Path] | None, needs_writes: bool = False,
+               exclude: list[str] | None = None) -> dict:
         """Ask the router which relay fits: the request, the target's harness and each candidate's description."""
         from . import router
 
         options = router.candidates(relay_path.parent, spec.router.candidates,
-                                    spec.router.exclude + [relay_path.stem], RelaySpec.load, writes_only=needs_writes)
+                                    spec.router.exclude + [relay_path.stem] + list(exclude or []),
+                                    RelaySpec.load, writes_only=needs_writes)
         if not options:
             raise ValueError("자동으로 고를 릴레이가 없습니다 (relays/ 에 stages 가 있는 릴레이 필요)")
         try:
@@ -854,11 +915,23 @@ class RelayEngine:
         except OSError:
             pass
 
+    # () -> the ids of the runs whose workspace outlives the retention period. None unless a layer registers one
+    # (studio: the runs of the tasks under review, design/studio/ARCHITECTURE.md §4.3 T9). If it raises, nothing
+    # expires in that round: a snapshot somebody may still need is not deleted on a guess.
+    held_runs: Callable[[], set[str]] | None = None
+
     def cleanup_workspaces(self, retention_days: float = 7) -> dict:
         """Free disk: workspaces with nothing left to decide go now; undecided ones (patch not applied,
-        failed/cancelled runs that could be resumed) go after retention_days. result.patch is always kept."""
+        failed/cancelled runs that could be resumed) go after retention_days — unless `held_runs` names the
+        run. result.patch is always kept."""
         cutoff = time.time() - retention_days * 86400
         cleaned, freed = [], 0
+        held: set[str] | None = set()
+        if self.held_runs is not None:
+            try:
+                held = set(self.held_runs())
+            except Exception:  # noqa: BLE001 - nobody can say which runs are held: none expires this time
+                held = None
         uploads = self.runs_dir / "uploads"  # staged attachments; a run keeps its own copy
         if uploads.is_dir():
             for folder in uploads.iterdir():
@@ -878,6 +951,8 @@ class RelayEngine:
                 continue
             if not (decided or old):
                 continue
+            if not decided and (held is None or run.id in held):
+                continue  # only its age would take it, and it is held (or nobody could say)
             ws = self.workspace(run)
             try:
                 freed += ws.cleanup()
@@ -903,13 +978,14 @@ class RelayEngine:
             stores.append({"store": store.name, "repo": names.get(store.name), "mb": round(dir_size(store) / 1_048_576, 1)})
         copies, patches, runs = 0, 0, []
         for d in self.runs_dir.iterdir() if self.runs_dir.exists() else []:
-            if not d.is_dir() or d.name in ("shadow", "locks"):
+            if not d.is_dir() or d.name in ("shadow", "locks", "studio"):  # studio: Katae Studio data, not a run
                 continue
             size = dir_size(d)
             copies += dir_size(d / "workspace") if (d / "workspace").exists() else 0
             patches += (d / "result.patch").stat().st_size if (d / "result.patch").exists() else 0
             runs.append((d.name, size))
-        dbs = sum(f.stat().st_size for f in self.runs_dir.glob("*.sqlite*")) if self.runs_dir.exists() else 0
+        db_dirs = [d for d in (self.runs_dir, self.runs_dir / "studio") if d.exists()]  # studio.sqlite and its bak-v<n>
+        dbs = sum(f.stat().st_size for d in db_dirs for f in d.glob("*.sqlite*"))
         total = dir_size(self.runs_dir) if self.runs_dir.exists() else 0
         mb = lambda b: round(b / 1_048_576, 1)  # noqa: E731
         return {
@@ -1413,10 +1489,37 @@ class RelayEngine:
                         "KATAE_USAGE_DB": str(getattr(self.usage, "path", "")), "PATH": os.environ.get("PATH", "")}
         return {**overrides, "digest": entry}
 
+    def _env_mcp(self, known: dict, run: RunState, stage: str) -> tuple[dict[str, dict], set[str]]:
+        """The servers a callback of `mcp_env` decides about, for one stage: (name -> config with the env it
+        gave) — attached to the stage whatever its tools —, and the names it gave None for — not attached,
+        also when the stage lists them. A name no config is known for, or whose callback raised, is withheld.
+        The engine does not know what the env means (studio: who the run's employee is)."""
+        given: dict[str, dict] = {}
+        withheld: set[str] = set()
+        for name, callback in self.mcp_env.items():
+            try:
+                env = callback(run.id, stage)
+            except Exception as e:  # noqa: BLE001 - a layer's callback must not break the run
+                self._event(run, stage, "mcp_env_failed", server=name, error=f"{type(e).__name__}: {e}"[:300])
+                env = None
+            config = known.get(name) or self.mcp_registry.get(name)
+            if env is None or config is None:
+                withheld.add(name)
+            else:
+                given[name] = {**config, "env": {**config.get("env", {}), **env}}
+        return given, withheld
+
     def _model_for(self, provider: str, model: str | None) -> str | None:
         if self.providers is None or provider not in self.providers.specs:
             return model
         return self.providers.get(provider).resolve_model(model)
+
+    def _hookable(self, name: str) -> bool:
+        """Does that provider run Claude Code — the one runner that takes `--settings`, and so the guard hook?
+        `mock` passes too: it is the tests' and calls no tool. `is_claude` below is wider (API runners)."""
+        if self.providers is not None and name in self.providers.specs:
+            return self.providers.get(name).kind in ("claude_cli", "mock")
+        return name in ("claude", "mock")
 
     def _run_stage(self, run: RunState, stage: StageSpec, call: StageCall, primary: str | None = None):
         """Try the primary provider (the run's pick or the relay's), then alternates."""
@@ -1429,7 +1532,12 @@ class RelayEngine:
         if self.providers is not None:
             # alternates are only fallbacks: which of them are unusable matters only if the primary fails
             options, skipped = self.providers.candidates(primary, options[1:], stage.writes)
-        unusable = "; ".join(f"{s['provider']}: {s['reason']}" for s in skipped)
+        if call.claude_only:  # a studio run: no runner the guard hook cannot be hung on (ARCHITECTURE.md §10.8 의 9)
+            kept = [o for o in options if self._hookable(o["provider"])]
+            skipped = skipped + [{**o, "reason": "가드 훅을 걸 수 없는 AI (studio 런은 Claude Code 만 쓴다)"}
+                                 for o in options if o not in kept]
+            options = kept
+        unusable ="; ".join(f"{s['provider']}: {s['reason']}" for s in skipped)
         if not options:
             raise RunnerError("사용 가능한 AI 가 없습니다" + (f" ({unusable})" if unusable else ""), "unavailable")
 
@@ -1484,13 +1592,15 @@ class RelayEngine:
                 raise last_error or RunnerError("no provider ran")
         raise last_error or RunnerError("no provider ran")
 
-    def advance(self, run_id: str, resume: bool = False) -> RunState:
+    def advance(self, run_id: str, resume: bool = False, cancel: threading.Event | None = None) -> RunState:
         """Run stages until done, failed, cancelled, or a pause. A failed or cancelled run only continues
-        when resume=True, so a start that races with a cancel can't revive the run."""
+        when resume=True, so a start that races with a cancel can't revive the run. `cancel` is the event
+        `cancel()` sets while this call is in; a caller that gives its own and sets it before the call is in
+        loses no cancel — the run then ends cancelled and no stage runs."""
         lock = self._locks.setdefault(run_id, threading.Lock())
         if not lock.acquire(blocking=False):
             raise ValueError(f"run {run_id} is already advancing")
-        cancel = self._cancel[run_id] = threading.Event()
+        cancel = self._cancel[run_id] = cancel if cancel is not None else threading.Event()
         try:
             return self._advance(run_id, cancel, resume)
         except Exception as e:  # never leave a run stuck in "running" on an unexpected error
@@ -1505,12 +1615,16 @@ class RelayEngine:
                 self._release_folder(run_id, self.load(run_id).workdir)
             except (OSError, ValueError):
                 pass
-            lock.release()
+            self._let_go(run_id, lock)  # frees the run, then after_advance — both at the end of the class
 
     def _advance(self, run_id: str, cancel: threading.Event, resume: bool) -> RunState:
         run = self.load(run_id)
         if run.status not in (RESUMABLE if resume else ("pending",)):
             return run
+        if cancel.is_set():  # cancelled before this call was in, or just as it came in: nothing is revived
+            if run.status == "cancelled":
+                return run  # `cancel()` has recorded it already
+            return self._fail(run, "-", "사용자가 취소함", status="cancelled")
         spec, base = RelaySpec.load(Path(run.relay))
         names = [s.name for s in spec.stages]
         if run.workspace_mode == "inplace":
@@ -1607,9 +1721,9 @@ class RelayEngine:
                 run.stage_sessions[stage.name] = session_id
                 self.save(run)  # known before the AI starts, so a cancel/crash can continue this conversation
 
-            # Cheap first pass; spend more only when this stage is being redone from scratch.
-            escalate = redo and not continuing and run.approval != "auto"  # auto: finish the work, don't switch to a
-            effort = stage.retry_effort if escalate and stage.retry_effort else stage.effort  # model that burns the budget
+            reopened = bool(resume_sid) and resume_sid == run.done_sessions.get(stage.name)  # `reopen` handed it back
+            escalate = redo and not (continuing or reopened) and run.approval != "auto"  # spend more only on a redo from
+            effort = stage.retry_effort if escalate and stage.retry_effort else stage.effort  # scratch, never under auto
             choice = run.stage_models.get(stage.name) or {}
             if choice.get("effort"):
                 effort = choice["effort"]  # the user's pick, also on retries
@@ -1634,6 +1748,12 @@ class RelayEngine:
             tools = self._stage_tools(stage, repo, ctx)
             if resume_sid:
                 self._event(run, stage.name, "stage_resumed", session=resume_sid)
+            stage_mcp = stage.mcp + ([m for m in attached if m not in stage.mcp] if tools else [])
+            stage_overrides = {**attached, **self._stage_mcp(mcp_overrides, run, stage.name, cwd)}
+            if self.mcp_env:  # nothing registered: both stay as they are
+                given, withheld = self._env_mcp(stage_overrides, run, stage.name)
+                stage_mcp = [m for m in stage_mcp if m not in withheld] + [m for m in given if m not in stage_mcp]
+                stage_overrides.update(given)
             call = StageCall(
                 stage=stage.name,
                 model=model,
@@ -1650,14 +1770,14 @@ class RelayEngine:
                 # ToolSearch: a big server (unreal: 1,031 tools) is loaded by name and looked up on demand —
                 # measured 361K -> 62K input tokens for the same two calls
                 tools=(tools + [t for t in ("ToolSearch",) if t not in tools]) if tools and attached else tools,
-                mcp_servers=stage.mcp + ([m for m in attached if m not in stage.mcp] if tools else []),
+                mcp_servers=stage_mcp,
                 result_mode=stage.result_mode,
                 add_dirs=([str(self._dir(run.id) / "attachments")] if run.baton.attachments else [])
                 + ([ctx.root.as_posix()] if ctx and Path(cwd).resolve() != ctx.root else []),
                 allowed_tools=stage.allowed_tools + (
                     self.extra_allowed_tools + repo_tools + (ctx.allowed_bash() if ctx else [])
                     if "Bash" in (tools or []) else []) + (ctx.allowed_other() if ctx and tools else []),
-                mcp_overrides={**attached, **self._stage_mcp(mcp_overrides, run, stage.name, cwd)},
+                mcp_overrides=stage_overrides,
                 project=ctx is not None,
                 # a copy outside the project doesn't see the project's CLAUDE.md by walking up: load it via --add-dir
                 env={"CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD": "1"} if ctx and not ctx.contains(cwd) else {},
@@ -1676,6 +1796,25 @@ class RelayEngine:
                 session_id=None if resume_sid else session_id,
                 resume_session=resume_sid,
             )
+            if self.guard_stage is not None:  # nothing registered (CLI, tests): the call stays as it was
+                try:
+                    guard = self.guard_stage(run.id, stage.name, run_dir=self._dir(run.id), cwd=Path(cwd),
+                                             settings=hook_settings)
+                except Exception as e:  # noqa: BLE001 - closed side: a guarded run does not go on without its guard
+                    return self._fail(run, stage.name, f"가드를 걸지 못했습니다 — {type(e).__name__}: {e}"[:300])
+                if guard:  # pre-approvals, the hook's settings file, where the hook asks, Claude Code only
+                    # a repo without a verification command lost Bash to Grep/Glob (_stage_tools). A guarded run
+                    # whose profile approves Bash keeps the Bash its relay's stage lists: the hook judges each
+                    # command (owner's decision of 2026-10-14, §10.1)
+                    kept = (call.tools + ["Bash"] if call.tools and "Bash" not in call.tools
+                            and "Bash" in (stage.tools or []) and "Bash" in (guard.get("allowed_tools") or [])
+                            else call.tools)
+                    call = replace(
+                        call, claude_only=bool(guard.get("claude_only")), tools=kept,
+                        allowed_tools=call.allowed_tools + [t for t in guard.get("allowed_tools") or []
+                                                            if t not in call.allowed_tools],
+                        env={**call.env, **(guard.get("env") or {})},
+                        settings_path=guard.get("settings_path") or call.settings_path)
             if resume_sid:
                 # continue the same conversation: only what changed, not the whole baton again
                 fresh_prompt = call.prompt
@@ -1811,4 +1950,75 @@ class RelayEngine:
             except OSError:
                 pass
         self.save(run)
+        return run
+
+    # --- once a run is let go -------------------------------------------------------------------------------
+    # At the end of the class so the lines design/studio/ARCHITECTURE.md cites stay where they are.
+    after_advance: Callable[[str], None] | None = None  # (run id); set by studio/runs.py attach()
+
+    def _let_go(self, run_id: str, lock: threading.Lock) -> None:
+        """The last step of advance(): free the run, then tell `after_advance`. The stop was written and saved
+        before this and no thread holds the run any more, so whoever listens may read the StopNote and approve
+        or cancel the run without this thread's last save overwriting it. It is called on the thread that
+        advanced, before advance() returns; what it raises is dropped — it must not change the run's result."""
+        lock.release()
+        if self.after_advance is not None:
+            try:
+                self.after_advance(run_id)
+            except Exception:  # noqa: BLE001
+                pass
+
+    # --- what a final review asks of a run that has ended (studio/review.py, S-12) ----------------------------
+    # Down here for the same reason: design/studio/ARCHITECTURE.md §4.7 (`done` 행) · §11.2.
+    def reopen(self, run_id: str) -> RunState:
+        """A `done` run goes on: the work is sent back by whoever reviewed it after the relay (a rework), with
+        the conversation it ended in. The run is `pending` again at the stage a reviewer of the relay sends work
+        back to — from the end, the first stage some stage names as `on_retry`; the last stage when none does —
+        and that stage continues the conversation of its last finished attempt (`done_sessions`), so
+        `advance(resume=True)` tells it with `stage_resumed`. Nothing is run here.
+
+        ValueError: the run is not `done`, a thread still holds it, or its changes are decided already
+        (`applied` · `discarded` · `rolled_back`) — the engine collects no new changes of such a run."""
+        if run_id in self._cancel:
+            raise ValueError(f"run {run_id} is still advancing")
+        run = self.load(run_id)
+        if run.status != "done":
+            raise ValueError(f"run {run_id} is {run.status}, not done")
+        if run.changes_status in ("applied", "discarded", "rolled_back"):
+            raise ValueError(f"changes already {run.changes_status}")
+        try:
+            spec, _ = RelaySpec.load(Path(run.relay))
+        except (OSError, yaml.YAMLError) as e:
+            raise ValueError(f"릴레이를 읽지 못했습니다: {e}") from e
+        names = [s.name for s in spec.stages]
+        if not names:
+            raise ValueError("릴레이에 단계가 없습니다")
+        back = next((s.on_retry for s in reversed(spec.stages) if s.on_retry in names), names[-1])
+        run.index, run.status, run.error, run.retries = names.index(back), "pending", None, {}
+        session = run.done_sessions.get(back)
+        if session:
+            run.stage_sessions[back] = session
+        if run.changes_status == "none":
+            run.workspace_cleaned = False  # it was cleaned when the run ended with nothing changed: prepared anew
+        self._event(run, "-", "run_reopened", to=back, session=session)
+        self.save(run)
+        return run
+
+    def keep_changes(self, run_id: str) -> RunState:
+        """The changes of an `inplace` run are decided as "they stay": `changes_status` becomes `applied` and
+        the snapshot (or journal) goes — after this the run is neither rolled back nor reopened. The folder is
+        not touched. ValueError unless the run is `done` · `cancelled`, `inplace` and `ready`."""
+        run = self.load(run_id)
+        if run.status not in ("done", "cancelled"):
+            raise ValueError(f"실행이 끝난 뒤에만 가능합니다 (현재: {run.status})")
+        if run.workspace_mode != "inplace" or run.changes_status != "ready":
+            raise ValueError(f"keep is for the undecided changes of an inplace run "
+                             f"({run.workspace_mode}, {run.changes_status})")
+        ws = self.workspace(run)
+        if ws is not None and ws.prepared:
+            ws.cleanup()
+        run.changes_status, run.workspace_cleaned = "applied", True
+        self._event(run, "-", "changes_applied", files=(run.changes or {}).get("files", 0), kept=True)
+        self.save(run)
+        gc_shadow(self.runs_dir / "shadow")
         return run
