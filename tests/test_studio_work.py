@@ -370,3 +370,13 @@ def test_the_configs_cap_is_the_last_one_of_a_chat_turn_too(lab, monkeypatch):  
     values = chat.ChatTurns(lab.engine, cfg)._values(lab.store, lab.store.get_employee(emp))
     assert (values["slot"], values["model_cap"], values["effort_cap"]) == (
         {"model": "sonnet", "effort": "medium"}, "sonnet", "medium")
+
+
+def test_a_task_run_goal_carries_the_harness_section_after_the_policy(shop, monkeypatch):
+    from test_studio_harness_root import fake_harness
+    emp = shop.hire()
+    assert "===== 하네스" not in shop.start(shop.task(emp))[1].baton.goal
+    monkeypatch.setattr(shop.cfg, "studio_harness_root", str(fake_harness(shop.lab.tmp)))
+    goal = shop.start(shop.task(emp))[1].baton.goal
+    assert "===== 하네스 =====\n행동하기 전에 읽는다." in goal and "- b — b 을 할 때" in goal
+    assert goal.index("===== GUIDE.md") < goal.index("===== 하네스") < goal.index("===== 결재 규칙")

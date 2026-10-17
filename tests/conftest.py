@@ -92,3 +92,13 @@ def no_awake_or_disk_look_from_a_tests_server(monkeypatch):
 
     monkeypatch.setattr(awake.KEEPER, "enable", lambda *args, **kwargs: None)  # this instance only
     monkeypatch.setattr(disk.DiskWatch, "watch", lambda self, *args, **kwargs: None)
+
+
+@pytest.fixture(autouse=True)
+def harness_is_not_this_pcs(monkeypatch, tmp_path_factory):
+    """`harness_root.default_home` is this PC's home: a test with no `studio_harness_root` must not get the
+    owner's real harness into its prompts. Empty folder in its place; a test of the junction passes `home`."""
+    from relay_agent.studio import harness_root
+
+    empty = tmp_path_factory.mktemp("no_home")
+    monkeypatch.setattr(harness_root, "default_home", lambda: empty)

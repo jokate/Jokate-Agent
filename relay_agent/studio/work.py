@@ -48,7 +48,7 @@ import yaml
 
 from ..config import ROOT
 from ..pipeline import RelaySpec, cap_effort, cap_model
-from . import campaigns, cutoff, employees, gate, plugins, review, runs
+from . import campaigns, cutoff, employees, gate, harness_root, plugins, review, runs
 from . import editor as editor_control
 from . import machine as machine_info
 from .inbox import SYSTEM_ROOM
@@ -652,13 +652,14 @@ class WorkEffects(Effects):
     def _goal(self, store: StudioStore, task: dict, employee: dict) -> str:
         """§11.2 `goal`: the task first — its title is the head, which a new session takes its name from —, then
         reason, spec and done criteria, then the employee's part of the prompt (§9.1: persona, guide, memory,
-        the project's policy, the recent messages of the task's room)."""
+        the project's policy, the harness, the recent messages of the task's room)."""
         room = next(iter(store.list_rooms(task_id=task["id"], include_archived=True)), None)
         parts = [f"작업: {(task['title'] or '').strip()}"]
         parts += [f"===== {title} =====\n{task[key].strip()}" for title, key in GOAL_SECTIONS
                   if (task[key] or "").strip()]
         parts.append(employees.prompt_for(store, self.cfg.studio_dir, employee, room["id"] if room else None,
-                                          task["project_id"]))
+                                          task["project_id"],
+                                          harness=harness_root.section_for(self.cfg.studio_harness_root)))
         return "\n\n".join(part for part in parts if part.strip())
 
     def _relay(self, task: dict, settings: dict, checks: employees.Checks) -> tuple[Path, RelaySpec]:

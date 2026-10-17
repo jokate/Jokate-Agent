@@ -408,6 +408,21 @@ class StudioStore:
     def update_room(self, room_id: str, *, tx: Tx | None = None, **fields) -> dict | None:
         return self._update(ROOMS, {"id": room_id}, fields, tx)
 
+    def delete_messages(self, room_id: str, *, tx: Tx) -> list[int]:
+        """Delete every message of the room (the one place messages go: 방 삭제 · 대화 지우기, §6.4). The ids of
+        the rows gone, so the caller can remove their attachment folders after the commit."""
+        ids = [row["id"] for row in tx.rows("SELECT id FROM messages WHERE room_id = ?", (room_id,))]
+        tx.exec("DELETE FROM messages WHERE room_id = ?", (room_id,))
+        return ids
+
+    def delete_room(self, room_id: str, *, tx: Tx) -> list[int]:
+        """Delete the room with its messages and members (foreign keys are on, so in that order). The ids of the
+        messages gone. `stream_events` stay: they are only a log of what was sent."""
+        ids = self.delete_messages(room_id, tx=tx)
+        tx.exec("DELETE FROM room_members WHERE room_id = ?", (room_id,))
+        tx.exec("DELETE FROM rooms WHERE id = ?", (room_id,))
+        return ids
+
     # --- room_members (key: room_id + employee_id) --------------------------------------------------------
     def create_room_member(self, room_id: str, employee_id: str, *, tx: Tx | None = None, **fields) -> dict:
         return self._insert(ROOM_MEMBERS, dict(fields, room_id=room_id, employee_id=employee_id), tx)

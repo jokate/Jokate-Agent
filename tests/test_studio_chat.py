@@ -485,3 +485,30 @@ def test_mcp_only_keeps_the_servers_it_names_and_drops_the_projects_others(tmp_p
     folder.mkdir()
     assert RelayEngine._run_mcp_names(folder, None, ["unreal", "studio"], ["studio"]) == ["studio"]
     assert RelayEngine._run_mcp_names(folder, None, ["unreal", "studio"])[:2] == ["unreal", "studio"]
+
+
+# --- the harness section of a conversation's first prompt (§9.1) ---------------------------------------------------
+def test_the_first_turn_carries_the_harness_section_and_a_resumed_one_does_not(desk, monkeypatch):
+    from test_studio_harness_root import fake_harness
+    monkeypatch.setattr(desk.cfg, "studio_harness_root", str(fake_harness(desk.lab.tmp)))
+    desk.answers("네", "알겠습니다", "좋습니다")
+    desk.say("안녕?")
+    desk.say("그럼?")
+    one, two = desk.calls
+    assert "===== 하네스 =====\n행동하기 전에 읽는다." in one.prompt and "- a — a 을 할 때" in one.prompt
+    assert "하네스" not in two.prompt  # the session holds it already
+    monkeypatch.setattr(desk.cfg, "studio_harness_root", "")
+    desk.say("다시?")
+    three = desk.calls[2]
+    assert "하네스" not in three.prompt  # a resumed turn sends no goal, so clearing the setting changes nothing
+    assert three.resume_session == one.session_id
+    assert desk.said()[-1] == ("employee", "좋습니다")
+
+
+def test_an_empty_setting_without_a_junction_gives_a_first_turn_without_the_section(desk, monkeypatch):
+    monkeypatch.setattr(desk.cfg, "studio_harness_root", "")  # conftest's default_home is empty: no junction either
+    desk.answers("네")
+    desk.say("안녕?")
+    [call] = desk.calls
+    assert "===== 하네스 =====" not in call.prompt
+    assert "나는 민수다" in call.prompt

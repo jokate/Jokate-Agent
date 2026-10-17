@@ -261,7 +261,10 @@ def test_routes_are_the_s3_rows_of_the_document():
     assert all(f"| `{method} {path}` |" in section for method, path in group)
     policy = {("GET", "/studio/projects/{id}/policy"), ("PUT", "/studio/projects/{id}/policy")}  # H-6
     assert "| `GET` · `PUT /studio/projects/{id}/policy` |" in section  # one row for the two (tests/test_studio_policy.py)
-    others = members | muted | failed | editor | parts | history | life | memory | group | policy
+    harness = {("POST", "/studio/projects/{id}/harness")}  # T3
+    gone = {("DELETE", "/studio/rooms/{id}"), ("POST", "/studio/rooms/{id}/clear")}  # T4 (tests/test_studio_room_delete.py)
+    assert all(f"| `{method} {path}` |" in section for method, path in gone)
+    others = members | muted | failed | editor | parts | history | life | memory | group | policy | harness | gone
     assert len(doc) == 18 and not doc & others and built == doc | others
 
 
@@ -822,7 +825,7 @@ def test_a_message_saved_before_the_owner_left_a_group_room_still_answers_its_re
 def test_the_owners_message_in_a_group_room_is_kept_and_told_and_asks_its_members_turns(world, monkeypatch):
     asked, turns = [], []
     monkeypatch.setattr(api, "_ask_turn", lambda *a, **k: asked.append(a))
-    monkeypatch.setattr(api, "_group_turns", lambda room_id, ids, mentioned=False: turns.append((room_id, list(ids),
+    monkeypatch.setattr(api, "_group_turns", lambda room_id, ids, mentioned=False, judged=False: turns.append((room_id, list(ids),
                                                                                                  mentioned)))
     me = world.emp["id"]
     mate, outsider = _staff(world, "지수", "현우")
