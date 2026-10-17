@@ -523,6 +523,19 @@
             ],
             "title": "Group Max Exchanges"
           },
+          "group_rounds": {
+            "anyOf": [
+              {
+                "maximum": 10.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Group Rounds"
+          },
           "max_exchanges": {
             "anyOf": [
               {
@@ -856,6 +869,41 @@
           }
         },
         "title": "McpHireRecommend",
+        "type": "object"
+      },
+      "McpPlanPropose": {
+        "additionalProperties": false,
+        "properties": {
+          "goal": {
+            "default": "",
+            "title": "Goal",
+            "type": "string"
+          },
+          "mode": {
+            "default": "",
+            "title": "Mode",
+            "type": "string"
+          },
+          "project_id": {
+            "default": "",
+            "title": "Project Id",
+            "type": "string"
+          },
+          "steps": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Steps",
+            "type": "array"
+          },
+          "title": {
+            "default": "",
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "title": "McpPlanPropose",
         "type": "object"
       },
       "McpPolicyDraft": {
@@ -3384,7 +3432,8 @@
                     "budget",
                     "risky_command",
                     "final_review",
-                    "hire_recommendation"
+                    "hire_recommendation",
+                    "plan_proposal"
                   ],
                   "type": "string"
                 },
@@ -3743,7 +3792,7 @@
     },
     "/studio/machine/limits": {
       "get": {
-        "description": "The three limits the owner may change, as the running server holds them (§6.4; `GET /studio/machine` has them too, but runs the checks of the computer).",
+        "description": "The four limits the owner may change, as the running server holds them (§6.4; `GET /studio/machine` has them too, but runs the checks of the computer).",
         "operationId": "read_machine_limits_studio_machine_limits_get",
         "responses": {
           "200": {
@@ -3765,7 +3814,7 @@
         ]
       },
       "patch": {
-        "description": "V-4 (§4.6 · §6.4): the named limits take effect at once — the line and the exchange checks read them at every use — and are kept in this machine's settings file (`relay.config.local.yaml`), so they hold after a restart. The answer is the three limits afterwards. None named: 422. The file cannot be written: 500 and nothing changed.",
+        "description": "V-4 (§4.6 · §6.4): the named limits take effect at once — the line and the exchange checks read them at every use — and are kept in this machine's settings file (`relay.config.local.yaml`), so they hold after a restart. The answer is the four limits afterwards. None named: 422. The file cannot be written: 500 and nothing changed.",
         "operationId": "change_machine_limits_studio_machine_limits_patch",
         "requestBody": {
           "content": {
@@ -4066,6 +4115,50 @@
           }
         },
         "summary": "Mcp Hire Recommend",
+        "tags": [
+          "studio"
+        ]
+      }
+    },
+    "/studio/mcp/plan_propose": {
+      "post": {
+        "description": "An employee files a plan (title, goal, up to 12 steps, mode) for the owner. `{inbox_id}`; nothing is made yet.",
+        "operationId": "mcp_plan_propose_studio_mcp_plan_propose_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/McpPlanPropose"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Mcp Plan Propose Studio Mcp Plan Propose Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Mcp Plan Propose",
         "tags": [
           "studio"
         ]
@@ -5739,6 +5832,56 @@
           }
         },
         "summary": "Post Message",
+        "tags": [
+          "studio"
+        ]
+      }
+    },
+    "/studio/rooms/{id}/messages/{message_id}/propose": {
+      "post": {
+        "description": "The owner asks the employee who wrote a message to file it as a plan (or a task): a `system` message that says\nso (`meta.event = propose_request`) and that employee's turn (§6.6). Only an employee's message in a 1:1, group or\ndepartment room; a task or system room, an archived group room, a message of the owner or of the system, and an\nemployee who retired or left are refused. 201 with the system message.",
+        "operationId": "propose_message_studio_rooms__id__messages__message_id__propose_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "title": "Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "message_id",
+            "required": true,
+            "schema": {
+              "title": "Message Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Propose Message",
         "tags": [
           "studio"
         ]

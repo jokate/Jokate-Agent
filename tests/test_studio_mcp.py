@@ -64,7 +64,7 @@ def room_of(desk, kind, **fields):  # noqa: F811
 def test_the_fourteen_tools_are_the_ones_of_8_4(process):
     twelve = tools_of_8_4()
     listed = asyncio.run(process.mcp.list_tools())
-    assert len(twelve) == 14 and {tool.name for tool in listed} == twelve == set(tools.TOOLS)
+    assert len(twelve) == 15 and {tool.name for tool in listed} == twelve == set(tools.TOOLS)
     schema = api.openapi_schema()
     assert {path.rsplit("/", 1)[1] for path in schema["paths"] if path.startswith("/studio/mcp/")} == twelve
     models = schema["components"]["schemas"]

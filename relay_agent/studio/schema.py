@@ -400,10 +400,17 @@ CREATE TABLE hire_signals (
 );
 """
 
+# Version 6 (§3.13): the eleventh kind of inbox, `plan_proposal` (계획 결재). kind has a CHECK, so inbox is made
+# again exactly as in version 5 (same columns, same row order, same five indexes) with one more name in the CHECK.
+# `hire_signals` is not made again: version 5 made it and it stays. Built from _INBOX_V5 so the two cannot drift.
+_INBOX_V6 = _INBOX_V5.split("CREATE TABLE hire_signals")[0].replace(
+    "'final_review', 'hire_recommendation')", "'final_review', 'hire_recommendation', 'plan_proposal')")
+
 MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
     (1, _statements(_TABLES_V1) + _SEED_V1),
     (2, _statements(_STREAM_V2)),
     (3, _statements(_ROOMS_V3)),
     (4, _statements(_ART_V4)),
     (5, _statements(_INBOX_V5)),
+    (6, _statements(_INBOX_V6)),
 )

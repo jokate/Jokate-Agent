@@ -335,7 +335,7 @@ def test_version_5_keeps_every_item_and_index_of_a_running_db(tmp_path):
 
     store = StudioStore(path)
     try:
-        assert store.migrated == [5]
+        assert store.migrated == [5, 6]  # version 6 (plan_proposal) follows 5 on the same open
         assert [store.get_inbox_item(i["id"]) for i in (pending, asked, decided)] == before  # every column
         assert [i["id"] for i in store.list_inbox()] == order
         assert (tmp_path / "studio.sqlite.bak-v4").exists()

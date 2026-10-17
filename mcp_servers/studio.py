@@ -186,6 +186,18 @@ def room_post(text: str, mentions: list[str] | None = None, room: str = "", atta
 
 
 @mcp.tool()
+def plan_propose(title: str, goal: str, steps: list[dict], mode: str = "milestone", project_id: str = "") -> dict:
+    """여러 작업으로 이루어진 계획을 owner 에게 올려 결재를 받는다 (승인하기 전에는 아무것도 만들어지지 않는다).
+    title 은 캠페인 이름, goal 은 목표, mode 는 진행 방식(nonstop · milestone · each, 기본 milestone)이다. steps 는
+    1~12개이고 각 단계는 {title, reason(왜), spec(무엇을), done_criteria(완료 기준), type(feature · fix · chore ·
+    doc · data), assignee_id(제안 담당, 선택), depends_on(먼저 끝나야 하는 앞선 단계의 번호 — 0부터 센다, 선택)}
+    다. 12개를 넘기면 거부된다. owner 가 승인하면 서버가 캠페인과 작업을 만들고 의존을 이어 시작한다. 수정 요청이면
+    이 방으로 코멘트가 오니 고쳐서 다시 올린다. 프로젝트는 내가 배치된 것이다 (인사는 project_id 필수). 돌려주는 것:
+    {inbox_id}."""
+    return _call("plan_propose", title=title, goal=goal, steps=steps, mode=mode, project_id=project_id)
+
+
+@mcp.tool()
 def employee_list(project_id: str = "", department_id: str = "") -> dict:
     """직원 목록 — 내가 배치된 프로젝트의 직원 (인사는 전체), 퇴사한 직원은 빠진다. 돌려주는 것: {items[]} —
     각 {id, name, department_id, project_id, status}."""

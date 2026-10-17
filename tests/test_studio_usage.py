@@ -71,10 +71,11 @@ def test_limits_are_read_changed_kept_in_the_local_file_and_range_checked(line, 
     monkeypatch.setattr(limits, "LOCAL_CONFIG", local)
     now = ok(line.owner.get("/studio/machine/limits"))
     assert now == {"max_runs": line.cfg.studio_max_runs, "max_exchanges": line.cfg.studio_max_exchanges,
-                   "group_max_exchanges": line.cfg.studio_group_max_exchanges}
+                   "group_max_exchanges": line.cfg.studio_group_max_exchanges,
+                   "group_rounds": line.cfg.studio_group_rounds}
 
     for bad in ({}, {"max_runs": 0}, {"max_runs": -1}, {"max_runs": 21}, {"max_runs": "5"}, {"max_runs": True},
-                {"max_runs": 2.5}, {"max_exchanges": 201}, {"group_max_exchanges": 0}, {"unknown": 1}):
+                {"max_runs": 2.5}, {"max_exchanges": 201}, {"group_max_exchanges": 0}, {"group_rounds": 0}, {"group_rounds": 11}, {"unknown": 1}):
         assert line.owner.patch("/studio/machine/limits", json=bad).status_code == 422, bad
     assert ok(line.owner.get("/studio/machine/limits")) == now and yaml.safe_load(local.read_text("utf-8")) == {
         "repos": {"game": {"path": "D:/game"}}}  # nothing changed, nothing written
@@ -88,11 +89,16 @@ def test_limits_are_read_changed_kept_in_the_local_file_and_range_checked(line, 
     again = Config.load(tmp_path / "relay.config.yaml")  # a restart reads the file: the value is still there
     assert (again.studio_max_runs, again.studio_group_max_exchanges, again.studio_max_exchanges) == (
         1, 4, line.cfg.studio_max_exchanges)
+    out = ok(line.owner.patch("/studio/machine/limits", json={"group_rounds": 5}))  # T1.1: the most rounds of a discussion
+    assert out == {**now, "max_runs": 1, "group_max_exchanges": 4, "group_rounds": 5} and line.cfg.studio_group_rounds == 5
+    assert yaml.safe_load(local.read_text("utf-8"))["studio_group_rounds"] == 5
+    assert Config.load(tmp_path / "relay.config.yaml").studio_group_rounds == 5
 
 
 def _limit_cfg():
     import types
-    return types.SimpleNamespace(studio_max_runs=3, studio_max_exchanges=10, studio_group_max_exchanges=5)
+    return types.SimpleNamespace(studio_max_runs=3, studio_max_exchanges=10, studio_group_max_exchanges=5,
+                                  studio_group_rounds=3)
 
 
 def test_saving_limits_keeps_the_comments_of_the_local_file(tmp_path):

@@ -51,6 +51,14 @@ class UsageStore:
             )
             self._conn.commit()
 
+    def relabel(self, run_id: str, old: str, new: str) -> int:
+        """File the rows of one run that are under stage `old` under `new` (rows changed). Not a second row: a cost
+        total must not count a turn twice."""
+        with self._lock:
+            n = self._conn.execute("UPDATE usage SET stage = ? WHERE run_id = ? AND stage = ?", (new, run_id, old)).rowcount
+            self._conn.commit()
+        return n
+
     def cost_since(self, runner: str, since_iso: str) -> float:
         with self._lock:
             row = self._conn.execute(

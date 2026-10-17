@@ -1911,7 +1911,7 @@ def list_task_events(id: str, after_id: int = Query(0, ge=0), limit: int = Query
 # --- inbox (§5, §6.4 '결재') --------------------------------------------------------------------------------
 InboxStatus = Literal["pending", "decided", "cancelled"]
 InboxKind = Literal["task_proposal", "hire", "design_approval", "structure_choice", "question", "pre_approval",
-                    "budget", "risky_command", "final_review", "hire_recommendation"]
+                    "budget", "risky_command", "final_review", "hire_recommendation", "plan_proposal"]
 
 
 class Decide(BaseModel):
@@ -2312,6 +2312,23 @@ def group_halted(store: StudioStore, room_id: str, tx: Tx | None = None) -> bool
         before_id = page[0]["id"]
 
 
+def group_limit_meta(store: StudioStore, room_id: str, tx: Tx | None = None) -> dict | None:
+    """§4.6 · §7.6: the `meta` of the notice that holds the room (the newest `group_exchange_limit`, found as
+    `group_halted` finds it); None = the room is not held. A discussion's notice has `round` · `start_id` · `ids`."""
+    before_id = None
+    while True:
+        page = store.list_messages(room_id, before_id=before_id, limit=MAX_PAGE, tx=tx)
+        for message in reversed(page):
+            event = (message["meta"] or {}).get("event") if message["author_kind"] == "system" else None
+            if message["author_kind"] == "owner" or event == GROUP_CONTINUED:
+                return None
+            if event == GROUP_LIMIT:
+                return dict(message["meta"])
+        if len(page) < MAX_PAGE:
+            return None
+        before_id = page[0]["id"]
+
+
 def group_owed(store: StudioStore, room_id: str) -> list[str]:
     """Whose turn a held room kept back (§4.6), in the room's order: a member an employee's message mentions
     after what that member last read (`fed_message_id`). Read from the DB: the line of a room is memory only.
@@ -2334,7 +2351,8 @@ def group_owed(store: StudioStore, room_id: str) -> list[str]:
 
 def _group_turns(room_id: str, employee_ids: list[str], mentioned: bool = False, judged: bool = False) -> list[str]:
     """§6.6: ask for those members' turns in that group room, in that order (`Hooks.group_turns`; `ChatTurns.group`
-    behind it), and who is in the room's line for it. Like `_ask_turn` it never fails the call: what was
+    behind it), and who is in the room's line for it. The owner's message (`mentioned` False) also restarts a
+    discussion going on there (§6.6; decided in `ChatTurns.group`). Like `_ask_turn` it never fails the call: what was
     written is stored by now, and a hook that raises is logged here."""
     if _hooks is None or not employee_ids:
         return []
@@ -2342,6 +2360,19 @@ def _group_turns(room_id: str, employee_ids: list[str], mentioned: bool = False,
         return list(_hooks.group_turns(room_id, list(employee_ids), mentioned, judged))
     except Exception:  # noqa: BLE001
         log.exception("studio: 단체방 %s 의 턴을 넣지 못했다", room_id)
+        return []
+
+
+def _group_resume(room_id: str, owed: list[str], number: int, ids: list[str], start_id: int,
+                  first_id: int | None = None) -> list[str]:
+    """§4.6: the owner's 'continue' of a room whose limit notice remembers a discussion (`Hooks.group_resume`;
+    `ChatTurns.resume` behind it). Like `_group_turns` it never fails the call; a hook that raises is logged here."""
+    if _hooks is None:
+        return []
+    try:
+        return list(_hooks.group_resume(room_id, list(owed), number, list(ids), start_id, first_id))
+    except Exception:  # noqa: BLE001
+        log.exception("studio: 단체방 %s 의 토론을 잇지 못했다", room_id)
         return []
 
 
@@ -2539,11 +2570,17 @@ def continue_room(id: str, store: StudioStore = Depends(get_store)) -> dict:
                               "방은 단체방과 파트방뿐입니다")
         if room["archived_at"] is not None:
             raise StudioError("precondition_failed", f"보관한 방입니다: {id}")
-        if not group_halted(store, id, tx):
+        held = group_limit_meta(store, id, tx)
+        if held is None:
             return room
         room = store.update_room(id, tx=tx, exchange_count=0)
         room = _group_notice(store, tx, room, GROUP_CONTINUED, "직원들의 대화를 이어 갑니다")
-    _group_turns(id, group_owed(store, id), mentioned=True)
+    owed = group_owed(store, id)
+    if isinstance(held.get("round"), int) and isinstance(held.get("start_id"), int):  # a discussion was held (§6.6)
+        _group_resume(id, owed, held["round"], list(held.get("ids") or []), held["start_id"],
+                      held.get("first_id") if isinstance(held.get("first_id"), int) else None)
+    else:
+        _group_turns(id, owed, mentioned=True)
     return room
 
 
@@ -2713,6 +2750,39 @@ def post_message(id: str, body: NewMessage, store: StudioStore = Depends(get_sto
     elif room["kind"] in GROUP_KINDS:  # §6.6 (a department room too): who is mentioned, else every member, one after the other in the room's order
         _group_turns(id, mentions or group_order(store, id), judged=not mentions)  # no mention: the members are judged (T5)
     return message
+
+
+@router.post("/rooms/{id}/messages/{message_id}/propose", status_code=201)
+def propose_message(id: str, message_id: int, store: StudioStore = Depends(get_store)):
+    """The owner asks the employee who wrote a message to file it as a plan (or a task): a `system` message that says
+    so (`meta.event = propose_request`) and that employee's turn (§6.6). Only an employee's message in a 1:1, group or
+    department room; a task or system room, an archived group room, a message of the owner or of the system, and an
+    employee who retired or left are refused. 201 with the system message."""
+    with store.transaction() as tx:
+        room = _need(store.get_room(id, tx=tx), "방", id)
+        if room["kind"] in ("system", "task"):
+            raise StudioError("precondition_failed", f"이 방의 글은 계획으로 올릴 수 없습니다: {id}")
+        if room["kind"] == "group" and room["archived_at"] is not None:
+            raise StudioError("precondition_failed", f"보관한 단체방입니다: {id}")
+        message = store.get_message(message_id, tx=tx)
+        if message is None or message["room_id"] != id:
+            raise StudioError("not_found", f"글을 찾을 수 없습니다: {message_id}")
+        if message["author_kind"] != "employee" or not message["author_id"]:
+            raise StudioError("precondition_failed", "직원의 글만 계획으로 올릴 수 있습니다")
+        author = store.get_employee(message["author_id"], tx=tx)
+        member = store.get_room_member(id, message["author_id"], tx=tx)
+        if author is None or author["retired_at"] is not None or member is None or member["left_at"] is not None:
+            raise StudioError("precondition_failed", "글을 쓴 직원이 퇴사했거나 방을 떠났습니다")
+        row = store.create_message(
+            id, "system", tx=tx, body=employees.propose_ask(author["name"], message_id, message["body"]),
+            meta={"event": "propose_request", "message_id": message_id, "employee_id": author["id"]})
+        store.emit(tx, "message.created", {"message": row}, room_id=id, task_id=room["task_id"],
+                   project_id=_room_project(store, room, tx))
+    if room["kind"] == "dm":
+        _ask_turn(author["id"], id)
+    else:  # like the owner's message (mentioned False), judged False: no judgment, and the limit does not hold it
+        _group_turns(id, [author["id"]])
+    return row
 
 
 def _tell_task_room(store: StudioStore, room: dict, message: dict) -> None:
@@ -2954,6 +3024,16 @@ class McpHireRecommend(BaseModel):
     signal_key: str = ""                # the key of the trigger this answers
 
 
+class McpPlanPropose(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    title: str = ""
+    goal: str = ""
+    steps: list[dict] = Field(default_factory=list)  # {title, reason, spec, done_criteria, type, assignee_id?, depends_on?}
+    mode: str = ""                      # empty: milestone, like a new campaign
+    project_id: str = ""
+
+
 class McpStaffRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -3152,6 +3232,13 @@ def mcp_hire_recommend(body: McpHireRecommend, caller: tools.Caller = Depends(ge
     return _tool("hire_recommend", body, caller, machine, inbox)
 
 
+@router.post("/mcp/plan_propose")
+def mcp_plan_propose(body: McpPlanPropose, caller: tools.Caller = Depends(get_caller),
+                     machine: TaskMachine = Depends(get_machine), inbox: Inbox = Depends(get_inbox)) -> dict:
+    """An employee files a plan (title, goal, up to 12 steps, mode) for the owner. `{inbox_id}`; nothing is made yet."""
+    return _tool("plan_propose", body, caller, machine, inbox)
+
+
 @router.post("/mcp/staff_request")
 def mcp_staff_request(body: McpStaffRequest, caller: tools.Caller = Depends(get_caller),
                       machine: TaskMachine = Depends(get_machine), inbox: Inbox = Depends(get_inbox)) -> dict:
@@ -3325,20 +3412,21 @@ class MachineLimits(BaseModel):
     max_runs: StrictInt | None = Field(default=None, ge=1, le=20)
     max_exchanges: StrictInt | None = Field(default=None, ge=1, le=200)
     group_max_exchanges: StrictInt | None = Field(default=None, ge=1, le=100)
+    group_rounds: StrictInt | None = Field(default=None, ge=1, le=10)
 
 
 @router.get("/machine/limits")
 def read_machine_limits() -> dict:
-    """The three limits the owner may change, as the running server holds them (§6.4; `GET /studio/machine` has them too, but runs the checks of the computer)."""
+    """The four limits the owner may change, as the running server holds them (§6.4; `GET /studio/machine` has them too, but runs the checks of the computer)."""
     return machine_limits.read(_config())
 
 
 @router.patch("/machine/limits")
 def change_machine_limits(body: MachineLimits) -> dict:
-    """V-4 (§4.6 · §6.4): the named limits take effect at once — the line and the exchange checks read them at every use — and are kept in this machine's settings file (`relay.config.local.yaml`), so they hold after a restart. The answer is the three limits afterwards. None named: 422. The file cannot be written: 500 and nothing changed."""
+    """V-4 (§4.6 · §6.4): the named limits take effect at once — the line and the exchange checks read them at every use — and are kept in this machine's settings file (`relay.config.local.yaml`), so they hold after a restart. The answer is the four limits afterwards. None named: 422. The file cannot be written: 500 and nothing changed."""
     changes = body.model_dump(exclude_none=True)
     if not changes:
-        raise HTTPException(422, "바꿀 한도가 없습니다 (max_runs · max_exchanges · group_max_exchanges)")
+        raise HTTPException(422, "바꿀 한도가 없습니다 (max_runs · max_exchanges · group_max_exchanges · group_rounds)")
     try:
         done = machine_limits.save(_config(), changes)
     except ValueError as e:

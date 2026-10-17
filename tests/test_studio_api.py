@@ -257,7 +257,8 @@ def test_routes_are_the_s3_rows_of_the_document():
     assert all(f"| `{method} {path}` |" in section for method, path in memory)
     group = {("POST", "/studio/rooms"), ("POST", "/studio/rooms/{id}/rename"),
              ("POST", "/studio/rooms/{id}/archive"),  # the group rooms (the tests of the group rooms below)
-             ("POST", "/studio/rooms/{id}/continue")}  # and their turns (tests/test_studio_group.py)
+             ("POST", "/studio/rooms/{id}/continue"),  # and their turns (tests/test_studio_group.py)
+             ("POST", "/studio/rooms/{id}/messages/{message_id}/propose")}  # T4 (tests/test_studio_group_propose.py)
     assert all(f"| `{method} {path}` |" in section for method, path in group)
     policy = {("GET", "/studio/projects/{id}/policy"), ("PUT", "/studio/projects/{id}/policy")}  # H-6
     assert "| `GET` · `PUT /studio/projects/{id}/policy` |" in section  # one row for the two (tests/test_studio_policy.py)

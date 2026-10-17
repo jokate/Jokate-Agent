@@ -311,6 +311,7 @@ def report(cfg: Any, projects: list[dict], src: Sources) -> dict:
         "limits": {"max_concurrent_runs": cfg.studio_max_runs, "max_exchanges": cfg.studio_max_exchanges,
                    "group_max_members": cfg.studio_group_max_members,
                    "group_max_exchanges": cfg.studio_group_max_exchanges,
+                   "group_rounds": cfg.studio_group_rounds,
                    "hire_backlog_limit": cfg.studio_hire_backlog_limit,
                    "hire_cooldown_days": cfg.studio_hire_cooldown_days},
     }

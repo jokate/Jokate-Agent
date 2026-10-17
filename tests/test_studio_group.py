@@ -28,7 +28,10 @@ class Cast(MockRunner):
             [(run_id, head)] = [(run_id, head) for run_id, head in api.live_runs(self.store).items()
                                 if head["mode"] != "work"]  # one turn at a time
             self.seen.append({**head, "prompt": call.prompt})
-            answer = move = (self.moves.get(head["employee_id"]) or [""]).pop(0)
+            move = (self.moves.get(head["employee_id"]) or [""]).pop(0)
+            if callable(move):  # something the turn does while it runs (the owner writing in the room)
+                move = move()
+            answer = move
             if not isinstance(move, str):
                 r = self.client.post("/studio/mcp/room_post", json={"text": move[0], "mentions": move[1]},
                                      headers={"Authorization": f"Bearer {api.actor_token(run_id)}"})

@@ -232,8 +232,8 @@ def test_decision_values_are_the_table_of_5_2():
         assert inbox.DECISIONS[kind] == values
         assert inbox.COMMENT_REQUIRED.get(kind, ()) == tuple(v for v in ticks(cells[3]) if v in values)
         assert (kind in inbox.NOTIFY_OK) == cells[5].startswith("`approve`")
-    assert tuple(seen) == inbox.KINDS == get_args(api.InboxKind) and len(seen) == 10
-    assert set(inbox.TARGET) == {(k, d) for k in inbox.KINDS if k not in ("hire", "hire_recommendation")
+    assert tuple(seen) == inbox.KINDS == get_args(api.InboxKind) and len(seen) == 11
+    assert set(inbox.TARGET) == {(k, d) for k in inbox.KINDS if k not in ("hire", "hire_recommendation", "plan_proposal")
                                  for d in inbox.DECISIONS[k]}
     assert {inbox.TARGET[(k, d)] for k in BLOCKING_KINDS for d in inbox.DECISIONS[k]} == {"working"}  # all T5
 
@@ -248,7 +248,7 @@ def test_required_payload_keys_are_the_tables_of_5_3_and_5_4():
             seen.add(kind)
     marked = tuple(cells[0].strip("`").removesuffix("[]")
                    for cells in table(doc_section("payload (저장):", "`package` (GET 때 계산):"), 3) if cells[1] == "●")
-    assert inbox.PAYLOAD_REQUIRED["final_review"] == marked and len(seen) == 9
+    assert inbox.PAYLOAD_REQUIRED["final_review"] == marked and len(seen) == 10
     actions = [cells[0].strip("`") for cells in table(doc_section("| `action` | 뜻 |", "- `source_inbox_id`"), 3)]
     assert actions[2:] == list(inbox.HIRE_BODY)  # after the header and the rule
     reasons = [cells[0].strip("`") for cells in table(doc_section("`question` 의 `reason`:", "M-7 의"), 4)]

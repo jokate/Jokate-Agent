@@ -156,3 +156,14 @@ def test_a_one_to_one_room_is_as_before(dep):
     r = dep.owner.post(f"/studio/rooms/{dm}/messages", json={"body": "다시"})
     dep.go()
     assert dep.turns() == [emp, emp] and dep.store.get_room(dm)["exchange_count"] == 0
+
+
+def test_a_part_room_goes_on_in_rounds_as_a_group_room_does(dep):
+    from test_studio_group_judge import judged
+    a, b, c = dep.order
+    judge = judged(dep, {}, later={b: "예 — 반박한다"})
+    dep.cast.moves = {a: ["a1"], b: ["b1", "b2"], c: ["c1"]}
+    dep.say("이 설계 어떻게 생각해요?")
+    dep.go()
+    assert dep.turns() == [a, b, c, b, a] and dep.count() == 1  # + the conclusion's turn (T2)
+    assert sorted(name for name, _ in judge.later_asked[:3]) == sorted(dep.names.values())  # round 2; round 3 asks a and c
