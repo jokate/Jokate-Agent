@@ -902,7 +902,8 @@ def test_a_hiring_recommendation_is_pushed_quietly_and_is_not_reminded_of(studio
 
 
 # --- the notification action (N-3) ---------------------------------------------------------------------------
-NOT_FROM_A_NOTIFICATION = {"risky_command", "final_review", "structure_choice", "question", "hire_recommendation"}
+NOT_FROM_A_NOTIFICATION = {"risky_command", "final_review", "structure_choice", "question", "hire_recommendation",
+                         "plan_proposal"}
 
 
 def test_each_inbox_kind_is_pushed_with_what_its_notification_can_do_and_again_the_same(studio, http):

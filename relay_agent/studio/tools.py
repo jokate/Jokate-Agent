@@ -44,7 +44,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import drafts, employees, files, handover, staffing
-from .inbox import AMEND_FILES, DRAFT_KEYS, DRAFT_REQUIRED, RECOMMEND, Inbox, InboxError, validate_payload
+from .inbox import (AMEND_FILES, DRAFT_KEYS, DRAFT_REQUIRED, PLAN, PLAN_MAX_STEPS, RECOMMEND, Inbox, InboxError,
+                    validate_payload)
 from .tasks import (FORBIDDEN_WHY, STATES, SYSTEM, TASK_TYPES, TEXT_FIELDS, Actor, Outcome, TaskMachine,
                     TaskNotFound, TransitionError, classify)
 
@@ -574,7 +575,7 @@ def _group_posted(room: dict, message: dict, mentions: list[str], inbox: Inbox) 
                  "닿아 있으면 owner 가 이어 가게 할 때까지 선다. 답을 기다리지 않는다.")
     if missed:
         note += (f" 턴이 들어가지 않은 직원: {', '.join(missed)} — 퇴사한 직원이거나 턴을 넣을 수 없었다. 글은 방에 남아 "
-                 "있다.")
+                 "있다. 토론의 결론을 쓰는 턴의 멘션은 턴을 만들지 않는다.")
     return ok(f"{note} 하던 일을 계속한다", message_id=message["id"], queued=queued)
 
 
@@ -905,13 +906,59 @@ def staff_request(caller: Caller, args: dict, machine: TaskMachine, inbox: Inbox
     return ok(REQUEST_WHY.get(result["why"], result["why"]) + REQUEST_NOTE, asked=result["asked"], why=result["why"])
 
 
+PLAN_STEP_TEXT = ("title", "reason", "spec", "done_criteria", "type", "assignee_id")
+
+
+def plan_propose(caller: Caller, args: dict, machine: TaskMachine, inbox: Inbox) -> dict:
+    """An employee lays a whole plan before the owner (§5.3 계획 결재) -> an inbox item `plan_proposal`. Nothing is
+    made until the owner approves: then the server makes the campaign and one task per step (`depends_on` = the
+    indexes, from 0, of earlier steps) and starts it in `mode` (default milestone, like a new campaign). At most
+    PLAN_MAX_STEPS steps. The decision comes back to this room; a `revise` asks for the plan again, changed."""
+    title, goal = _text(args.get("title")), _text(args.get("goal"))
+    steps = args.get("steps")
+    bad = [name for name, value in (("title", title), ("goal", goal)) if value is None]
+    if not isinstance(steps, list) or not steps:
+        bad.append("steps")
+    if bad:
+        raise Refusal("missing_fields", f"비어 있는 인자: {', '.join(bad)}. title · goal 과 단계 하나 이상(steps)을 적는다",
+                      fields=bad)
+    if len(steps) > PLAN_MAX_STEPS:
+        raise Refusal("missing_fields", f"단계는 {PLAN_MAX_STEPS}개까지다. 지금 {len(steps)}개다 — 묶거나 나눠서 "
+                      f"{PLAN_MAX_STEPS}개 이하로 다시 올린다", fields=["steps"])
+    project_id = _text(args.get("project_id")) or caller.employee["project_id"]
+    if project_id is None:
+        raise Refusal("missing_fields" if caller.is_hr else "actor_not_allowed",
+                      "어느 프로젝트의 계획인지 project_id 로 적는다" if caller.is_hr else "배치된 프로젝트가 없어 계획을 올릴 수 없다",
+                      **({"fields": ["project_id"]} if caller.is_hr else {}))
+    if caller.employee["status"] == "on_leave":
+        raise Refusal("actor_not_allowed", "휴직 중에는 계획을 올릴 수 없다")
+    if not _placed(caller, project_id):
+        raise Refusal("actor_not_allowed", f"프로젝트 {project_id} 에 배치돼 있지 않아 그 프로젝트의 계획을 올릴 수 없다")
+    clean = []
+    for step in steps:
+        if not isinstance(step, dict):
+            clean.append(step)  # the inbox names it: steps[i]
+            continue
+        one = {key: (_text(step.get(key)) or "") if isinstance(step.get(key), str) or step.get(key) is None
+               else step[key] for key in PLAN_STEP_TEXT}
+        if not one["assignee_id"]:
+            del one["assignee_id"]
+        if step.get("depends_on"):
+            one["depends_on"] = step["depends_on"]
+        clean.append(one)
+    payload = {"goal": goal, "steps": clean, "mode": _text(args.get("mode")) or "milestone"}
+    item = inbox.create(PLAN, caller.actor, title=title, payload=payload, project_id=project_id)
+    return ok("계획을 올렸다. owner 가 승인하면 캠페인과 작업이 만들어져 시작한다. 결정은 이 방으로 온다 — 수정 요청이면 "
+              "코멘트대로 고쳐 다시 올린다. 더 할 일은 없다 — output 은 비운다.", inbox_id=item["id"])
+
+
 # --- the one way in ---------------------------------------------------------------------------------------
 TOOLS: dict[str, Callable[[Caller, dict, TaskMachine, Inbox], dict]] = {
     "task_propose": task_propose, "followup_propose": followup_propose, "task_get": task_get,
     "task_list": task_list, "task_progress": task_progress, "task_request_review": task_request_review,
     "ask_owner": ask_owner, "room_post": room_post, "employee_list": employee_list,
     "employee_draft": employee_draft, "employee_submit": employee_submit, "policy_draft": policy_draft,
-    "hire_recommend": hire_recommend, "staff_request": staff_request,
+    "hire_recommend": hire_recommend, "staff_request": staff_request, "plan_propose": plan_propose,
 }
 
 

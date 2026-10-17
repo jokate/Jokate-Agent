@@ -74,6 +74,10 @@ class Config(BaseModel):
     # one message of the owner's, before the room is held and the owner told (ARCHITECTURE.md §4.6). Read before
     # every such turn; the owner's next message there, or `POST /studio/rooms/{id}/continue`, counts anew.
     studio_group_max_exchanges: int = 6
+    # Katae Studio: the most rounds of a discussion in a group or part room (ARCHITECTURE.md §6.6). The owner's
+    # message without a mention is round 1; from round 2 the members who have something to object to, add or ask
+    # take a turn again. 1 or less = one round. Not used when `studio_group_judge_model` is blank. Read per round.
+    studio_group_rounds: int = 3
     # Katae Studio: how many tasks may wait (`backlog`) in front of one employee before HR is asked whether to
     # hire another (ARCHITECTURE.md §5.3 채용 권장). More than this is a trigger. 0 or less = the queue is not looked at.
     studio_hire_backlog_limit: int = 5

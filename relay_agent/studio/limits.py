@@ -1,7 +1,8 @@
 """The limits the owner may change (V-4 — design/studio/ARCHITECTURE.md §4.6 · §6.4 `GET`·`PATCH /studio/machine/limits`).
 
-Three settings of `Config` — no new ones: the task runs at work at once, the turns employees may put in for each
-other in one task, and the turns the members of a group room may put in after one message. A change is written into
+Four settings of `Config` — no new ones: the task runs at work at once, the turns employees may put in for each
+other in one task, the turns the members of a group room may put in after one message, and the most rounds of a
+discussion in a group room. A change is written into
 `relay.config.local.yaml` (the file `Config.load` reads, this machine only) and then into the running `Config`, which
 the queue and the exchange checks read at every use — so it holds at once and after a restart. A write that fails
 changes nothing. The comments of the file stay when each changed key is a one-line top-level key (`_patch_text`);
@@ -21,14 +22,14 @@ LOCAL_CONFIG = ROOT / "relay.config.local.yaml"  # a test gives its own (monkeyp
 
 # the name in the answer -> the Config field, and the range each value must lie in (both ends included)
 FIELDS = {"max_runs": "studio_max_runs", "max_exchanges": "studio_max_exchanges",
-          "group_max_exchanges": "studio_group_max_exchanges"}
-RANGES = {"max_runs": (1, 20), "max_exchanges": (1, 200), "group_max_exchanges": (1, 100)}
+          "group_max_exchanges": "studio_group_max_exchanges", "group_rounds": "studio_group_rounds"}
+RANGES = {"max_runs": (1, 20), "max_exchanges": (1, 200), "group_max_exchanges": (1, 100), "group_rounds": (1, 10)}
 
 _lock = threading.Lock()
 
 
 def read(cfg: Any) -> dict:
-    """`{max_runs, max_exchanges, group_max_exchanges}` as the running config holds them."""
+    """`{max_runs, max_exchanges, group_max_exchanges, group_rounds}` as the running config holds them."""
     return {name: getattr(cfg, field) for name, field in FIELDS.items()}
 
 

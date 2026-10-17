@@ -42,19 +42,24 @@ from ..pipeline import EFFORT_ORDER
 from . import employee_git, employees, gate, memory, staffing
 from .store import StudioStore, Tx, now
 from .tasks import DECISIONS as TASK_DECISIONS
-from .tasks import (BLOCKING_KINDS, EDITABLE, OWNER, STARTED, TASK_TYPES, TEXT_FIELDS, Actor, TaskMachine,
+from .tasks import (BLOCKING_KINDS, CAMPAIGN_MODES, EDITABLE, OWNER, STARTED, TASK_TYPES, TEXT_FIELDS, Actor, TaskMachine,
                     TaskNotFound, TransitionError)
 
 log = logging.getLogger(__name__)
 
 # --- the tables of §5.2 -----------------------------------------------------------------------------------
 KINDS = ("task_proposal", "hire", "design_approval", "structure_choice", "question", "pre_approval", "budget",
-         "risky_command", "final_review", "hire_recommendation")  # the order of §3.13 and §5.2
+         "risky_command", "final_review", "hire_recommendation", "plan_proposal")  # the order of §3.13 and §5.2
 DECISIONS = {kind: TASK_DECISIONS.get(kind, ("approve", "reject", "revise")) for kind in KINDS}  # + hire
 DECISIONS["hire_recommendation"] = ("interview", "skip")  # no task, no approval: HR holds the interview or lets it go
 RECOMMEND = "hire_recommendation"
+PLAN = "plan_proposal"
+DECISIONS[PLAN] = ("approve", "revise", "skip")  # no task: approving makes a campaign; revise sends it back; skip lets it go
+PLAN_MAX_STEPS = 12
+STEP_REQUIRED = ("title", "reason", "spec", "done_criteria", "type")
 COMMENT_REQUIRED = {"task_proposal": ("reject",), "hire": ("revise",), "design_approval": ("revise",),
-                    "structure_choice": ("revise",), "pre_approval": ("revise",), "final_review": ("rework",)}
+                    "structure_choice": ("revise",), "pre_approval": ("revise",), "final_review": ("rework",),
+                    PLAN: ("revise",)}
 NOTIFY_OK = ("task_proposal", "hire", "design_approval", "pre_approval", "budget")  # a plain approve only (N-3)
 VIAS = ("app", "notification", "dashboard")
 DATA_KEYS = {  # (kind, decision) -> the keys `data` may carry; nothing else is taken
@@ -75,6 +80,9 @@ RUN_KINDS = ("design_approval", "budget")  # what an item without a task may be:
 # One decision of such an item at a time, and no sweep meanwhile: between engine.approve and the write of the
 # decision the run is `pending`, which a sweep would read as "released outside" and close the item.
 _RUN_LOCK = threading.Lock()
+# One approval of a plan at a time: it makes a campaign and its tasks one machine call after the other (each opens
+# its own transaction), so two approvals of the same item must not both get as far as making them.
+_PLAN_LOCK = threading.Lock()
 
 # --- payloads (§5.3, §5.4) --------------------------------------------------------------------------------
 PAYLOAD_REQUIRED = {
@@ -88,9 +96,10 @@ PAYLOAD_REQUIRED = {
     "risky_command": ("command", "tool", "rule_id", "reason"),
     "final_review": ("summary", "checklist", "exchange_count"),
     "hire_recommendation": ("reason", "role", "model", "effort"),
+    "plan_proposal": ("goal", "steps", "mode"),
 }
 NUMBER_KEYS = ("spent_usd", "limit_usd", "exchange_count")
-LIST_KEYS = ("options", "checklist")
+LIST_KEYS = ("options", "checklist", "steps")
 HIRE_BODY = {  # action -> its body fields
     "hire": ("draft",),
     "guide_amend": ("target_employee_id", "file", "new_text", "diff", "base_sha256"),
@@ -115,7 +124,7 @@ OPTION_LABEL = {"retry": "다시 시도", "wrap_up": "지금까지 한 것으로
 KIND_LABEL = {"task_proposal": "작업 제안", "hire": "채용", "design_approval": "설계 승인",
               "structure_choice": "구조 선택", "question": "질문", "pre_approval": "사전 승인", "budget": "예산",
               "risky_command": "위험 명령", "final_review": "최종 검수",
-              "hire_recommendation": "채용 권장"}
+              "hire_recommendation": "채용 권장", "plan_proposal": "계획 결재"}
 DECISION_LABEL = {"approve": "승인", "reject": "반려", "revise": "수정 요청", "choose": "선택", "answer": "답변",
                   "pass": "통과", "rework": "재작업", "revert": "되돌리기", "interview": "면담 시작",
                   "skip": "넘기기"}
@@ -150,6 +159,9 @@ NOTES = {  # the system message a decision leaves in a 1:1 room (§5.5). Not fed
     ("task_proposal", "reject"): "제안한 작업이 거절됐다: {title}",
     ("hire", "reject"): "올린 안이 반려됐다: {title}",
     ("hire", "revise"): "올린 안을 코멘트대로 고쳐서 다시 제출하라: {title}",
+    ("plan_proposal", "approve"): "올린 계획이 승인됐다: {title}",
+    ("plan_proposal", "revise"): "올린 계획을 코멘트대로 고쳐서 `plan_propose` 로 다시 올려라: {title}",
+    ("plan_proposal", "skip"): "올린 계획을 넘겼다: {title}",
 }
 UPSTREAM_NOTE = {  # §5.9 "선행 반려": the line in the room of a task that had started behind the one sent back
     "rework": '선행 반려: 이 작업이 기다린 선행 작업 "{title}" ({id}) 이 검수에서 재작업으로 돌아갔다. '
@@ -253,6 +265,37 @@ def _recommend_problems(payload: dict) -> list[str]:
     return bad
 
 
+def _int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _plan_problems(payload: dict) -> list[str]:
+    """§5.3 계획 결재: 1 ~ PLAN_MAX_STEPS steps, each with the texts of a task, a `type` of TASK_TYPES, an optional
+    `assignee_id` text and `depends_on` = indexes (from 0) of EARLIER steps — so no cycle can be written. A bad
+    value is named `steps` or `steps[i].<key>`."""
+    bad: list[str] = []
+    if payload.get("mode") is not None and not _one_of(payload["mode"], CAMPAIGN_MODES):
+        bad.append("mode")
+    steps = payload.get("steps")
+    if not isinstance(steps, list) or not steps:
+        return bad  # the missing key is named by the required keys
+    if len(steps) > PLAN_MAX_STEPS:
+        return bad + ["steps"]
+    for i, step in enumerate(steps):
+        if not isinstance(step, dict):
+            bad.append(f"steps[{i}]")
+            continue
+        bad += [f"steps[{i}].{key}" for key in STEP_REQUIRED if not _text(step.get(key))]
+        if _text(step.get("type")) and not _one_of(step["type"], TASK_TYPES):
+            bad.append(f"steps[{i}].type")
+        if step.get("assignee_id") is not None and not isinstance(step["assignee_id"], str):
+            bad.append(f"steps[{i}].assignee_id")
+        deps = step.get("depends_on")
+        if deps is not None and not (isinstance(deps, list) and all(_int(d) and 0 <= d < i for d in deps)):
+            bad.append(f"steps[{i}].depends_on")
+    return bad
+
+
 def validate_payload(kind: str, payload: Any) -> list[str]:
     """The keys of a payload that break §5.3 · §5.4: a required one missing or empty first, then a value out
     of its set. [] = it can be filed."""
@@ -272,6 +315,8 @@ def validate_payload(kind: str, payload: Any) -> list[str]:
         bad += [key for key in _hire_problems(payload) if key not in bad]
     elif kind == RECOMMEND:
         bad += [key for key in _recommend_problems(payload) if key not in bad]
+    elif kind == PLAN:
+        bad += [key for key in _plan_problems(payload) if key not in bad]
     elif kind == "structure_choice":
         options = payload.get("options")
         flag("options", not _options_ok(options, detail=True, minimum=2))
@@ -413,6 +458,13 @@ class Hooks:
         mention: a light model may say which members it is not the business of (T5). Who is in the line for it; [] = nobody, or nothing is wired."""
         return []
 
+    def group_resume(self, room_id: str, owed: list[str], number: int, ids: list[str], start_id: int,
+                     first_id: int | None = None) -> list[str]:
+        """'Continue' of a group room held at its limit that had a discussion (§4.6): put the turns it kept back (`owed`)
+        in the line and go on with the round after `number` (`ids` · `start_id` = what the limit notice's `meta` holds).
+        Who is in the line for the owed turns; [] = nobody, or nothing is wired."""
+        return []
+
     def room_busy(self, room_id: str) -> list[str]:
         """Why that room cannot be deleted or cleared now (§6.4): `turn_running` · `turn_waiting` — an employee's
         turn runs there or waits in its line. [] = none, or nothing is wired."""
@@ -535,6 +587,8 @@ class Inbox:
             return self._create_hire(actor, title, payload, project_id)
         if kind == RECOMMEND:
             return self._create_recommendation(actor, title, payload, project_id)
+        if kind == PLAN:
+            return self._create_plan(actor, title, payload, project_id)
         if task_id is None:
             raise ValueError(f"a {kind} item without a task is not filed here: file_run files a run's stop (§5.8 나)")
         task = self.store.get_task(task_id)
@@ -670,6 +724,50 @@ class Inbox:
             self.store.emit(tx, "inbox.created", {"inbox": item}, project_id=item["project_id"])
         return item
 
+    def _plan_failures(self, payload: dict, project_id: str | None) -> list[str]:
+        """What the world has against a plan that is well formed: the project, and each suggested assignee (in
+        service and placed in that project)."""
+        if not _text(project_id) or self.store.get_project(project_id) is None:
+            return ["프로젝트가 없다"]
+        failed = []
+        for i, step in enumerate(payload.get("steps") or []):
+            who = (step.get("assignee_id") or "").strip()
+            if not who:
+                continue
+            employee = self.store.get_employee(who)
+            if employee is None or employee["retired_at"] is not None:
+                failed.append(f"steps[{i}] 의 담당 {who} 이(가) 없거나 퇴사했다")
+            elif employee["project_id"] != project_id:
+                failed.append(f"steps[{i}] 의 담당 {who} 은(는) 이 프로젝트에 배치돼 있지 않다")
+        return failed
+
+    def _create_plan(self, actor: Actor, title: str, payload: dict, project_id: str | None) -> dict:
+        """§5.3 계획 결재: only an employee in service files it. No task, no run: approving it makes a campaign with
+        its tasks (`_decide_plan`). Nothing is written until the whole plan is well formed (`missing_fields`
+        names `steps[i].key`) and its project and assignees are there (`precondition_failed`)."""
+        requester = self.store.get_employee(actor.id) if actor.kind == "employee" else None
+        if requester is None or requester["retired_at"] is not None:
+            raise InboxError("actor_not_allowed", "계획 결재는 재직 중인 직원만 올린다")
+        payload = dict(payload)
+        payload.setdefault("mode", "milestone")
+        project_id = project_id or payload.get("project_id") or requester["project_id"]
+        problems = validate_payload(PLAN, payload)
+        if not _one_line(title):
+            problems.append("title")
+        if problems:
+            raise InboxError("missing_fields", f"payload 에 없거나 틀린 값이 있다: {', '.join(problems)}",
+                             fields=problems)
+        failed = self._plan_failures(payload, project_id)
+        if failed:
+            raise InboxError("precondition_failed", " / ".join(failed), failed=failed)
+        payload["project_id"] = project_id
+        with self.store.transaction() as tx:
+            item = self.store.create_inbox_item(
+                PLAN, _one_line(title), actor.kind, requester_id=actor.id, project_id=project_id, payload=payload,
+                tx=tx)
+            self.store.emit(tx, "inbox.created", {"inbox": item}, project_id=item["project_id"])
+        return item
+
     # --- the stop of a run that is no task's (§5.8 나) ------------------------------------------------------
     def _run_items(self, run_id: str, tx: Tx | None = None) -> list[dict]:
         """The pending items of that run that have no task: at most one, unless a stop went unheard."""
@@ -771,6 +869,8 @@ class Inbox:
             return {"inbox": self._decide_hire(item, decision, comment, data, via), "task": None}
         if item["kind"] == RECOMMEND:
             return {"inbox": self._decide_recommendation(item, decision, comment, data, via), "task": None}
+        if item["kind"] == PLAN:
+            return {"inbox": self._decide_plan(item, decision, comment, data, via), "task": None}
         if item["task_id"] is None and (item["payload"] or {}).get("stop_reason") == "usage_hold" and item["kind"] == "budget":
             return {"inbox": self._decide_hold(item, decision, comment, data, via), "task": None}
         if item["task_id"] is None:
@@ -952,6 +1052,76 @@ class Inbox:
             fresh = self._write_decision(tx, item, decision, comment, {**data, "via": via})
         self._follow(fresh)
         return fresh
+
+    # --- plan (§5.3 계획 결재) ------------------------------------------------------------------------------
+    def _decide_plan(self, item: dict, decision: str, comment: str, data: dict, via: str) -> dict:
+        """`revise` and `skip` write the decision and nothing else (`_follow`: the note, and for `revise` a turn of
+        the employee in their own room). `approve` makes the campaign (a draft), its tasks in the order of the
+        steps (backlog, assigned as suggested, each waiting for the earlier steps it names), writes the decision with
+        `campaign_id` · `task_ids`, and starts the campaign — what `POST /campaigns`, `/tasks` and `/start` do.
+
+        The machine's calls each open a transaction of their own, so the whole cannot be one: under `_PLAN_LOCK`
+        the plan is checked again first (an assignee may have left since it was filed: `missing_fields` ·
+        `precondition_failed`, the item still pending); a failure while making, or a lost race (`already_decided`),
+        cancels what was made. A start that fails after the decision is logged and said in the employee's room: the campaign stays a
+        draft, for the owner to start from the app."""
+        stored = {**data, "via": via}
+        if decision != "approve":
+            with self.store.transaction() as tx:
+                fresh = self._write_decision(tx, item, decision, comment, stored)
+            self._follow(fresh)
+            return fresh
+        with _PLAN_LOCK:
+            current = self._item(item["id"])
+            if current["status"] != "pending":
+                raise self._closed(current)
+            payload = copy.deepcopy(current["payload"] or {})
+            problems = validate_payload(PLAN, payload)
+            if problems:
+                raise InboxError("missing_fields", f"계획에 없거나 틀린 값이 있다: {', '.join(problems)}",
+                                 fields=problems)
+            failed = self._plan_failures(payload, current["project_id"])
+            if failed:
+                raise InboxError("precondition_failed", " / ".join(failed), failed=failed)
+            campaign, task_ids = None, []
+            try:
+                campaign = self.machine.create_campaign(OWNER, current["project_id"], title=current["title"],
+                                                        goal=payload["goal"], mode=payload["mode"])
+                for step in payload["steps"]:
+                    made = self.machine.create_task(
+                        OWNER, "backlog", current["project_id"], title=step["title"], reason=step["reason"],
+                        spec=step["spec"], done_criteria=step["done_criteria"], type=step["type"],
+                        campaign_id=campaign["id"], assignee_id=(step.get("assignee_id") or "").strip() or None,
+                        depends_on=[task_ids[i] for i in step.get("depends_on") or []])
+                    task_ids.append(made.task["id"])
+                with self.store.transaction() as tx:
+                    fresh = self._write_decision(tx, current, decision, comment,
+                                                 {**stored, "campaign_id": campaign["id"], "task_ids": task_ids})
+            except BaseException:
+                for task_id in task_ids:
+                    self._safely("계획의 작업 되돌리기", self._undo_task, task_id)
+                if campaign is not None:
+                    self._safely("계획의 캠페인 되돌리기", self.machine.transition_campaign, campaign["id"],
+                                 "cancelled", OWNER)
+                raise
+        self._follow(fresh)
+        self._start_plan(fresh, campaign["id"])
+        return fresh
+
+    def _start_plan(self, item: dict, campaign_id: str) -> None:
+        """Starts the campaign of an approved plan. The decision is committed, so a failure is not raised: it is
+        logged and said in the employee's room (the campaign stays a `draft`; `POST /campaigns/{id}/start`)."""
+        try:
+            self.machine.transition_campaign(campaign_id, "running", OWNER)
+        except Exception:  # noqa: BLE001
+            log.exception("studio: 결정 뒤의 '%s' 가 실패했다 (결정은 그대로다)", "계획 캠페인 시작")
+            if item.get("requester_id"):
+                self._safely("계획 캠페인 시작 실패 알림", self._say, self._dm_room(item["requester_id"]),
+                             f"계획은 승인됐지만 캠페인 {campaign_id} 를 시작하지 못했다 — 캠페인은 draft 로 남아 있다. "
+                             "앱에서 캠페인을 시작해 달라.", self._meta(item))
+
+    def _undo_task(self, task_id: str) -> None:
+        self.machine.transition(task_id, "cancelled", OWNER, reason="계획 승인이 끝나지 않아 되돌렸다")
 
     # --- hire (§5.5, provisional until H-2 · H-3 · H-6) -----------------------------------------------------
     def _decide_hire(self, item: dict, decision: str, comment: str, data: dict, via: str) -> dict:
@@ -1213,11 +1383,30 @@ class Inbox:
             draft_id = (item["payload"] or {}).get("draft_id") if kind == "hire" else None
             if draft_id:  # HR's next conversation may be a new one: the message is its one way back to the draft
                 body += f"\n초안 id: {draft_id}"
+            if kind == PLAN:
+                body += self._plan_lines(item)
             self._say(room, body, self._meta(item))
-            if (kind, decision) == ("hire", "revise") and room is not None:
-                self.hooks.chat_turn(item["requester_id"], room["id"])  # HR reworks the draft; a reject has no turn
+            if (kind, decision) in (("hire", "revise"), (PLAN, "revise")) and room is not None:
+                self.hooks.chat_turn(item["requester_id"], room["id"])  # the employee reworks it; a reject has no turn
         if kind == "final_review" and decision in UPSTREAM_NOTE:
             self._upstream(item)
+
+    @staticmethod
+    def _plan_lines(item: dict) -> str:
+        """After the note of a plan's decision: the campaign made (approve), or the plan as it was filed (revise),
+        which the employee must send again changed."""
+        data, payload = item["decision_data"] or {}, item["payload"] or {}
+        if item["decision"] == "approve" and data.get("campaign_id"):
+            return f"\n캠페인 id: {data['campaign_id']} · 작업 {len(data.get('task_ids') or [])}개"
+        if item["decision"] != "revise":
+            return ""
+        lines = [f"\n올렸던 계획 — 목표: {payload.get('goal', '')} · 진행 방식: {payload.get('mode', '')}"]
+        for i, step in enumerate(payload.get("steps") or []):
+            deps = step.get("depends_on") or []
+            lines.append(f"{i}. [{step.get('type', '')}] {step.get('title', '')}"
+                         + (f" (의존: {', '.join(str(d) for d in deps)})" if deps else "")
+                         + (f" · 담당 {step['assignee_id']}" if step.get("assignee_id") else ""))
+        return "\n".join(lines)
 
     def _recommendation_lines(self, payload: dict) -> list[str]:
         """What a recommendation says, as lines: why, the part (or the new one), the role, the model and effort,

@@ -401,6 +401,40 @@ def clip_memory(text: str) -> str:
     return "".join(reversed(kept)) if kept else raw[-MEMORY_LIMIT:].decode("utf-8", errors="ignore")
 
 
+def round_note(number: int) -> str:
+    """§6.6: what a turn of a discussion's round `number` is told, as a line of the server."""
+    return (f"시스템: 지금 토론 {number} 라운드다. 앞 사람의 말에 이름을 불러 반응한다(동의·반박·보탬·질문). "
+            "이미 나온 말을 되풀이하지 않고, 결론을 향해 5줄 안팎으로 쓴다.")
+
+
+def conclusion_note() -> str:
+    """§6.6: what the first speaker of a discussion is told when it ends and two or more have spoken."""
+    return ("시스템: 토론이 끝났다. 너는 1라운드 첫 발언자라 이 방의 마지막 글로 결론을 쓴다 — 합의한 것 / 갈린 것 / "
+            "owner 가 정할 것, 앞 사람 이름을 들어 짧게. 멘션하지 않고 output 에 쓴다. 할 일이 있으면 결론 글과 함께 "
+            "plan_propose 로(한 단계면 task_propose) 올린다 — 도구가 output 을 비우라고 해도 결론은 output 에 쓴다.")
+
+
+PLAN_NOTE = "시스템: 여러 단계 계획은 글로만 쓰지 말고 plan_propose 로 올린다(한 단계면 task_propose)."
+
+
+def plan_note() -> str:
+    """§6.6 · §9.1: what a chat or group turn is told about a plan of several steps — file it, do not only write it."""
+    return PLAN_NOTE
+
+
+PROPOSE_EXCERPT = 500
+
+
+def propose_ask(name: str, message_id: int, body: str) -> str:
+    """§6.6: the body of the `system` message the owner's "make this a task" leaves in the room; the employee's turn
+    reads it. The message is quoted up to PROPOSE_EXCERPT characters."""
+    text = (body or "").strip()
+    if len(text) > PROPOSE_EXCERPT:
+        text = text[:PROPOSE_EXCERPT] + "…"
+    return (f"시스템: owner 가 {name} 의 글(#{message_id})을 계획으로 올려 달라고 했다. 여러 단계면 plan_propose, 한 단계면 "
+            "task_propose 로 올린다.\n> " + text.replace("\n", "\n> "))
+
+
 def room_summary(messages: Iterable[dict], names: dict[str, str] | None = None) -> str:
     """The newest SUMMARY_MESSAGES messages (given oldest first) as `author: body` lines, a body on one line
     and cut at SUMMARY_CHARS. `names` is employee id -> name."""

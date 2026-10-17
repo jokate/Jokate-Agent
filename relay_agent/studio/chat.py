@@ -39,6 +39,13 @@ writes nothing: then no message is left, and none says so. The turns members put
 in `rooms.exchange_count` (§4.6), and at `Config.studio_group_max_exchanges` the room is held — no turn, one
 `system` message — until the owner writes there or continues (`POST /studio/rooms/{id}/continue`).
 
+A discussion (§6.6): when the line of an owner's message with no mention is empty — and the quick judgment is
+on —, the members of that round are asked again, each at once and alone, whether the round's messages leave
+something to object to, add or ask (`_next_round`); the ones who say yes take a turn one after the other, as turns
+a mention put in (looked at against the limit, counted). The rounds stop at the first of: nobody says yes,
+`Config.studio_group_rounds` rounds, the exchange limit. A new message of the owner's in the room drops the turns
+that have not begun and starts again from round 1; the turn that runs goes on to its end.
+
 It takes no slot of the queue and changes no employee's status (§4.6 · §4.9), files nothing in the inbox and
 counts no exchange of a task (§9.5). What it cannot do it says in the room, as a `system` message (`meta.event`
 `run_error`).
@@ -67,6 +74,7 @@ log = logging.getLogger(__name__)
 
 RELAY = "employee-chat.yaml"
 STAGE = "chat"
+CONCLUSION = "conclusion"  # `meta.kind` of the closing message of a discussion (T2, §6.6)
 HANDOFF_TOKENS = 100_000  # input tokens of a finished turn from which the next turn starts a new conversation
 FEED_MESSAGES = 50        # messages one turn reads; what is left is read by the turn that follows at once
 HANDOFF_LOOKBACK = 5      # turns of the session looked through for the last one that finished
@@ -112,6 +120,9 @@ class Begun:
     where: Where
     posted: bool = False
     quiet: bool = False
+    extra: str = ""  # a line of the server after the room's note (a discussion's round note, the conclusion's note)
+    usage_stage: str | None = None  # the turn's usage is filed under this, not `chat` (T2)
+    meta: dict | None = None  # the `meta` of the answer's message (`kind: conclusion`)
 
 
 def _thread(work: Callable[[], None]) -> None:
@@ -151,6 +162,21 @@ class Screen:
     noted: bool = False
 
 
+@dataclass
+class Round:
+    """A discussion going on in a group room (§6.6): `number` = the round whose turns are in the line or have
+    just ended, `ids` = the members the owner's message asked, `start_id` = the last message before the round
+    that comes next (the messages after it are what that round reacts to), `gen` = the room's generation when
+    it began (a new message of the owner's raises it, and what was judged for the old one is dropped)."""
+    gen: int
+    number: int
+    ids: list[str]
+    start_id: int
+    # the owner's message that opened the discussion: its first speaker is who reads the conclusion. None = an old
+    # limit notice had none and no owner message was found before `start_id`: the discussion gets no conclusion
+    first_id: int | None
+
+
 class ChatTurns:
     """The chat turns of one server. `request` is what `Hooks.chat_turn` calls: it returns at once and the turn
     runs on a thread of its own (`spawn(work)` — tests give one that runs in place).
@@ -175,6 +201,10 @@ class ChatTurns:
         # a group room -> where a mention puts a turn in its line: right after the turn that runs now (0 when a turn
         # has just been taken off the line; one more for each turn put in, so the mentions keep their order)
         self._next: dict[str, int] = {}
+        self._round: dict[str, Round] = {}  # the discussion of a room, while there is one (memory only)
+        self._gen: dict[str, int] = {}
+        # a room whose conclusion turn is being made -> the employee who writes it: a mention in that turn makes no turn
+        self._concluding: dict[str, str] = {}
         # (room, employee) -> (project, sha256 of the policy text) last sent to that conversation. In memory: after
         # a restart the policy is sent once more to a conversation that resumes
         self._policy_seen: dict[tuple[str, str], tuple[str, str]] = {}
@@ -285,7 +315,8 @@ class ChatTurns:
         return []
 
     # --- the turns of a group room (§6.6 · §4.6) -------------------------------------------------------------
-    def group(self, room_id: str, employee_ids: list[str], mentioned: bool = False, judged: bool = False) -> list[str]:
+    def group(self, room_id: str, employee_ids: list[str], mentioned: bool = False, judged: bool = False,
+              owed: bool = False) -> list[str]:
         """`Hooks.group_turns`: put those members' turns in the room's line and return at once. The owner's turns
         go to its end, in the order given; a member's mention (`mentioned`) goes right after the turn that is
         running — before who waits —, and is asked for with no judgment. `judged` = the owner's message has no
@@ -299,7 +330,16 @@ class ChatTurns:
         `mentioned` = an employee's mention asks (`room_post`): such a turn is looked at against the limit when
         its time comes and counted when it left a message (`_group_turn`). The owner's asking is neither, and it
         wins: a member the owner's message put in the line is not a turn a later mention put in, even when the
-        mention moved it to the next seat (its mark stays, so it is not counted)."""
+        mention moved it to the next seat (its mark stays, so it is not counted).
+
+        A message of the owner's (`not mentioned`) in a room that has a discussion going on drops every turn that
+        has not begun (the line is emptied, the discussion forgotten) before its own members are put in: the
+        discussion starts over at round 1 with the new message. The running turn is not touched. With the quick
+        judgment on, the message opens a discussion (`Round`) that `_group_line` goes on with.
+
+        While the room's conclusion turn is being made a mention (`mentioned`) puts in no turn and gives [] — the
+        mention is the conclusion's, which is told not to mention. `owed` = the turns 'continue' puts back (`resume`):
+        they are not the conclusion's mentions and go in all the same."""
         store = api.get_store()
         room = store.get_room(room_id)
         if room is None or room["kind"] not in api.GROUP_KINDS or room["archived_at"] is not None:
@@ -310,11 +350,18 @@ class ChatTurns:
             return []
         screen = self._screen_of(store, room_id, asked) if judged and not mentioned else None
         with self._lock:
+            if mentioned and not owed and room_id in self._concluding:
+                return []
             line = self._rooms.get(room_id)
             start = line is None
             if start:
                 line = self._rooms[room_id] = deque()
-            waiting = {item[0]: at for at, item in enumerate(line)}
+            if not mentioned and room_id in self._round:  # the owner writes in a discussion: it starts again
+                line.clear()
+                self._next[room_id] = 0
+                self._round.pop(room_id, None)
+                self._gen[room_id] = self._gen.get(room_id, 0) + 1
+            waiting ={item[0]: at for at, item in enumerate(line)}
             for employee_id in asked:
                 if mentioned:  # right after the running turn, in the order of the mentions
                     at = min(self._next.get(room_id, 0), len(line))
@@ -333,15 +380,76 @@ class ChatTurns:
                     line.append((employee_id, False, screen))
                 else:
                     line[waiting[employee_id]] = (employee_id, False, screen)
+            if screen is not None and self._rounds() > 1:
+                self._round[room_id] = Round(self._gen.get(room_id, 0), 1, list(asked), screen.message_id,
+                                              screen.message_id)
         if start:
-            try:
-                (self.spawn or _thread)(lambda: self._group_work(room_id))
-            except BaseException:
-                with self._lock:
-                    self._rooms.pop(room_id, None)
-                    self._next.pop(room_id, None)
-                raise
+            self._start(room_id)
         return asked
+
+    def _start(self, room_id: str) -> None:
+        """Run the line of a room that has just got one (`self._rooms[room_id]` is set) on a thread of its own. When the
+        thread cannot be started the room's line and discussion are taken back and the error goes on."""
+        try:
+            (self.spawn or _thread)(lambda: self._group_work(room_id))
+        except BaseException:
+            with self._lock:
+                self._rooms.pop(room_id, None)
+                self._next.pop(room_id, None)
+                self._round.pop(room_id, None)
+            raise
+
+    def resume(self, room_id: str, owed: list[str], number: int, ids: list[str], start_id: int,
+               first_id: int | None = None) -> list[str]:
+        """`Hooks.group_resume` (the owner's 'continue' of a room held at its limit, section 4.6): the discussion the
+        notice remembered (`number` = the round whose turns were in the line when it stopped, `ids` = the members the
+        owner's message asked, `start_id` = where that round began - what the notice's `meta` holds) is set up again
+        when the room has none (a restart forgets them), the turns it kept back (`owed`) are put in the line as
+        mentions, and when the line is empty the round after `number` is judged, as at the end of any round. Who is
+        in the line for the owed turns. `first_id` = the message that opened the discussion (None, in an old notice: the newest message of the owner's
+        at or before `start_id` is looked for - the owner's message restarts a discussion, so it is the one that opened
+        it; none found = the discussion gets no conclusion).
+        A room that is no group room, or that the owner left, does nothing."""
+        store = api.get_store()
+        room = store.get_room(room_id)
+        if room is None or room["kind"] not in api.GROUP_KINDS or room["archived_at"] is not None:
+            return []
+        keep = [i for i in api.group_order(store, room_id) if i in ids]
+        if first_id is None:
+            first_id = self._opening(store, room_id, start_id)
+        with self._lock:
+            if room_id not in self._round and keep and self._rounds() > 1:
+                self._round[room_id] = Round(self._gen.get(room_id, 0), number, keep, start_id, first_id)
+        if owed:
+            return self.group(room_id, owed, mentioned=True, owed=True)
+        with self._lock:
+            start = room_id not in self._rooms and room_id in self._round
+            if start:
+                self._rooms[room_id] = deque()
+        if start:
+            self._start(room_id)
+        return []
+
+    @staticmethod
+    def _opening(store: StudioStore, room_id: str, start_id: int) -> int | None:
+        """The newest message of the owner's at or before `start_id`: the one that opened the discussion (the owner's
+        message always starts a discussion over). None = there is none."""
+        cursor = start_id + 1
+        while True:
+            page = store.list_messages(room_id, before_id=cursor, limit=api.MAX_PAGE)
+            for m in reversed(page):
+                if m["author_kind"] == "owner":
+                    return m["id"]
+            if len(page) < api.MAX_PAGE:
+                return None
+            cursor = page[0]["id"]
+
+    def _rounds(self) -> int:
+        """`Config.studio_group_rounds`: the most rounds of a discussion. 1 or less = one round, as before."""
+        try:
+            return int(getattr(self.cfg, "studio_group_rounds", 3) or 1)
+        except (TypeError, ValueError):
+            return 1
 
     def _group_work(self, room_id: str) -> None:
         """The line of one group room, until it is empty: one turn at a time, so each is made after the one
@@ -351,15 +459,46 @@ class ChatTurns:
             self._group_line(room_id)
 
     def _group_line(self, room_id: str) -> None:
+        """The turns of the line, one at a time. When the line is empty and the room has a discussion, the next
+        round is judged (`_next_round`) outside the lock: what it finds is dropped if the owner wrote meanwhile
+        (the generation changed) or the line is no longer empty; the ones who said yes are put in the line as
+        turns a mention put in. No discussion and an empty line = the room is done."""
         while True:
+            r, gen, ended = None, 0, None
             with self._lock:
-                line = self._rooms.get(room_id)
+                line = self._rooms.setdefault(room_id, deque())
                 if not line:
-                    self._rooms.pop(room_id, None)
-                    self._next.pop(room_id, None)
-                    return
-                employee_id, mentioned, screen = line.popleft()
-                self._next[room_id] = 0
+                    r = self._round.get(room_id)
+                    if r is None:
+                        self._rooms.pop(room_id, None)
+                        self._next.pop(room_id, None)
+                        self._gen.pop(room_id, None)
+                        return
+                    gen = self._gen.get(room_id, 0)
+                else:
+                    employee_id, mentioned, screen = line.popleft()
+                    self._next[room_id] = 0
+            if r is not None:
+                try:
+                    yes = self._next_round(room_id, r)
+                except Exception:  # noqa: BLE001 - the discussion ends; nobody waits for this thread
+                    log.exception("studio: 단체방 %s 의 다음 라운드를 열지 못해 토론을 멈춘다", room_id)
+                    yes = []
+                with self._lock:
+                    line = self._rooms.setdefault(room_id, deque())
+                    if self._round.get(room_id) is not r or self._gen.get(room_id, 0) != gen or line:
+                        continue  # the owner wrote meanwhile: this round is not the room's any more
+                    if yes:
+                        line.extend((employee_id, True, None) for employee_id in yes)
+                    else:
+                        self._round.pop(room_id, None)
+                        ended = r
+                if ended is not None:  # the discussion is over: its first speaker closes it (T2)
+                    try:
+                        self._conclude(room_id, ended, gen)
+                    except Exception:  # noqa: BLE001 - the room is left without a conclusion; the line goes on
+                        log.exception("studio: 단체방 %s 의 결론을 쓰지 못했다", room_id)
+                continue
             try:
                 if screen is not None:
                     yes = self._said_yes(room_id, screen)
@@ -369,6 +508,105 @@ class ChatTurns:
                 self._group_turn(employee_id, room_id, mentioned)
             except Exception:  # noqa: BLE001 - nobody waits for this thread; the rest of the line goes on
                 log.exception("studio: 직원 %s 의 단체방 턴(방 %s)이 실패했다", employee_id, room_id)
+
+    def _next_round(self, room_id: str, r: Round) -> list[str]:
+        """Who takes a turn in the round after `r`, in the room's order; [] = the discussion is over. It stops at
+        the first of: `studio_group_rounds` rounds were made; the round left no message of an employee's; the
+        room is at its exchange limit (the room is told once, `_held_notice`). Else every member of the first
+        asking who is still seated and had a message of another to read is asked at once (`group_judge.decide`
+        with `ROUND_SYSTEM`; a judgment that fails says yes). When nobody says yes the room is told nothing.
+        `r` is moved to the next round (`number`, `start_id`) when this returns with the judgment made."""
+        store = api.get_store()
+        room = store.get_room(room_id)
+        if room is None or r.number >= self._rounds():
+            return []
+        posts, last_id = [], r.start_id
+        while True:
+            page = store.list_messages(room_id, after_id=last_id, limit=api.MAX_PAGE)
+            posts += [m for m in page if m["author_kind"] == "employee"
+                      and (m["meta"] or {}).get("kind") != CONCLUSION]  # a conclusion of the discussion before is no speech
+            if page:
+                last_id = page[-1]["id"]
+            if len(page) < api.MAX_PAGE:
+                break
+        if not posts:
+            return []
+        limit = api._group_max_exchanges()
+        if limit is not None and room["exchange_count"] >= limit:
+            self._held_notice(store, room, limit, r)
+            return []
+        model = (getattr(self.cfg, "studio_group_judge_model", "") or "").strip()
+        ask = self._judge_ask or (memory.writer(model) if model else None)
+        if ask is None:
+            return []
+        ids = [i for i in api.group_order(store, room_id) if i in r.ids and any(m["author_id"] != i for m in posts)]
+        names = {row["id"]: row["name"] for row in store.list_employees(include_retired=True)}
+        before = store.list_messages(room_id, before_id=r.start_id + 1, limit=employees.SUMMARY_MESSAGES + 1)
+        summary, said = employees.room_summary(before, names), employees.room_summary(posts, names)
+        asks = {}
+        for employee_id in ids:
+            employee = store.get_employee(employee_id)
+            if employee is None:
+                continue
+            department = store.get_department(employee["department_id"]) if employee.get("department_id") else None
+            persona = employees.read_files(self.cfg.studio_dir, employee_id)["PERSONA.md"]
+            asks[employee_id] = group_judge.round_facts(employee["name"], (department or {}).get("name") or "",
+                                                        group_judge.job_line(persona), summary, said)
+        yes = group_judge.decide(asks, ask, record=self._judge_record(room_id), system=group_judge.ROUND_SYSTEM)
+        r.number, r.start_id = r.number + 1, last_id
+        return [i for i in ids if i in yes]
+
+    def _conclude(self, room_id: str, r: Round, gen: int | None = None) -> None:
+        """The end of a discussion (§6.6): when two or more members spoke in it, the one who spoke first in round 1
+        has one more turn that writes the conclusion — the last message of the discussion (`meta.kind =
+        conclusion`). One who spoke alone, or none, gets none; and a room held at its limit gets none: 'continue'
+        goes on with it. The conclusion is no exchange of the limit (`mentioned` False).
+        `gen` = the room's generation when the discussion ended. The owner writing before the conclusion turn begins
+        (the generation changed, or a new discussion or turns are there) = the conclusion is left out: the old
+        discussion is not needed. Once it has begun it is made and stays in the room; the new discussion goes on after
+        it and does not count it as a speech. While it is made a mention makes no turn (`group`)."""
+        if r.first_id is None:
+            return
+        store = api.get_store()
+        room = store.get_room(room_id)
+        if room is None or room["archived_at"] is not None or api.group_halted(store, room_id):
+            return
+        posts, last_id = [], r.first_id
+        while True:
+            page = store.list_messages(room_id, after_id=last_id, limit=api.MAX_PAGE)
+            posts += [m for m in page if m["author_kind"] == "employee"
+                      and (m["meta"] or {}).get("kind") != CONCLUSION]
+            if page:
+                last_id = page[-1]["id"]
+            if len(page) < api.MAX_PAGE:
+                break
+        if len({m["author_id"] for m in posts}) < 2:
+            return
+        with self._lock:
+            if gen is not None and (self._gen.get(room_id, 0) != gen or room_id in self._round
+                                    or self._rooms.get(room_id)):
+                return  # the owner wrote meanwhile: this discussion is not the room's any more
+            self._concluding[room_id] = posts[0]["author_id"]
+        try:
+            self._group_turn(posts[0]["author_id"], room_id, False, concluding=True)
+        finally:
+            with self._lock:
+                self._concluding.pop(room_id, None)
+
+    def _judge_record(self, room_id: str):
+        """Where a judgment's usage goes: the usage DB as `room:<room id>` · `studio:group_judge`; None = nowhere."""
+        usage = getattr(self.engine, "usage", None)
+        return (lambda u: usage.record(f"room:{room_id}", group_judge.USAGE_STAGE, u)) if usage is not None else None
+
+    def _held_notice(self, store: StudioStore, room: dict, limit: int, r: Round | None = None) -> None:
+        """§4.6: the room is at its limit — it is told once (a `system` message, pushed to the owner). With a
+        discussion (`r`) the notice's `meta` also holds where it stands (`round` · `start_id` · `ids` · `first_id`), so that
+        'continue' can open the next round, also after a restart (§7.6)."""
+        if not api.group_halted(store, room["id"]):  # one notice for a room that is held
+            more = ({"round": r.number, "start_id": r.start_id, "ids": list(r.ids), "first_id": r.first_id}
+                    if r is not None else {})
+            self._say(store, room, f"직원들끼리 주고받은 턴이 한도 {limit}회에 닿아 멈췄습니다. 이 방에 글을 쓰거나 "
+                      "'이어 가기'를 하면 다시 세고 이어 갑니다", event=api.GROUP_LIMIT, limit=limit, **more)
 
     def _screen_of(self, store: StudioStore, room_id: str, ids: list[str]) -> Screen | None:
         """The judgment of the owner's message just stored in that room, for those members. None = no judgment:
@@ -430,30 +668,41 @@ class ChatTurns:
             persona = employees.read_files(self.cfg.studio_dir, employee_id)["PERSONA.md"]
             asks[employee_id] = group_judge.facts(employee["name"], (department or {}).get("name") or "",
                                                   group_judge.job_line(persona), summary, screen.text)
-        usage = getattr(self.engine, "usage", None)
-        record = (lambda u: usage.record(f"room:{room_id}", group_judge.USAGE_STAGE, u)) if usage is not None else None
-        return group_judge.decide(asks, ask, record=record) | (set(screen.ids) - set(asks))
+        return group_judge.decide(asks, ask, record=self._judge_record(room_id)) | (set(screen.ids) - set(asks))
 
-    def _group_turn(self, employee_id: str, room_id: str, mentioned: bool) -> None:
+    def _group_turn(self, employee_id: str, room_id: str, mentioned: bool, *, concluding: bool = False) -> None:
         """One member's turn in a group room. §4.6: a turn a mention put in is not made when the room's count is
         at the limit — the room is told once (a `system` message, pushed to the owner) and waits for the owner —,
-        and is one more in `exchange_count` when it left a message. One that passed is not counted."""
+        and is one more in `exchange_count` when it left a message. One that passed is not counted.
+        In a discussion the turn is told the round (from round 2, `employees.round_note`) and its usage is filed as
+        `studio:group_round`; `concluding` = the closing turn (`employees.conclusion_note`, `studio:group_conclusion`,
+        `meta.kind = conclusion`, made even when nothing is new)."""
         store = api.get_store()
+        with self._lock:
+            r = self._round.get(room_id)
+        if concluding:
+            how = dict(extra=employees.conclusion_note(), stage=group_judge.CONCLUSION_USAGE_STAGE,
+                       meta={"kind": CONCLUSION}, force=True)
+        elif r is not None:
+            how = dict(extra=employees.round_note(r.number) if r.number >= 2 else "",
+                       stage=group_judge.ROUND_USAGE_STAGE)
+        else:
+            how = {}
         if mentioned:
             room, limit = store.get_room(room_id), api._group_max_exchanges()
             if room is None:
                 return
             if limit is not None and room["exchange_count"] >= limit:
-                if not api.group_halted(store, room_id):  # one notice for a room that is held
-                    self._say(store, room, f"직원들끼리 주고받은 턴이 한도 {limit}회에 닿아 멈췄습니다. 이 방에 글을 쓰거나 "
-                              "'이어 가기'를 하면 다시 세고 이어 갑니다", event=api.GROUP_LIMIT, limit=limit)
+                with self._lock:
+                    r = self._round.get(room_id)
+                self._held_notice(store, room, limit, r)
                 return
         posted, more = False, True
         while more:  # as `_work`: a full page read means more may be waiting
-            begun = self._begin(employee_id, room_id)
+            begun = self._begin(employee_id, room_id, **how)
             if begun is None:
                 break
-            more = self._finish(begun)
+            more = self._finish(begun) and not concluding  # the conclusion is one turn
             posted = posted or begun.posted
         if mentioned and posted:
             with store.transaction() as tx:
@@ -494,10 +743,13 @@ class ChatTurns:
         begun = self._begin(employee_id, room_id)
         return self._finish(begun) if begun is not None else False
 
-    def _begin(self, employee_id: str, room_id: str) -> Begun | None:
+    def _begin(self, employee_id: str, room_id: str, *, extra: str = "", stage: str | None = None,
+               meta: dict | None = None, force: bool = False) -> Begun | None:
         """The first half of a turn: read what is new and make the run of it, not advanced yet. None = no run —
         the room or the member is gone, the employee is the assignee of that task room (`_where`), nothing is
-        new, or the run could not be made: then the room has been told why."""
+        new, or the run could not be made: then the room has been told why. `extra` · `stage` · `meta` · `force`: a
+        group turn of a discussion (T2) — the line after the room's note, the usage stage, the answer's `meta`, and a
+        turn that is made though nothing is new (the conclusion)."""
         store = api.get_store()
         room, employee = store.get_room(room_id), store.get_employee(employee_id)
         member = store.get_room_member(room_id, employee_id)
@@ -510,17 +762,17 @@ class ChatTurns:
             return None
         listed = store.list_messages(room_id, after_id=member["fed_message_id"] or 0, limit=FEED_MESSAGES)
         fresh = [message for message in listed if not _own(message, employee_id)]
-        if not fresh:
+        if not fresh and not force:
             return None
         names = {row["id"]: row["name"] for row in store.list_employees(include_retired=True)}
         try:
-            run = self._make(store, employee, room, member, fresh, said(fresh, names), where)
+            run = self._make(store, employee, room, member, fresh, said(fresh, names), where, extra)
         except Refused as e:
             self._say(store, room, f"{employee['name']} 의 턴을 시작하지 못했다 — {e}")
             return None
         quiet = (all(m["author_kind"] == "system" for m in fresh)
                  and any((m["meta"] or {}).get("event") == STAFFING_SIGNAL for m in fresh))
-        return Begun(store, room, employee, listed, run, where, quiet=quiet)
+        return Begun(store, room, employee, listed, run, where, quiet=quiet, extra=extra, usage_stage=stage, meta=meta)
 
     def _finish(self, begun: Begun) -> bool:
         """The second half: advance the run and store its answer. True when it read a full page."""
@@ -532,6 +784,9 @@ class ChatTurns:
             run = self.engine.advance(run.id)
         finally:
             api.untrack_run(run.id)
+        usage = getattr(self.engine, "usage", None)
+        if begun.usage_stage and usage is not None:  # T2: a discussion's turn is filed under its own stage
+            usage.relabel(run.id, STAGE, begun.usage_stage)
         if run.status != "done":  # the message stays unread: the next turn reads it again
             self._say(store, room, f"{employee['name']} 이(가) 답하지 못했다 — {run.error or run.status}", run.id)
             return False
@@ -546,12 +801,12 @@ class ChatTurns:
         with store.transaction() as tx:
             if answer:
                 message = store.create_message(room_id, "employee", tx=tx, author_id=employee_id, body=answer,
-                                               run_id=run.id)
+                                               run_id=run.id, **({"meta": begun.meta} if begun.meta else {}))
                 store.emit(tx, "message.created", {"message": message}, room_id=room_id, task_id=room["task_id"],
                            project_id=api._room_project(store, room, tx))
             store.update_room_member(room_id, employee_id, tx=tx, session_id=run.session_id,
                                      conversation_id=run.done_sessions.get(STAGE) if keep else None,
-                                     fed_message_id=listed[-1]["id"])
+                                     **({"fed_message_id": listed[-1]["id"]} if listed else {}))
         # after the block: `_say` opens a transaction of its own. Not in a group room: there no answer is a pass
         if not posted and room["kind"] not in api.GROUP_KINDS and not begun.quiet:
             self._say(store, room, f"{employee['name']} 이(가) 답하지 못했다 — 턴은 끝났지만 답이 비어 있다", run.id)
@@ -593,10 +848,11 @@ class ChatTurns:
                 "아니면 넘어간다 — output 을 비우고 room_post 도 쓰지 않으면 방에 글이 남지 않는다. 다른 직원의 답이 "
                 "필요할 때만 room_post(text, mentions=[그 직원의 id]) 로 쓴다 — 그 직원의 턴이 네 턴 바로 다음에 들어가고, 같은 "
                 "말을 output 에 또 쓰지 않는다. 다른 구성원의 몫이라 넘길 때도 그 직원을 멘션한다 — 멘션하지 않으면 "
-                "그 직원은 이 글에 답하지 않을 수 있다. 자기 자신과 이 방의 구성원이 아닌 직원은 멘션할 수 없다.")
+                "그 직원은 이 글에 답하지 않을 수 있다. 자기 자신과 이 방의 구성원이 아닌 직원은 멘션할 수 없다. "
+                + employees.plan_note().removeprefix("시스템: "))
 
     def _make(self, store: StudioStore, employee: dict, room: dict, member: dict, fresh: list[dict], text: str,
-              where: Where):
+              where: Where, extra: str = ""):
         """The run of this turn, not advanced yet. `Refused` when it cannot be made."""
         values = self._values(store, employee)
         repo, folder = self._folder(store, employee, where.project_id)
@@ -604,8 +860,10 @@ class ChatTurns:
         if where.task is not None:
             text = f"{text}\n{self._read_note(store, where.task)}"
         elif room["kind"] in api.GROUP_KINDS:
-            text =f"{text}\n{self._group_note(store, room, employee)}"
-        hiring = self._hiring(store, employee, where)
+            text = f"{text}\n{self._group_note(store, room, employee)}" + (f"\n{extra}" if extra else "")
+        elif room["kind"] == "dm":
+            text = f"{text}\n{employees.plan_note()}"
+        hiring =self._hiring(store, employee, where)
         goal = self._goal(store, employee, room, text, session_id, where.project_id, hiring)
         try:
             run = self.engine.create(

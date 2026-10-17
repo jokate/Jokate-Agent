@@ -48,8 +48,8 @@ def test_empty_db_is_created_and_migrated(tmp_path):
     path = tmp_path / "runs" / "studio" / "studio.sqlite"
     store = StudioStore(path)
     try:
-        assert path.exists() and store.migrated == [1, 2, 3, 4, 5]
-        assert store._exec("PRAGMA user_version").fetchone()[0] == MIGRATIONS[-1][0] == 5
+        assert path.exists() and store.migrated == [1, 2, 3, 4, 5, 6]
+        assert store._exec("PRAGMA user_version").fetchone()[0] == MIGRATIONS[-1][0] == 6
         assert store._exec("PRAGMA foreign_keys").fetchone()[0] == 1
         master = store._rows("SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'")
         assert {r["name"] for r in master if r["type"] == "table"} == TABLES
@@ -74,12 +74,13 @@ def test_schema_is_the_documents_ddl():
     if not DOC.exists():
         pytest.skip("design/studio/ARCHITECTURE.md is not in this checkout")
     text = DOC.read_text(encoding="utf-8")
-    (v1, first), (v2, second), (v3, third), (v4, fourth), (v5, fifth) = MIGRATIONS
-    assert (v1, v2, v3, v4, v5) == (1, 2, 3, 4, 5) and len(first) == 42 and len(second) == 1 and len(third) == 7
-    assert len(fourth) == 2 and len(fifth) == 12
+    (v1, first), (v2, second), (v3, third), (v4, fourth), (v5, fifth), (v6, sixth) = MIGRATIONS
+    assert (v1, v2, v3, v4, v5, v6) == (1, 2, 3, 4, 5, 6) and len(first) == 42 and len(second) == 1
+    assert len(third) == 7 and len(fourth) == 2 and len(fifth) == 12 and len(sixth) == 11
     in_3_2 = _doc_statements(text, "3.2", "3.3")
     assert [_norm(s) for s in third] == in_3_2[:7]  # rooms made again (the group rooms)
-    assert [_norm(s) for s in fifth] == in_3_2[7:]  # inbox made again (the hiring recommendation) + hire_signals
+    assert [_norm(s) for s in fifth] == in_3_2[7:19]  # inbox made again (the hiring recommendation) + hire_signals
+    assert [_norm(s) for s in sixth] == in_3_2[19:]  # inbox made again (the plan proposal)
     ddl = _doc_statements(text, "3.3", "3.15")  # 12 tables + 21 indexes
     assert len(ddl) == 33
     assert [_norm(s) for s in first[:33]] == ddl
@@ -110,7 +111,7 @@ def test_opening_twice_migrates_and_seeds_once(tmp_path):
     path = tmp_path / "studio.sqlite"
     first, second = StudioStore(path), StudioStore(path)
     try:
-        assert first.migrated == [1, 2, 3, 4, 5] and second.migrated == []
+        assert first.migrated == [1, 2, 3, 4, 5, 6] and second.migrated == []
         assert len(second.list_departments()) == 5 and len(second.list_rooms()) == 6
         assert list(tmp_path.glob("*.bak-v*")) == []
         # the re-check under the write lock: a step that is already in is skipped, not run again
@@ -142,7 +143,7 @@ def test_two_servers_starting_together_migrate_once(tmp_path):
         t.join(60)
     try:
         assert not errors and len(stores) == 2
-        assert sorted(v for s in stores for v in s.migrated) == [1, 2, 3, 4, 5]
+        assert sorted(v for s in stores for v in s.migrated) == [1, 2, 3, 4, 5, 6]
         assert len(stores[0].list_departments()) == 5 and len(stores[1].list_rooms()) == 6
     finally:
         for s in stores:
@@ -174,14 +175,14 @@ def test_upgrade_backs_up_and_a_failed_step_leaves_the_version(tmp_path):
     assert backup.exists() and raw(backup, "PRAGMA user_version")[0][0] == 1
 
     store = StudioStore(path)
-    assert store.migrated == [2, 3, 4, 5] and len(store.list_departments()) == 5
+    assert store.migrated == [2, 3, 4, 5, 6] and len(store.list_departments()) == 5
     store.close()
     # what the design relies on: user_version set inside a transaction goes back with it
     conn = sqlite3.connect(path, isolation_level=None)
     conn.execute("BEGIN IMMEDIATE")
     conn.execute("PRAGMA user_version = 7")
     conn.execute("ROLLBACK")
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
     conn.close()
 
 
@@ -201,7 +202,7 @@ def test_a_late_server_does_not_overwrite_the_backup(tmp_path, monkeypatch):
     monkeypatch.setattr(StudioStore, "_user_version", stale_first)
     late = StudioStore(path)
     try:
-        assert late.migrated == [] and len(calls) == 5  # read once to plan, then once under the lock of each step
+        assert late.migrated == [] and len(calls) == 6  # read once to plan, then once under the lock of each step
     finally:
         late.close()
     assert raw(backup, "PRAGMA user_version")[0][0] == 1  # not replaced by a copy of the upgraded file

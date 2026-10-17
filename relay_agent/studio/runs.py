@@ -236,6 +236,10 @@ class EngineHooks(Hooks):
         """The turns of a group room (§6.6): `ChatTurns.group` — the room's line, one turn at a time."""
         return list(self._turns.group(room_id, employee_ids, mentioned, judged)) if self._turns is not None else []
 
+    def group_resume(self, room_id: str, owed: list[str], number: int, ids: list[str], start_id: int,
+                     first_id: int | None = None) -> list[str]:
+        return list(self._turns.resume(room_id, owed, number, ids, start_id, first_id)) if self._turns is not None else []
+
     def room_busy(self, room_id: str) -> list[str]:
         return list(self._turns.busy(room_id)) if self._turns is not None else []
 
