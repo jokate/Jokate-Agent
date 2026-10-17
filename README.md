@@ -335,6 +335,12 @@ Other policies applied:
 
 Deliberately not applied: `--bare` (needs an API key), `--resume` between stages (breaks the baton design), 1h TTL, compaction (stages are short), inflating prompts to meet the minimum cache length.
 
+## 카태 스튜디오
+카태 스튜디오는 폰 앱에서 이 서버를 통해 게임 프로젝트 작업을 맡기고 확인하는 기능이다.
+폰을 페어링하고 하루 흐름을 쓰는 방법은 [design/studio/GUIDE.md](design/studio/GUIDE.md) 에 있다.
+서버가 안 뜨거나 연결·푸시·에디터에 문제가 생기면 [design/studio/RUNBOOK.md](design/studio/RUNBOOK.md) 를 본다.
+설계와 계약은 `design/studio/ARCHITECTURE.md`, 작업 목록은 `design/studio/CAMPAIGN.md` 다.
+
 ## Structure
 `relay_agent/`: `baton.py` baton · `pipeline.py` engine · `runners.py` claude_cli/api/mock · `history.py` sessions, questions, events · `usage.py` token/cost log · `server.py` API · `dashboard.html` UI · `cli.py`
 `mcp_servers/`: `docs_read.py`, `handoff.py` · `relays/`: default, quick, docs-qa, doc-write, skill-make, editor-task, game-cycle, demo (mock, free) · `prompts/`: stage role prompts
