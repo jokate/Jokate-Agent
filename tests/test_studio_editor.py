@@ -30,11 +30,14 @@ def row(pid, uproject):
 
 
 class FakeEditor:
-    """A TCP server that speaks like the editor's MCP plugin: one JSON request per connection, one JSON answer.
-    Its port is bound from the start and nobody listens on it until `up()` — an editor that is still loading."""
+    """A TCP server that speaks like the editor's MCP plugin (`Plugins/Unreal-MCP-main`, MCPServerRunnable.cpp):
+    one request per connection, framed with a 4-byte big-endian length, and one answer framed the same way —
+    `framed=False` answers bare JSON instead (the public unreal-mcp). Its port is bound from the start and nobody
+    listens on it until `up()` — an editor that is still loading."""
 
-    def __init__(self, answer=None):
+    def __init__(self, answer=None, framed=True):
         self.requests = []
+        self.framed = framed
         self.answer = answer or self.plugin
         self.sock = socket.socket()
         self.sock.bind(("127.0.0.1", 0))
@@ -67,25 +70,29 @@ class FakeEditor:
             with conn:
                 try:
                     conn.settimeout(5)
-                    got = b""
-                    while True:
-                        chunk = conn.recv(65536)
-                        if not chunk:
-                            break
-                        got += chunk
-                        try:
-                            request = json.loads(got.decode("utf-8"))
-                        except ValueError:
-                            continue
-                        self.requests.append(request)
-                        reply = self.answer(request)
-                        if reply is None:
-                            conn.recv(1)  # says nothing: holds the connection until the asker gives up
-                        else:
-                            conn.sendall(reply if isinstance(reply, bytes) else json.dumps(reply).encode("utf-8"))
-                        break
-                except OSError:
+                    head = self._read(conn, 4)
+                    if len(head) < 4:
+                        continue
+                    request = json.loads(self._read(conn, int.from_bytes(head, "big")).decode("utf-8"))
+                    self.requests.append(request)
+                    reply = self.answer(request)
+                    if reply is None:
+                        conn.recv(1)  # says nothing: holds the connection until the asker gives up
+                        continue
+                    data = reply if isinstance(reply, bytes) else json.dumps(reply).encode("utf-8")
+                    conn.sendall((len(data).to_bytes(4, "big") if self.framed else b"") + data)
+                except (OSError, ValueError):
                     pass
+
+    @staticmethod
+    def _read(conn, size):
+        got = b""
+        while len(got) < size:
+            chunk = conn.recv(size - len(got))
+            if not chunk:
+                break
+            got += chunk
+        return got
 
 
 class Clock:
@@ -128,6 +135,16 @@ def test_mcp_send_sends_one_json_command_and_reads_the_answer(fake):
     machine.mcp_send(fake.port, "take_screenshot", {"filepath": os.devnull, "이름": "뷰"}, timeout=5)
     assert fake.requests == [{"type": "health_check", "params": {}},
                              {"type": "take_screenshot", "params": {"filepath": os.devnull, "이름": "뷰"}}]
+
+
+def test_mcp_send_reads_a_bare_json_answer_too():
+    """An editor whose plugin does not frame its answer (the public unreal-mcp) is still read."""
+    bare = FakeEditor(framed=False).up()
+    try:
+        assert machine.mcp_send(bare.port, "health_check", timeout=5) == {"status": "success", "result": {"ok": True}}
+        assert bare.requests == [{"type": "health_check", "params": {}}]
+    finally:
+        bare.close()
 
 
 def test_mcp_send_refuses_what_is_not_a_json_object_and_gives_up_in_time(fake):
