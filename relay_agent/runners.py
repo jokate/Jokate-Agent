@@ -510,12 +510,17 @@ Rules:
   2) edit ONCE: all Edit/Write calls in one message;  3) verify ONCE: the single relevant command;  4) answer.
   Look a little wider in step 1 rather than coming back for one more grep. No no-op or "just checking" turns.
 - Edit with the Edit tool (small exact replacements). Run only the verification command you need, once.
-- Bash runs without a human: only pre-approved commands work — the verification/project commands listed in the
-  prompt and read-only inspection (ls, cat, head, tail, wc, grep, rg, find, tasklist, ps, git log/show/diff/status …). Every part of a chained
-  command is checked; one unapproved part blocks the whole line. Stay inside the working directory.
+{shell}
 - If a command is denied or needs approval, do NOT retry it or a variant. Note it in open_issues and continue.
 {finish}
 """
+
+SHELL_PLAIN = """- Bash runs without a human: only pre-approved commands work — the verification/project commands listed in the
+  prompt and read-only inspection (ls, cat, head, tail, wc, grep, rg, find, tasklist, ps, git log/show/diff/status …). Every part of a chained
+  command is checked; one unapproved part blocks the whole line. Stay inside the working directory."""
+# Guarded studio work runs (call.claude_only with Bash): a guard judges each command instead of a fixed allowlist.
+SHELL_GUARDED = """- Shell commands can be run. A guard judges every command: fatal actions are blocked, risky commands go to the
+  owner for approval (if rejected, do not retry by another route). Build, test and editor operations: do them yourself."""
 
 FINISH_SCHEMA = """- Finish with ONE structured output call: summary, state, open_issues, next_steps are required; add decisions_added,
   pointers_added, output, verdict (pass|retry|fail) when relevant. Write the text fields in Korean."""
@@ -592,7 +597,8 @@ class ClaudeCliRunner:
             # Replacing Claude Code's default system prompt was measured at ~7.5K -> ~0.6K input tokens.
             # It also drops the environment/tool-usage guidance, so restate the essentials.
             finish = FINISH_TEXT if call.result_mode == "text" else FINISH_SCHEMA
-            args += ["--system-prompt", REPLACE_PREAMBLE.format(cwd=call.cwd, os_name=os_name(), finish=finish)
+            shell = SHELL_GUARDED if call.claude_only and "Bash" in (call.tools or []) else SHELL_PLAIN
+            args += ["--system-prompt", REPLACE_PREAMBLE.format(cwd=call.cwd, os_name=os_name(), finish=finish, shell=shell)
                      + (DIGEST_RULE if "digest" in call.mcp_servers else "") + call.system]
         else:
             # Moves cwd/git-status out of the system prompt so it caches across working directories.

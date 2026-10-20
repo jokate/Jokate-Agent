@@ -46,11 +46,14 @@ from typing import Any, Callable, Iterable
 
 import yaml
 
+from .. import projctx
 from ..config import ROOT
 from ..pipeline import RelaySpec, cap_effort, cap_model
 from . import campaigns, cutoff, employees, gate, harness_root, plugins, review, runs
 from . import editor as editor_control
 from . import machine as machine_info
+from .creator import build_bat
+from .importer import find_uproject
 from .inbox import SYSTEM_ROOM
 from .store import StudioStore
 from .tasks import PRE_EFFECT, STATE_INBOX, SYSTEM, Effects, TransitionError
@@ -89,6 +92,53 @@ EDITOR_CUT = "에디터가 응답하지 않아 런을 끊었다"
 EDITOR_ENDED = "에디터가 응답하지 않았지만 런은 끊기 전에 이미 끝나 있었다"
 
 log = logging.getLogger(__name__)
+
+# the '빌드·검증' section of the goal of a task run in an Unreal project (§9.1). The tool names of the editor's MCP
+# are the plugin's (MNYS `Plugins/Unreal-MCP-main`, outside this repository and not read): the server does not know
+# them, so the section says to find them with ToolSearch instead of naming them. Once the names are confirmed, edit
+# TOOL_HINT (and nothing else) to name them.
+BUILD_TITLE = "빌드·검증"
+LIVE_CODING = "LiveCoding.Compile"  # the Unreal console command of a Live Coding compile
+TOOL_HINT = ("MCP 도구 이름은 서버가 모른다 — ToolSearch 로 찾는다 (검색어 예: `unreal console command` 는 콘솔 명령 실행, "
+             "`unreal PIE play stop` 은 PIE 시작·정지). 찾지 못하면 도구 이름을 지어내지 말고, 그 일을 하지 못했다고 "
+             "`unverified` 에 적는다.")
+UNVERIFIED = ("빌드나 측정을 하지 못하면 검수 요청(`task_request_review`)의 checklist `unverified` 에 "
+              "무엇을 왜 하지 못했는지 적는다 — 해 본 것처럼 쓰지 않는다.")
+
+
+def build_section(project: dict, uproject: Path, state: dict, engines: list[dict]) -> str:
+    """The section a task run's goal ends with when the project is an Unreal one: how to build and verify, from
+    what the server saw when the run was made — `state` is `editor.status` ({running, healthy}), `engines` is
+    `[{version, path, exists}]`. An editor that answers: Live Coding through the MCP console command, no UBT. Else
+    `Build.bat` of the project's engine, and no such line when the engine's folder is not known."""
+    stem = uproject.stem
+    port = project.get("mcp_port")
+    log_file = Path(str(project.get("path") or uproject.parent)) / "Saved" / "Logs" / f"{stem}.log"
+    lines = [f"===== {BUILD_TITLE} =====", "아래는 이 런을 만들 때 서버가 본 값이다 — 도는 동안 에디터 상태는 바뀔 수 있다."]
+    if state.get("running") and state.get("healthy") and port:
+        lines += [f"- 에디터: 켜져 있고 MCP(포트 {port})가 응답한다 (런 생성 시점).",
+                  f"- 빌드: UBT 나 Build.bat 을 돌리지 않는다. MCP 의 콘솔 명령 도구로 "
+                  f"`{LIVE_CODING}` 을 실행해 Live Coding 으로 컴파일한다.",
+                  "- PIE: MCP 도구로 시작하고 정지한다.",
+                  f"- 도구: {TOOL_HINT}"]
+    else:
+        if not state.get("running"):
+            why = "꺼져 있다"
+        elif not port:
+            why = "켜져 있지만 프로젝트에 MCP 포트가 정해져 있지 않다"
+        else:
+            why = f"켜져 있지만 MCP(포트 {port})가 응답하지 않았다"
+        version = str(project.get("engine_version") or "").strip()
+        engine = next((e for e in engines if version and str(e.get("version")) == version and e.get("exists")), None)
+        lines.append(f"- 에디터: {why} (런 생성 시점).")
+        if engine is not None:
+            lines.append(f'- 빌드: 에디터 없이 `"{build_bat(str(engine["path"]))}" {stem}Editor Win64 Development '
+                         f'-Project="{uproject}" -WaitMutex` 로 빌드한다.')
+        else:
+            lines.append("- 빌드: 이 컴퓨터의 엔진 폴더를 몰라 빌드 명령을 줄 수 없다 — 명령을 지어내지 않는다.")
+        lines.append("- PIE: 에디터가 켜져 MCP 가 응답할 때만 MCP 도구로 시작하고 정지한다. 지금은 측정하지 못할 수 있다.")
+    lines += [f"- 로그: `{log_file}`", f"- {UNVERIFIED}"]
+    return "\n".join(lines)
 
 
 class _Stopped(Exception):
@@ -367,6 +417,10 @@ class WorkEffects(Effects):
                 pin_copy=holds_server_code(project["path"], folder, root=self.server_root), routed=routed)
         except ValueError as e:
             raise Refused(f"엔진이 런을 만들지 않았다: {e}") from e
+        boost = float(getattr(self.cfg, "studio_game_budget_boost", 1.0) or 1.0)
+        if boost > 1.0 and projctx.game_root(folder) is not None:  # §11.2: a game's work starts with a wider budget
+            run.stage_budget_boost = {stage.name: boost for stage in spec.stages}
+            self.engine.save(run)
         return run.id
 
     def cancel_run(self, run_id: str) -> None:
@@ -660,7 +714,27 @@ class WorkEffects(Effects):
         parts.append(employees.prompt_for(store, self.cfg.studio_dir, employee, room["id"] if room else None,
                                           task["project_id"],
                                           harness=harness_root.section_for(self.cfg.studio_harness_root)))
+        project = store.get_project(task["project_id"]) if task.get("project_id") else None
+        uproject = find_uproject(Path(project["path"])) if project and project.get("path") else None
+        if uproject is not None:  # an Unreal project only: the last section, after the room's recent messages (§9.1)
+            parts.append(self._build_section(store, project, uproject))
         return "\n\n".join(part for part in parts if part.strip())
+
+    def _build_section(self, store: StudioStore, project: dict, uproject: Path) -> str:
+        """`build_section` of what the editor and the machine say now. A look that fails is an editor that is off
+        and an engine that is not known (the same as `editor_ready` takes an engine list it cannot read)."""
+        try:
+            state = editor_control.status(project, store.list_projects(), processes=self.editor_processes,
+                                          healthy=self.editor_healthy)
+        except Exception:  # noqa: BLE001
+            log.exception("studio: 에디터 상태를 읽지 못했다 (프로젝트 %s)", project.get("id"))
+            state = {"running": False, "healthy": False}
+        try:
+            engines = list(self.editor_engines())
+        except Exception:  # noqa: BLE001
+            log.exception("studio: 설치된 엔진 목록을 읽지 못했다")
+            engines = []
+        return build_section(project, uproject, state, engines)
 
     def _relay(self, task: dict, settings: dict, checks: employees.Checks) -> tuple[Path, RelaySpec]:
         """Step 1: (the relay file, read). `settings["relay"]` is the file's, else the part's."""

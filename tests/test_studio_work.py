@@ -380,3 +380,118 @@ def test_a_task_run_goal_carries_the_harness_section_after_the_policy(shop, monk
     goal = shop.start(shop.task(emp))[1].baton.goal
     assert "===== 하네스 =====\n행동하기 전에 읽는다." in goal and "- b — b 을 할 때" in goal
     assert goal.index("===== GUIDE.md") < goal.index("===== 하네스") < goal.index("===== 결재 규칙")
+
+
+# --- the build · verify section of an Unreal task run, and the game budget (T2; §9.1 · §11.2) ------------------------
+def unreal(shop, *, running, healthy, version="5.7", engines=(), port=8101):
+    """The shop's project made an Unreal one: `X.uproject` in its folder, a port, a version, and a computer that
+    is told what it has — no process list, health_check or engine registry of the real machine is read."""
+    folder = shop.lab.tmp / "project"
+    folder.mkdir(exist_ok=True)
+    (folder / "X.uproject").write_text("{}", encoding="utf-8")
+    shop.store.update_project(shop.pid, path=str(folder), mcp_port=port, engine_version=version)
+    cmdline = f'UnrealEditor.exe "{folder / "X.uproject"}"'
+    shop.fx.editor_processes = lambda: [{"pid": 7, "name": "UnrealEditor.exe", "cmdline": cmdline}] if running else []
+    shop.fx.editor_healthy = lambda _port: healthy
+    shop.fx.editor_engines = lambda: list(engines)
+    return folder
+
+
+def run_of(shop):
+    return shop.start(shop.task(shop.hire()))[1]
+
+
+def section_of(shop):
+    return run_of(shop).baton.goal.split("===== 빌드·검증 =====")[1]
+
+
+def test_an_open_editor_that_answers_is_built_with_live_coding_through_mcp(shop):
+    folder = unreal(shop, running=True, healthy=True)
+    goal = run_of(shop).baton.goal
+    assert goal.index("===== 결재 규칙") < goal.index("===== 빌드·검증")
+    section = goal.split("===== 빌드·검증 =====")[1]
+    assert "포트 8101" in section and "LiveCoding.Compile" in section and "Win64" not in section
+    assert "ToolSearch" in section and "unreal console command" in section and "unreal PIE play stop" in section
+    assert "지어내지" in section
+    assert str(folder / "Saved" / "Logs" / "X.log") in section and "unverified" in section
+
+
+def test_a_closed_editor_is_built_with_the_engines_build_bat(shop, tmp_path):
+    engine = tmp_path / "UE_5.7"
+    unreal(shop, running=False, healthy=False, engines=[{"version": "5.7", "path": str(engine), "exists": True}])
+    section = section_of(shop)
+    assert "꺼져 있다" in section and "LiveCoding.Compile" not in section
+    assert str(engine / "Engine" / "Build" / "BatchFiles" / "Build.bat") in section
+    assert "XEditor Win64 Development" in section and "-WaitMutex" in section and "X.uproject" in section
+    assert "unverified" in section and "ToolSearch" not in section
+
+
+def test_an_editor_that_does_not_answer_is_built_like_a_closed_one(shop, tmp_path):
+    unreal(shop, running=True, healthy=False, engines=[{"version": "5.7", "path": str(tmp_path / "E"), "exists": True}])
+    section = section_of(shop)
+    assert "응답하지 않았다" in section and "LiveCoding.Compile" not in section and "Build.bat" in section
+    assert "ToolSearch" not in section
+
+
+def test_an_engine_folder_that_is_not_known_leaves_the_build_line_out(shop, tmp_path):
+    unreal(shop, running=False, healthy=False, version="9.9",
+           engines=[{"version": "5.7", "path": str(tmp_path / "E"), "exists": True},
+                    {"version": "9.9", "path": str(tmp_path / "Gone"), "exists": False}])
+    section = section_of(shop)
+    assert "엔진 폴더를 몰라" in section and "Build.bat" not in section and "Win64" not in section
+
+
+def test_a_computer_that_cannot_be_read_counts_as_off_and_unknown(shop):
+    unreal(shop, running=True, healthy=True)
+
+    def broken(*_):
+        raise OSError("no")
+    shop.fx.editor_processes, shop.fx.editor_engines = broken, broken
+    section = section_of(shop)
+    assert "꺼져 있다" in section and "엔진 폴더를 몰라" in section
+
+
+def test_a_folder_that_is_not_an_unreal_project_has_no_build_section_and_no_look_at_the_computer(shop):
+    def never(*_):
+        raise AssertionError("the computer was read")
+    shop.fx.editor_processes = shop.fx.editor_healthy = shop.fx.editor_engines = never
+    folder = shop.lab.tmp / "project"
+    folder.mkdir(exist_ok=True)
+    shop.store.update_project(shop.pid, path=str(folder), mcp_port=8101)
+    assert "빌드·검증" not in run_of(shop).baton.goal
+    (folder / "ProjectSettings").mkdir()
+    (folder / "ProjectSettings" / "ProjectVersion.txt").write_text("m_EditorVersion: 2022.3.1f1\n", encoding="utf-8")
+    assert "빌드·검증" not in run_of(shop).baton.goal  # Unity: a game, but not this section
+
+
+def test_only_a_game_projects_task_run_starts_with_the_budget_boost(shop):
+    folder = shop.lab.tmp / "project"
+    folder.mkdir(exist_ok=True)
+    shop.store.update_project(shop.pid, path=str(folder))
+    assert shop.cfg.studio_game_budget_boost == 2.5
+    assert run_of(shop).stage_budget_boost == {}  # not a game
+    (folder / "ProjectSettings").mkdir()
+    (folder / "ProjectSettings" / "ProjectVersion.txt").write_text("m_EditorVersion: 2022.3.1f1\n", encoding="utf-8")
+    stages = [s.name for s in RelaySpec.load(shop.relays / "demo.yaml")[0].stages]
+    assert run_of(shop).stage_budget_boost == {name: 2.5 for name in stages}  # Unity
+    (folder / "ProjectSettings" / "ProjectVersion.txt").unlink()
+    unreal(shop, running=False, healthy=False)
+    run = run_of(shop)
+    assert run.stage_budget_boost == {name: 2.5 for name in stages}
+    assert shop.engine.load(run.id).stage_budget_boost == run.stage_budget_boost  # saved
+    shop.cfg.studio_game_budget_boost = 1.0
+    assert run_of(shop).stage_budget_boost == {}
+
+
+def test_build_section_words_the_three_cases_from_its_inputs():
+    uproject = Path("D:/g/X.uproject")
+    project = {"path": "D:/g", "mcp_port": 55557, "engine_version": "5.7"}
+    on = work.build_section(project, uproject, {"running": True, "healthy": True}, [])
+    assert "LiveCoding.Compile" in on and "55557" in on and "-WaitMutex" not in on
+    engines = [{"version": "5.7", "path": "C:/UE", "exists": True}]
+    off = work.build_section(project, uproject, {"running": False, "healthy": False}, engines)
+    assert "-WaitMutex" in off and 'XEditor Win64 Development -Project="' in off and "LiveCoding" not in off
+    none = work.build_section(project, uproject, {"running": False, "healthy": False}, [])
+    assert "엔진 폴더를 몰라" in none and "-WaitMutex" not in none and "unverified" in none
+    noport = work.build_section({**project, "mcp_port": None}, uproject, {"running": True, "healthy": True}, engines)
+    assert "포트가 정해져 있지 않다" in noport and "LiveCoding" not in noport

@@ -208,6 +208,30 @@ def test_cli_system_prompt_modes(tmp_path):
     assert "--disable-slash-commands" in append and "--safe-mode" not in append  # safe-mode would kill MCP
 
 
+def _sys_prompt(tmp_path, **kw):
+    base = dict(stage="s", model="haiku", effort=None, system="ROLE", prompt="p", cwd=tmp_path, system_mode="replace")
+    args = ClaudeCliRunner(exe="claude").build_args(StageCall(**base, **kw), None)
+    return args[args.index("--system-prompt") + 1]
+
+
+def test_guarded_run_gets_shell_guidance(tmp_path):
+    text = _sys_prompt(tmp_path, claude_only=True, tools=["Bash", "Read"])
+    assert "A guard judges every command" in text and "do not retry by another route" in text
+    assert "Build, test and editor operations: do them yourself" in text
+    assert "only pre-approved commands work" not in text
+
+
+def test_unguarded_run_keeps_plain_shell_text(tmp_path):
+    text = _sys_prompt(tmp_path, claude_only=False, tools=["Bash", "Read"])
+    assert "only pre-approved commands work" in text and "A guard judges every command" not in text
+
+
+def test_guarded_run_without_bash_keeps_plain_text(tmp_path):
+    for tools in (["Read", "Grep"], None):
+        text = _sys_prompt(tmp_path, claude_only=True, tools=tools)
+        assert "only pre-approved commands work" in text and "A guard judges every command" not in text
+
+
 def test_cli_falls_back_from_fable_to_opus(tmp_path):
     from relay_agent.runners import RunnerError, Usage
 
