@@ -40,6 +40,7 @@ from .repos import RepoRegistry, RepoSpec
 from .journal import JournalWorkspace
 from .workspace import DEFAULT_EXCLUDES, Workspace, WorkspaceError, _remove, check_shadow, dir_size, gc_shadow, shadow_dir_for
 
+BUILD_HEAD = "===== 빌드·검증 ====="  # the head of the section a guard appends to a studio task run's prompt (prompt_append)
 WRITE_TOOLS = {"Edit", "Write", "Bash", "NotebookEdit"}
 READ_ONLY_MCP = {"docs_read", "handoff", "digest", "studio"}  # every other MCP server may change the real project
 # Words in an MCP tool name that mean it changes the project/editor (create_blueprint, set_actor_property,
@@ -1757,6 +1758,7 @@ class RelayEngine:
                         effort=effort, reads=stage.reads_outputs, system_mode=stage.system_mode,
                         escalated=escalate and bool(stage.retry_model or stage.retry_effort))
             fresh_prompt = None
+            prompt_append = ""  # a guard's addition to this stage's prompt (below)
             tools = self._stage_tools(stage, repo, ctx, game)
             if resume_sid:
                 self._event(run, stage.name, "stage_resumed", session=resume_sid)
@@ -1818,6 +1820,7 @@ class RelayEngine:
                 except Exception as e:  # noqa: BLE001 - closed side: a guarded run does not go on without its guard
                     return self._fail(run, stage.name, f"가드를 걸지 못했습니다 — {type(e).__name__}: {e}"[:300])
                 if guard:  # pre-approvals, the hook's settings file, where the hook asks, Claude Code only
+                    prompt_append = str(guard.get("prompt_append") or "").strip()
                     # a repo without a verification command lost Bash to Grep/Glob (_stage_tools). A guarded run
                     # whose profile approves Bash keeps the Bash its relay's stage lists: the hook judges each
                     # command (owner's decision of 2026-10-14, §10.1)
@@ -1856,6 +1859,12 @@ class RelayEngine:
                     "'남은 일'만 마친 뒤 결과 JSON 을 낸다."
                         + (f"\n\n# HANDOFF\n{handoff}" if handoff else "")
                         + (f"\n그사이 사용자 추가 지시:\n{notes}" if notes else "")))
+            if prompt_append:  # after the resume branch, which replaces the prompt: a studio task run's section of now
+                call = replace(
+                    call,
+                    prompt=call.prompt if BUILD_HEAD in call.prompt else f"{call.prompt}\n\n{prompt_append}",
+                    fresh_prompt=(call.fresh_prompt if call.fresh_prompt is None or BUILD_HEAD in call.fresh_prompt
+                                  else f"{call.fresh_prompt}\n\n{prompt_append}"))
             self._event(run, stage.name, "prompt_breakdown", **prompt_breakdown(call.system, call.prompt))
             stage_t0_ns = time.time_ns()
             try:

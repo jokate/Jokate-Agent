@@ -587,6 +587,10 @@ def guard_stage(run_id: str, stage: str = "", *, run_dir: Path, cwd: Path, setti
     `claude_only` (§10.8 의 9) and `skills` (a task run: the engine adds Skill and drops the flags that switch
     off the user's skills, §10.1). guard_ctx.json and the settings file are written again at every stage.
 
+    A task run in a project that has a `.uproject` also gets `prompt_append`: the '빌드·검증' section as the editor
+    and the machine are at the start of this stage (`WorkEffects.stage_section`). The key is left out for any other
+    run and when the section cannot be made (a look that fails is logged, not a failed stage).
+
     When this server was given the shared token by its environment (`KATAE_TOKEN`), `env` also blanks it for the
     run (§10.8 의 4): the employee's shell would otherwise read the owner's token there. The key is not added
     when the server has no such variable.
@@ -608,9 +612,19 @@ def guard_stage(run_id: str, stage: str = "", *, run_dir: Path, cwd: Path, setti
     env = {"STUDIO_URL": _cfg.server_url, "STUDIO_ACTOR_TOKEN": token}
     if "KATAE_TOKEN" in os.environ:
         env["KATAE_TOKEN"] = ""
-    return {"allowed_tools": guard.profile(head["mode"]),
-            "settings_path": guard.write_settings(Path(run_dir), ctx_path, settings),
-            "env": env, "claude_only": True, "skills": head["mode"] == "work"}
+    out = {"allowed_tools": guard.profile(head["mode"]),
+           "settings_path": guard.write_settings(Path(run_dir), ctx_path, settings),
+           "env": env, "claude_only": True, "skills": head["mode"] == "work"}
+    fn = getattr(_effects, "stage_section", None) if head["mode"] == "work" and head.get("project_id") else None
+    if fn is not None:
+        try:
+            section = fn(store, head["project_id"])
+        except Exception:  # noqa: BLE001 - no section is a stage without it, not a failed stage
+            log.exception("studio: 빌드·검증 절을 만들지 못했다 (런 %s)", run_id)
+            section = None
+        if section:
+            out["prompt_append"] = section
+    return out
 
 
 def run_workdir(run_id: str) -> Path | None:

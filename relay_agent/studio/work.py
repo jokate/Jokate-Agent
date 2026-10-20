@@ -93,7 +93,7 @@ EDITOR_ENDED = "에디터가 응답하지 않았지만 런은 끊기 전에 이�
 
 log = logging.getLogger(__name__)
 
-# the '빌드·검증' section of the goal of a task run in an Unreal project (§9.1). The tool names of the editor's MCP
+# the '빌드·검증' section of every stage of a task run in an Unreal project (§9.1). The tool names of the editor's MCP
 # are the plugin's (MNYS `Plugins/Unreal-MCP-main`, outside this repository and not read): the server does not know
 # them, so the section says to find them with ToolSearch instead of naming them. Once the names are confirmed, edit
 # TOOL_HINT (and nothing else) to name them.
@@ -106,17 +106,22 @@ UNVERIFIED = ("빌드나 측정을 하지 못하면 검수 요청(`task_request_
               "무엇을 왜 하지 못했는지 적는다 — 해 본 것처럼 쓰지 않는다.")
 
 
+PLAY_REQUEST = ("입력 · 손맛 · 타이밍처럼 사람이 플레이해야 볼 수 있는 검증은, 빌드하고 PIE 를 띄운 뒤 `ask_owner` 로 "
+                "무엇을 어떤 순서로 해 달라는지(시나리오 · 몇 번 · 끝나면 무엇을 누를지)를 올리고 턴을 끝낸다. "
+                "owner 가 끝냈다고 답하면 로그를 읽어 표를 만든다.")
+
+
 def build_section(project: dict, uproject: Path, state: dict, engines: list[dict]) -> str:
-    """The section a task run's goal ends with when the project is an Unreal one: how to build and verify, from
-    what the server saw when the run was made — `state` is `editor.status` ({running, healthy}), `engines` is
+    """The section a stage of a task run in an Unreal project ends with: how to build and verify, from
+    what the server saw when the stage started — `state` is `editor.status` ({running, healthy}), `engines` is
     `[{version, path, exists}]`. An editor that answers: Live Coding through the MCP console command, no UBT. Else
     `Build.bat` of the project's engine, and no such line when the engine's folder is not known."""
     stem = uproject.stem
     port = project.get("mcp_port")
     log_file = Path(str(project.get("path") or uproject.parent)) / "Saved" / "Logs" / f"{stem}.log"
-    lines = [f"===== {BUILD_TITLE} =====", "아래는 이 런을 만들 때 서버가 본 값이다 — 도는 동안 에디터 상태는 바뀔 수 있다."]
+    lines = [f"===== {BUILD_TITLE} =====", "아래는 이 단계를 시작할 때 서버가 본 값이다 — 도는 동안 에디터 상태는 바뀔 수 있다."]
     if state.get("running") and state.get("healthy") and port:
-        lines += [f"- 에디터: 켜져 있고 MCP(포트 {port})가 응답한다 (런 생성 시점).",
+        lines += [f"- 에디터: 켜져 있고 MCP(포트 {port})가 응답한다 (이 단계 시작 시점).",
                   f"- 빌드: UBT 나 Build.bat 을 돌리지 않는다. MCP 의 콘솔 명령 도구로 "
                   f"`{LIVE_CODING}` 을 실행해 Live Coding 으로 컴파일한다.",
                   "- PIE: MCP 도구로 시작하고 정지한다.",
@@ -130,14 +135,14 @@ def build_section(project: dict, uproject: Path, state: dict, engines: list[dict
             why = f"켜져 있지만 MCP(포트 {port})가 응답하지 않았다"
         version = str(project.get("engine_version") or "").strip()
         engine = next((e for e in engines if version and str(e.get("version")) == version and e.get("exists")), None)
-        lines.append(f"- 에디터: {why} (런 생성 시점).")
+        lines.append(f"- 에디터: {why} (이 단계 시작 시점).")
         if engine is not None:
             lines.append(f'- 빌드: 에디터 없이 `"{build_bat(str(engine["path"]))}" {stem}Editor Win64 Development '
                          f'-Project="{uproject}" -WaitMutex` 로 빌드한다.')
         else:
             lines.append("- 빌드: 이 컴퓨터의 엔진 폴더를 몰라 빌드 명령을 줄 수 없다 — 명령을 지어내지 않는다.")
         lines.append("- PIE: 에디터가 켜져 MCP 가 응답할 때만 MCP 도구로 시작하고 정지한다. 지금은 측정하지 못할 수 있다.")
-    lines += [f"- 로그: `{log_file}`", f"- {UNVERIFIED}"]
+    lines += [f"- 사람이 플레이: {PLAY_REQUEST}", f"- 로그: `{log_file}`", f"- {UNVERIFIED}"]
     return "\n".join(lines)
 
 
@@ -714,11 +719,15 @@ class WorkEffects(Effects):
         parts.append(employees.prompt_for(store, self.cfg.studio_dir, employee, room["id"] if room else None,
                                           task["project_id"],
                                           harness=harness_root.section_for(self.cfg.studio_harness_root)))
-        project = store.get_project(task["project_id"]) if task.get("project_id") else None
-        uproject = find_uproject(Path(project["path"])) if project and project.get("path") else None
-        if uproject is not None:  # an Unreal project only: the last section, after the room's recent messages (§9.1)
-            parts.append(self._build_section(store, project, uproject))
         return "\n\n".join(part for part in parts if part.strip())
+
+    def stage_section(self, store: StudioStore, project_id: str | None) -> str | None:
+        """The '빌드·검증' section of a stage that is about to start (§9.1; `api.guard_stage` hands it to the engine as
+        `prompt_append`): what the editor and the machine say now. None when the project is not an Unreal one — then
+        neither the editor nor the engine list is read."""
+        project = store.get_project(project_id) if project_id else None
+        uproject = find_uproject(Path(project["path"])) if project and project.get("path") else None
+        return self._build_section(store, project, uproject) if uproject is not None else None
 
     def _build_section(self, store: StudioStore, project: dict, uproject: Path) -> str:
         """`build_section` of what the editor and the machine say now. A look that fails is an editor that is off

@@ -402,14 +402,14 @@ def run_of(shop):
 
 
 def section_of(shop):
-    return run_of(shop).baton.goal.split("===== 빌드·검증 =====")[1]
+    """The section a stage of the run is given now (`api.guard_stage` → `prompt_append`), not the goal's."""
+    return shop.fx.stage_section(shop.store, shop.pid).split("===== 빌드·검증 =====")[1]
 
 
 def test_an_open_editor_that_answers_is_built_with_live_coding_through_mcp(shop):
     folder = unreal(shop, running=True, healthy=True)
-    goal = run_of(shop).baton.goal
-    assert goal.index("===== 결재 규칙") < goal.index("===== 빌드·검증")
-    section = goal.split("===== 빌드·검증 =====")[1]
+    assert "빌드·검증" not in run_of(shop).baton.goal  # the goal no longer carries it: every stage is given it
+    section = section_of(shop)
     assert "포트 8101" in section and "LiveCoding.Compile" in section and "Win64" not in section
     assert "ToolSearch" in section and "unreal console command" in section and "unreal PIE play stop" in section
     assert "지어내지" in section
@@ -458,10 +458,20 @@ def test_a_folder_that_is_not_an_unreal_project_has_no_build_section_and_no_look
     folder = shop.lab.tmp / "project"
     folder.mkdir(exist_ok=True)
     shop.store.update_project(shop.pid, path=str(folder), mcp_port=8101)
-    assert "빌드·검증" not in run_of(shop).baton.goal
+    assert "빌드·검증" not in run_of(shop).baton.goal and shop.fx.stage_section(shop.store, shop.pid) is None
     (folder / "ProjectSettings").mkdir()
     (folder / "ProjectSettings" / "ProjectVersion.txt").write_text("m_EditorVersion: 2022.3.1f1\n", encoding="utf-8")
     assert "빌드·검증" not in run_of(shop).baton.goal  # Unity: a game, but not this section
+    assert shop.fx.stage_section(shop.store, shop.pid) is None and shop.fx.stage_section(shop.store, None) is None
+
+
+def test_the_section_follows_the_editor_from_one_stage_to_the_next(shop):
+    unreal(shop, running=True, healthy=True)
+    first = shop.fx.stage_section(shop.store, shop.pid)
+    assert "LiveCoding.Compile" in first and "이 단계 시작 시점" in first
+    shop.fx.editor_processes = lambda: []  # the owner closed the editor between two stages
+    second = shop.fx.stage_section(shop.store, shop.pid)
+    assert second != first and "꺼져 있다" in second and "LiveCoding.Compile" not in second
 
 
 def test_only_a_game_projects_task_run_starts_with_the_budget_boost(shop):
@@ -495,3 +505,6 @@ def test_build_section_words_the_three_cases_from_its_inputs():
     assert "엔진 폴더를 몰라" in none and "-WaitMutex" not in none and "unverified" in none
     noport = work.build_section({**project, "mcp_port": None}, uproject, {"running": True, "healthy": True}, engines)
     assert "포트가 정해져 있지 않다" in noport and "LiveCoding" not in noport
+    for section in (on, off, none, noport):  # the play request is in the common tail of all four
+        assert work.PLAY_REQUEST in section and "사람이 플레이해야" in section and "`ask_owner`" in section
+        assert "PIE" in section and section.index("사람이 플레이") < section.index("- 로그:")

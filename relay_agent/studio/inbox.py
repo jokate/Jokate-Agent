@@ -130,7 +130,8 @@ DECISION_LABEL = {"approve": "승인", "reject": "반려", "revise": "수정 요
                   "skip": "넘기기"}
 ANSWERS = {  # question: by reason (`asked`, `no_review_request`) or by the option the owner picked
     "asked": "질문의 답이다: `{label}`.",
-    "retry": "멈췄던 자리에서 이어서 하라.",
+    "retry": "멈췄던 자리에서 이어서 하라. 앞선 '검수 요청' 지시는 거둔다 — 새 일을 막던 말은 더는 따르지 않고 "
+             "남은 일을 이어서 한다.",
     "continue": "왕복 수를 다시 셌다. 이어서 하라.",
     "no_review_request": "검수 요청 없이 끝났다. 남은 일을 마치고 `task_request_review` 를 올려라.",
     "wrap_up": "새 일을 벌이지 말고 지금까지 한 것으로 `task_request_review` 를 올려라. 검증하지 못한 완료 기준은 "
