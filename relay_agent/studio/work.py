@@ -37,6 +37,7 @@ without a project context `studio` and the registry servers the employee picked 
 from __future__ import annotations
 
 import dataclasses
+import difflib
 import logging
 import os
 import re
@@ -54,7 +55,7 @@ from . import editor as editor_control
 from . import machine as machine_info
 from .creator import build_bat
 from .importer import find_uproject
-from .inbox import SYSTEM_ROOM
+from .inbox import SYSTEM_ROOM, InboxError
 from .store import StudioStore
 from .tasks import PRE_EFFECT, STATE_INBOX, SYSTEM, Effects, TransitionError
 
@@ -73,6 +74,9 @@ CANCELLED = "작업 런이 취소됐다. 다시 시도하거나 지금까지 한
 FAILED = "작업 런이 실패했다: {error}\n다시 시도하거나 지금까지 한 것으로 검수를 요청할 수 있다."
 NOT_ADVANCED = "작업 런을 진행시키지 못했다: {error}\n다시 시도하거나 지금까지 한 것으로 검수를 요청할 수 있다."
 NO_REVIEW = "작업 런이 검수 요청(`task_request_review`) 없이 끝났다. 답하면 남은 일을 마치고 검수를 요청하게 한다."
+REPEAT = "같은 이유로 {n}번째 실패입니다 — 다시 시도보다 '새로 시작'이나 '검수 요청'을 권합니다"  # §4.7: from the 2nd, same run
+NOT_VERIFIED = "검증 못 함: {why}"   # the note of the checklist when the server files the review a wrapped-up run did not
+SIMILAR = 0.7                      # how alike two errors are, 0..1, for 'the same reason' (`similar`)
 RESTARTED = "서버 재시작"   # how the error of a run `RelayEngine.recover_interrupted` closed begins
 FOLDER_BUSY = "다른 실행("  # in the error of a run whose folder another run was editing (`pipeline.py` _advance)
 AGAIN = "끊긴 런을 다시 잇는다"
@@ -391,7 +395,7 @@ class WorkEffects(Effects):
         return providers.catalog()
 
     # --- Effects ------------------------------------------------------------------------------------------
-    def create_run(self, task: dict) -> str:
+    def create_run(self, task: dict, *, restart_from: str | None = None, note: str = "") -> str:
         """T3: steps 1–7 with what the employee's file, the part, the config and the task say now, and the run
         `create` made of them — pending, not advanced. `Refused` when a step says no or the engine does."""
         store = self.store()
@@ -399,7 +403,8 @@ class WorkEffects(Effects):
         settings, checks = self._settings(store, employee)
         project, repo, folder = self._folder(store, task)
         session_id = self._session(store, task, repo, folder)
-        goal = self._goal(store, task, employee)
+        goal = self._goal(store, task, employee,
+                          lead=self._carry(restart_from, note) if restart_from is not None else "")
         path, spec = self._relay(task, settings, checks)
         routed = None
         if spec.router is not None:  # `auto`: picked here, once; `create` gets the relay that was picked
@@ -708,12 +713,35 @@ class WorkEffects(Effects):
             return session["id"]
         return None
 
-    def _goal(self, store: StudioStore, task: dict, employee: dict) -> str:
+    def _carry(self, run_id: str, note: str) -> str:
+        """T5 · restart: what the new run is told first — the closed run's hand-over paragraph (what it changed and
+        why it stopped) and the owner's comment. A run that cannot be read is said so in one line."""
+        run = _load(self.engine, run_id)
+        lines = ["===== 지난 런 인계 (새로 시작) ====="]
+        if run is None:
+            lines.append(f"지난 런 `{run_id}` 을 읽지 못했다. 작업 폴더의 변경은 되돌리지 않았다. 새 대화로 시작한다.")
+        else:
+            baton = run.baton
+            text = ((baton.stop.summary if baton.stop else "") or baton.handoff or "").strip()
+            paragraph = next((p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()), "")[:700]
+            lines.append(f"지난 런 `{run_id}`({run.status})는 닫았다. 작업 폴더의 변경은 되돌리지 않았다. 새 대화로 시작한다.")
+            lines += [paragraph, f"멈춘 이유: {(run.error or '').strip()[:300]}" if (run.error or "").strip() else ""]
+            if run.workspace_mode == "copy" and run.changes_status == "ready":
+                files = int((run.changes or {}).get("files") or 0)
+                lines.append(f"주의: 지난 런의 변경 {files}개 파일은 원본이 아니라 지난 런의 복사본에 있다. "
+                             "새 런의 작업 폴더에는 아직 없다. owner 가 지난 런의 변경을 반영해야 들어온다.")
+        if (note or "").strip():
+            lines.append(f"owner 코멘트: {note.strip()}")
+        return "\n".join(line for line in lines if line.strip())
+
+    def _goal(self, store: StudioStore, task: dict, employee: dict, lead: str = "") -> str:
         """§11.2 `goal`: the task first — its title is the head, which a new session takes its name from —, then
-        reason, spec and done criteria, then the employee's part of the prompt (§9.1: persona, guide, memory,
+        the hand-over of a closed run (`lead`, T5 · restart), reason, spec and done criteria, then the employee's part of the prompt (§9.1: persona, guide, memory,
         the project's policy, the harness, the recent messages of the task's room)."""
         room = next(iter(store.list_rooms(task_id=task["id"], include_archived=True)), None)
         parts = [f"작업: {(task['title'] or '').strip()}"]
+        if lead:
+            parts.append(lead)
         parts += [f"===== {title} =====\n{task[key].strip()}" for title, key in GOAL_SECTIONS
                   if (task[key] or "").strip()]
         parts.append(employees.prompt_for(store, self.cfg.studio_dir, employee, room["id"] if room else None,
@@ -885,6 +913,10 @@ def table(engine, inbox, task: dict | None, run, *, owner_stop: bool = False,
         item = runs.file_stop(engine, inbox, run)
         return (FILED, item) if item is not None else None
     if status == "done":
+        if wrapped_up(inbox, task["id"]):
+            item = wrap_review(engine, inbox, task, run, "런이 검수 요청 없이 끝났다")
+            if item is not None:
+                return FILED, item
         return FILED, ask(inbox, task["id"], "no_review_request", NO_REVIEW)
     if status == "cancelled":
         return FILED, ask(inbox, task["id"], "run_cancelled", CANCELLED)
@@ -894,9 +926,70 @@ def table(engine, inbox, task: dict | None, run, *, owner_stop: bool = False,
         own = (getattr(run, "error", "") or "").strip()
         ended = error is None or (advanced and status == "failed" and bool(own))  # the run's error is the one
         told = (own if ended else error.strip()) or "오류 내용이 남지 않았다"
+        if wrapped_up(inbox, task["id"]):
+            item = wrap_review(engine, inbox, task, run, told)
+            if item is not None:
+                return FILED, item
         body = (FAILED if ended else NOT_ADVANCED).format(error=told[:500])
+        count = failures(inbox, task, told)
+        if count >= 2:
+            return FILED, ask(inbox, task["id"], "run_failed", body + "\n" + REPEAT.format(n=count),
+                              error=told, recommended="restart", failures=count)
         return FILED, ask(inbox, task["id"], "run_failed", body, error=told)
     return None
+
+
+def _plain(text: str) -> str:
+    """An error with what changes from run to run taken out: long hex ids, numbers, spacing, case."""
+    text = re.sub(r"[0-9a-f]{8,}", "#", (text or "").lower())
+    return " ".join(re.sub(r"\d+", "#", text).split())
+
+
+def similar(a: str, b: str) -> bool:
+    """The same reason for a failure: the two errors are alike (SequenceMatcher ratio >= SIMILAR) once their ids,
+    numbers and spacing are taken out. Two empty ones are not alike."""
+    a, b = _plain(a), _plain(b)
+    return bool(a and b) and difflib.SequenceMatcher(None, a, b).ratio() >= SIMILAR
+
+
+def failures(inbox, task: dict, error: str) -> int:
+    """§4.7: how many times this task's run has failed for that reason, this one included. Only the `run_failed`
+    questions of the same run count; a run made by `restart` begins again at 1."""
+    before = [i for i in inbox.store.list_inbox(task_id=task["id"], kind="question")
+              if i.get("run_id") == task["run_id"] and (i["payload"] or {}).get("reason") == "run_failed"
+              and similar((i["payload"] or {}).get("error") or "", error)]
+    return len(before) + 1
+
+
+def wrapped_up(inbox, task_id: str) -> bool:
+    """The owner's last answer on this task was `wrap_up`: the run was told to file a review, and no item has
+    been decided since (a review it filed would be pending or decided later, a risky command in between would
+    be the later one)."""
+    last = inbox.store.list_inbox(task_id=task_id, closed_first=True, limit=1)
+    return (bool(last) and last[0]["kind"] == "question" and last[0]["status"] == "decided"
+            and (last[0]["decision_data"] or {}).get("option_id") == "wrap_up")
+
+
+def wrap_review(engine, inbox, task: dict, run, why: str) -> dict | None:
+    """§4.7: the owner chose `wrap_up` and the run ended without `task_request_review` (it failed again or
+    finished): the server files the final review (T6, actor system) with the last summary, the changed files and
+    `검증 못 함: <why>`. None when it cannot (the log says why) — the caller asks the usual question then."""
+    baton = getattr(run, "baton", None)
+    text = ((baton.stop.summary if baton is not None and baton.stop else "")
+            or (baton.handoff if baton is not None else "") or "").strip()
+    try:
+        names = [f["path"] for f in review.changed_files(run, engine.patch_text(run.id))]
+        changed = ", ".join(names[:20]) + (f" 외 {len(names) - 20}개" if len(names) > 20 else "") if names else "없음"
+    except (OSError, ValueError, TypeError, KeyError):
+        changed = "목록을 읽지 못했다"
+    summary = (text or "직원이 남긴 요약이 없다") + "\n\n바뀐 파일: " + changed
+    note = NOT_VERIFIED.format(why=(why or "").strip()[:500] or "이유가 남지 않았다")
+    payload = {"summary": summary, "checklist": [{"criterion": "완료 기준 전체", "status": "unverified", "note": note}]}
+    try:
+        return inbox.create("final_review", SYSTEM, payload=payload, task_id=task["id"])
+    except (TransitionError, InboxError, OSError, ValueError) as e:
+        log.info("studio: 작업 %s 의 검수를 서버가 대신 올리지 못했다: %s", task["id"], e)
+        return None
 
 
 def stopped(engine, inbox, task_id: str, *, owner_stop: bool = False,

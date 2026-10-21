@@ -4,6 +4,7 @@ the same DB and a new queue with an empty book of slots, on the same engine — 
 on disk. The demo relay on the mock runner, whose stages wait at a gate the test opens: no AI is called."""
 import threading
 import time
+from pathlib import Path
 from collections import deque
 from datetime import datetime
 from types import SimpleNamespace
@@ -142,7 +143,7 @@ def test_a_run_that_cannot_be_advanced_is_asked_about_and_not_put_back_in_the_li
     for payload in payloads.values():
         assert (payload["reason"], payload["error"]) == ("run_failed", "런 폴더를 읽지 못했다")
         assert "런 폴더를 읽지 못했다" in payload["body"]
-        assert [option["id"] for option in payload["options"]] == ["retry", "wrap_up"]
+        assert [option["id"] for option in payload["options"]] == ["retry", "wrap_up", "restart"]
 
 
 def test_a_run_at_work_somewhere_else_is_waited_for_and_gets_its_row_once_it_has_stopped(line):  # noqa: F811
@@ -215,7 +216,7 @@ def test_a_run_that_failed_before_advance_raised_is_asked_about_with_its_own_err
     payload = item["payload"]
     assert (payload["reason"], payload["error"]) == ("run_failed", error)
     assert error in payload["body"] and "정지 기록을 쓰지 못했다" not in payload["body"]
-    assert [option["id"] for option in payload["options"]] == ["retry", "wrap_up"]
+    assert [option["id"] for option in payload["options"]] == ["retry", "wrap_up", "restart"]
 
 
 def test_a_decision_text_that_was_not_delivered_goes_in_before_the_run_goes_on(line, monkeypatch):  # noqa: F811
@@ -343,13 +344,67 @@ def test_a_run_that_fails_is_asked_about_and_a_skipped_stage_is_written_once(lin
     assert (item["kind"], item["requester_kind"], item["task_id"]) == ("question", "system", task["id"])
     assert item["payload"]["reason"] == "run_failed" and item["payload"]["error"] == run.error
     assert "빌드 도구가 죽었다" in run.error and run.error[:500] in item["payload"]["body"]
-    assert [option["id"] for option in item["payload"]["options"]] == ["retry", "wrap_up"]
+    assert [option["id"] for option in item["payload"]["options"]] == ["retry", "wrap_up", "restart"]
 
     rows = [row for row in line.store.list_task_events(task["id"])
             if row["kind"] == "run" and (row["detail"] or {}).get("event") == "stage_skipped"]
     assert [(row["reason"], row["detail"]) for row in rows] == [
         ("돌릴 AI 가 없다", {"run_id": run_id, "stage": "scout", "event": "stage_skipped", "event_id": skip["id"]})]
     assert work.skipped(line.engine, api.run_inbox(), task["id"], run_id) == []  # the same event, not twice
+
+
+def test_restart_makes_a_new_run_with_the_old_summary_and_comment_and_keeps_the_changes(line):  # noqa: F811
+    stage = line.gate.run
+
+    def breaks(call):
+        if call.stage == "build":
+            raise RunnerError("빌드 도구가 죽었다")
+        return stage(call)
+
+    line.gate.run = breaks
+    line.gate.go.set()
+    task = line.backlog()
+    ok(line.ask(task))
+    line.settled(task)
+    old = line.run_of(task)
+    assert old.status == "failed" and line.row(task)["status"] == "blocked"
+    [item] = line.lab.pending()
+    kept = Path(old.workdir) / "changed.txt"
+    kept.write_text("남은 변경", encoding="utf-8")
+    line.gate.run = stage  # the new run can go through
+    stages_before = len(line.stages())
+
+    out = ok(line.lab.decide(item, "answer", data={"option_id": "restart"}, comment="빌드는 건너뛰고 측정만"))
+    assert out["task"]["status"] == "working"
+    line.settled(task)
+    row = line.row(task)
+    new = line.engine.load(row["run_id"])
+    assert new.id != old.id                                              # (a) a new run
+    assert kept.read_text(encoding="utf-8") == "남은 변경"                # (b) the changes stay
+    goal = new.baton.goal                                                # (c) the task line heads the goal
+    assert goal.startswith("작업: ") and "===== 지난 런 인계 (새로 시작)" in goal and old.id in goal
+    assert goal.index("작업: ") < goal.index("===== 지난 런 인계 (새로 시작)")
+    assert line.engine.history.get_session(new.session_id)["title"].startswith("작업:")  # not the hand-over header
+    assert "빌드는 건너뛰고 측정만" in new.baton.goal and "빌드 도구가 죽었다" in new.baton.goal
+    assert "작업: " in new.baton.goal and len(line.stages()) > stages_before   # the new run began from scratch
+    assert line.engine.load(old.id).status == "cancelled"               # (d) the old run is closed
+    assert line.store.get_inbox_item(item["id"])["delivery"] == "none"   # nothing is fed to the old run
+    [event] = [e for e in line.events(task) if e["kind"] == "transition" and e["rule"] == "T5"]
+    assert event["detail"]["restarted_from"] == old.id and event["detail"]["run_id"] == new.id
+
+
+def test_the_hand_over_says_where_the_changes_of_a_copy_run_are(line):  # noqa: F811
+    line.gate.go.set()
+    task = line.backlog()
+    ok(line.ask(task))
+    line.settled(task)
+    run = line.run_of(task)
+    me = SimpleNamespace(engine=line.engine)
+    for mode, status, said in (("copy", "ready", True), ("copy", "none", False), ("inplace", "ready", False)):
+        run.workspace_mode, run.changes_status, run.changes = mode, status, {"files": 2}
+        line.engine.save(run)
+        text = work.WorkEffects._carry(me, run.id, "")
+        assert ("원본이 아니라 지난 런의 복사본" in text and "2개 파일" in text) is said, (mode, status)
 
 
 def test_a_run_that_fails_because_its_folder_was_held_joins_the_line_by_itself(line):  # noqa: F811

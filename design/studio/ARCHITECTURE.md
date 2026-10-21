@@ -839,7 +839,7 @@ VALUES ('hr', '인사', 1, NULL, 0,
 | T3 | `backlog` → `working` | 시작 | system (큐) | 시작 요청 뒤 슬롯을 얻은 때 | `transition` | — | 런 생성 · 시작 | `task.transitioned` · `employee.status` · `run.live` |
 | T4 | `working` → `blocked` | 결재 올림 | employee · system | MCP `ask_owner`, 가드 훅(§6.4), 런 종료 처리 | `transition` | 차단 결재 생성 | 런 종료 | `inbox.created` · `task.transitioned` · `employee.status` |
 | T5 | `blocked` → `working` | 내가 결정 | owner | 결재 결정 | `transition` | 차단 결재 결정 | 런 재개 (슬롯 대기) | `inbox.decided` · `task.transitioned` · `employee.status` |
-| T6 | `working` → `review` | 검수 요청 | employee (담당만) | MCP `task_request_review` | `transition` | `final_review` 생성 | 런 종료 | `inbox.created` · `task.transitioned` · `employee.status` |
+| T6 | `working` → `review` | 검수 요청 | employee (담당만). system 은 owner 가 `wrap_up` 을 고른 런이 검수 요청 없이 다시 실패하거나 끝났을 때만, 담당이 있는 작업에 대신 올린다 (§4.7) | MCP `task_request_review` | `transition` | `final_review` 생성 | 런 종료 | `inbox.created` · `task.transitioned` · `employee.status` |
 | T7 | `review` → `done` | 통과 | owner | 결재 결정 | `transition` | `final_review` 결정 | (필요하면 `cancel`) 반영 · 커밋 | `inbox.decided` · `task.transitioned` |
 | T8 | `review` → `working` | 재작업 | owner | 결재 결정 | `transition` | `final_review` 결정 | 같은 대화로 재개 (슬롯 대기) | `inbox.decided` · `task.transitioned` · `employee.status` |
 | T9 | `review` → `backlog` | 되돌리기 | owner | 결재 결정 | `transition` | `final_review` 결정 | (필요하면 `cancel`) 변경 되돌림 | `inbox.decided` · `task.transitioned` |
@@ -912,6 +912,10 @@ T10 · T11 도 CAMPAIGN.md §2 의 그림에 없는 전이다. owner 가 더했�
 - 언제: 그 작업의 차단 결재가 `pending` 이다.
 - 부수 효과: 결재를 `decided` 로, `delivery = 'pending'` 으로(§3.13). `status = 'working'`, `queued_at = 지금`. 왕복 한도 때문에 생긴 결재였으면 `exchange_count = 0`. 결정문을 런에 넣는 때: 런이 멈춰 있으면 바로, 아직 돌고 있으면(T4 직후) 진행 스레드가 돌아올 때다(§4.7). 넣으면 `delivery = 'delivered'`. 큐가 슬롯을 주면 잇는다. 잇기 시작하면 `queued_at` 을 비운다(`unqueued` 이벤트).
 - 결정 값이 무엇이든(승인 · 거절 · 선택지 · 답변) 전이는 T5 하나다. 결정 내용은 지시로 직원에게 간다. 런을 이을 수 없는 결정 값은 없다 — 예산 거절도 T5 와 `delivery = 'pending'` 이고 결정문만 다르다 (§5.5).
+- **T5 · restart** (`restart` 선택지 — `run_failed` · `run_cancelled` 결재, §5.3): 막힌 런에서 빠져나오는 길이다. T5 에서만 허용된다(`transition(restart=True)`). 새 런을 먼저 만들고(실패하면 `TransitionError`, 아무것도 쓰지 않는다), 커밋이 성공한 뒤 `cancel_run(옛 런)` 으로 옛 런을 닫는다.
+  - 새 런의 목표는 `작업: 제목` 줄이 맨 앞이고, 그 뒤에 `===== 지난 런 인계 (새로 시작) =====` 문단이 온다. 새 세션의 이름(`goal[:60]`)이 머리글이 아니라 작업 제목에서 따와지게 하려는 순서다. 인계는 지난 런의 요약, 멈춘 이유, owner 코멘트로 이루어진다. 새 대화로 시작하며, 이미 있는 세션의 이름은 바뀌지 않는다.
+  - 옛 결재의 `delivery` 는 `none` 이다(옛 런에 결정문을 넣지 않는다). 전이 이벤트의 `detail` 에 `restarted_from`(옛 런 id) 과 `run_id`(새 런 id) 가 남는다.
+  - **copy 한계.** 작업 폴더의 변경은 되돌리지 않는다. 그러나 `workspace_mode = copy` 인 지난 런의 변경은 원본이 아니라 그 런의 복사본에 `changes_status = ready` 로 남고, 새 런은 원본에서 새 복사본을 만들므로 변경이 이어지지 않는다. 서버 코드 프로젝트(`pin_copy`, 위의 서버 코드 프로젝트 항목)는 항상 이 경우다. 인계문이 이를 알리고, 반영은 owner 의 몫이다 — restart 가 대신 반영하지도 거부하지도 않는다(`apply_changes` 는 `cancelled` 런에 쓸 수 있고, 복사본이 정리되기 전까지다). `inplace` 는 변경이 폴더에 이미 있어 이어진다.
 
 **T6 `working` → `review` 검수 요청**
 - 언제: 호출한 직원이 그 작업의 담당이다. `queued_at` 이 비어 있다(런이 도는 중이다). 하네스 게이트(S-11 ②, `studio/gate.py`)를 통과한다 — 완료 기준별 검증 표기가 있고(`missing_fields`, `fields = [checklist]` — 도구의 `validate_payload` 가 본다), `feature` 유형에서 코드가 바뀌었으면 그 작업에 `choose` 로 결정된 `structure_choice` 결재가 있다(없으면 `precondition_failed`, `failed = [structure_choice_missing]`). 어기면 도구가 오류를 돌려주고 상태는 그대로다.
@@ -1026,7 +1030,7 @@ T10 · T11 도 CAMPAIGN.md §2 의 그림에 없는 전이다. owner 가 더했�
 | 번호 | 금지 | 이유 |
 |---|---|---|
 | A1 | employee 가 T1 · T2 · T5 · T7 · T8 · T9 · T10 · T11 을 하거나 T3 의 시작을 요청 | owner 의 결정이다. "직원 주체는 `done` 전이 불가"(S-2)가 여기 든다 |
-| A2 | 담당이 아닌 직원, owner, system 이 T6 | 검수 요청은 담당 직원의 도구 호출로만 생긴다 |
+| A2 | 담당이 아닌 직원, owner, 담당 없는 작업의 system 이 T6 | 검수 요청은 담당 직원의 도구 호출로 생긴다. system 의 대행은 `wrap_up` 뒤 끝난 런(§4.7)뿐이고 이력에 `system` 으로 남는다 |
 | A3 | system 이 T1 · T2 · T7 · T8 · T9 · T10 · T11 | 자동 승인 · 자동 완료 · 자동 취소는 없다. 캠페인 자동 진행(S-14)과 런의 승인 방식 `auto` 도 예외가 아니다 |
 | A4 | owner 가 C1, employee 가 C2 | 직원이 만들면 `proposed` 부터, 내가 만들면 `backlog` 부터다 |
 
@@ -1120,12 +1124,16 @@ T10 · T11 도 CAMPAIGN.md §2 의 그림에 없는 전이다. owner 가 더했�
 | `awaiting_approval` (설계 게이트) | `working` | system 이 T4 — `design_approval` |
 | `awaiting_approval` | `blocked` | 이미 `ask_owner` 나 가드가 T4 를 했다. 더 하지 않는다 (미전달 결정문은 걸음 2에서 넣었다) |
 | `done` | `review` | 이미 T6 가 됐다. 더 하지 않는다 |
-| `done` | `working` | system 이 T4 — `question` ("검수 요청 없이 끝났다") |
+| `done` | `working` | system 이 T4 — `question` ("검수 요청 없이 끝났다"). 그 작업에서 가장 최근에 닫힌 결재가 `wrap_up` 으로 답한 `question` 이면 T4 대신 system 이 T6 — 아래 "wrap_up 뒤" |
 | `done` | `blocked` | 더 하지 않는다. 걸음 2를 못 한다 — 미전달 결정문은 `pending` 으로 남는다. 이 런은 이을 수 없다 (아래 표의 `done` 행) |
-| `failed` · `cancelled` | `working` | system 이 T4 — `question` (오류 내용) |
+| `failed` · `cancelled` | `working` | system 이 T4 — `question` (오류 내용). `failed` 는 같은 런이 비슷한 오류로 거듭 실패했으면 권장 문구와 `recommended = restart` 가 붙고, `wrap_up` 직후면 T4 대신 system 이 T6 (아래) |
 | `failed` · `cancelled` | `blocked` | 서버가 끊은 것이다. 더 하지 않는다 (미전달 결정문은 걸음 2에서 넣었다) |
 | `awaiting_approval` · `failed` · `cancelled` | `review` | 더 하지 않는다. 런이 어떻게 끝났는지는 검수 패키지에 싣는다 (§5). 통과 · 되돌리기(T7 · T9)는 이 런을 먼저 `cancel` 한다 (§4.3) |
 | 모든 상태 | `working`, 줄 서 있음 | 런이 멈추기 전에 owner 가 이미 결정했다(T5 · T8). T4 를 하지 않는다. 결정문은 걸음 2에서 들어갔다(런이 `done` 이면 `pending` 으로 남는다). 줄에 그대로 둔다 (아래 "런을 이을 때"). `stop` 은 줄에서 먼저 빼므로 이 행에 오지 않는다 (§6.4) |
+
+**거듭 실패 (`run_failed`).** 같은 런(`inbox.run_id`)의 지난 `run_failed` 질문 가운데 `payload.error` 가 이번 오류와 비슷한 것의 수에 1을 더해 n 으로 한다. "비슷하다"는 숫자·8자 이상의 hex·공백·대소문자를 지운 뒤 `difflib.SequenceMatcher` 비율이 0.7 이상인 것이다. n ≥ 2 이면 본문 끝에 "같은 이유로 n번째 실패입니다 — 다시 시도보다 '새로 시작'이나 '검수 요청'을 권합니다" 한 줄을 더하고 `payload.recommended = 'restart'` · `payload.failures = n` 을 둔다. `recommended` 는 `options` 의 id 가운데 하나여야 한다 (아니면 `missing_fields`). `restart` 로 만든 새 런은 `run_id` 가 달라 횟수가 다시 시작한다. 열린 질문은 쌓이지 않는다 — 질문을 올리면(T4) 작업이 `blocked` 가 되고 작업당 `pending` 결재는 하나뿐이어서, 앞 질문은 owner 가 결정해야(T5) 다음 질문이 생긴다.
+
+**wrap_up 뒤.** 그 작업에서 가장 최근에 닫힌 결재가 `question` 이고 `decision_data.option_id = 'wrap_up'` 이면(별도 표지는 없다), 그 뒤 직원이 `task_request_review` 를 올렸으면 작업이 `review` 이거나 더 최근 결재가 있어 해당하지 않는다. 해당하는데 런이 검수 요청 없이 `failed`(스스로 잇는 경우 제외) 로 다시 끝나거나 `done` 으로 끝나면, 서버가 질문 대신 system 으로 T6 를 올려 작업을 `final_review` 로 넘긴다. 결재에는 직원의 마지막 요약(`baton.stop.summary` 또는 `handoff`)과 `바뀐 파일: …`(20개까지), checklist 한 줄 `{완료 기준 전체, unverified, "검증 못 함: <실패 이유>"}` 가 담기고 owner 가 통과(T7) · 재작업(T8) · 되돌리기(T9)를 고른다 (`review.py` 의 기존 경로). `cancelled` 와 owner 의 중지는 owner 가 일부러 멈춘 경우가 많아 기존 질문을 유지한다. T6 가 거절되면(하네스 게이트 등) 로그만 남기고 평소 질문(`run_failed` · `no_review_request`)으로 돌아간다. wrap_up 과 이 판정 사이에 다른 결재(예: `risky_command`)가 닫히면 가장 최근 결재가 wrap_up 이 아니어서 평소 질문이 올라온다 — 보수적인 선택이다.
 
 예산과 설계 게이트의 구분은 런의 정지 기록으로 한다 — 예산은 `_write_stop(run, "budget", …)`(`pipeline.py` 1588) 또는 `pending_budget_stage`(202), 설계 게이트는 `_write_stop(run, "awaiting_approval", …)`(1787). 정지 기록은 `run.baton.stop` 의 `StopNote`(`baton.py` 38–48 · 86)이고 `kind` 가 `budget` · `stage_budget` · `awaiting_approval` · `failed` · `cancelled` 중 하나다. `stage_budget` 은 단계 예산에서 멈춘 것이고(`pipeline.py` 1730) 결재 종류는 `budget` 과 같다 (§5.8 가). 런이 `done` 이면 비어 있다(`pipeline.py` 1795).
 
@@ -1346,8 +1354,8 @@ A-10 의 "후속 작업 만들기"는 결정이 아니다. owner 가 `parent_id`
 | `reason` | 올리는 쪽 | 계기 (§4.3 T4) | 서버가 넣는 `options` (잠정, S-5) |
 |---|---|---|---|
 | `asked` | employee | `ask_owner(kind = question)` | 직원이 준 것 |
-| `run_failed` | system | 런이 `failed` 로 끝남. `error` 에 `RunState.error`. 진행 스레드가 런을 진행시키지 못하고 예외로 돌아왔으면 그 예외 문구다 — 그 진행 중에 엔진이 런의 실패를 기록했으면 `RunState.error` 그대로다 (§4.7) | `retry`(다시 시도) · `wrap_up`(지금까지 한 것으로 검수 요청) |
-| `run_cancelled` | system | 런이 `cancelled` 로 끝남 (owner 의 중지 포함, §6.4. 런이 이미 멈춘 줄 선 작업의 `stop` 은 런 상태가 `cancelled` 가 아니어도 이 사유를 쓴다) | `retry` · `wrap_up` |
+| `run_failed` | system | 런이 `failed` 로 끝남. `error` 에 `RunState.error`. 진행 스레드가 런을 진행시키지 못하고 예외로 돌아왔으면 그 예외 문구다 — 그 진행 중에 엔진이 런의 실패를 기록했으면 `RunState.error` 그대로다 (§4.7) | `retry`(다시 시도) · `wrap_up`(지금까지 한 것으로 검수 요청) · `restart`(새로 시작 — 지금까지의 변경은 두고 새 대화로). 같은 런이 비슷한 오류로 두 번째 이상 실패하면 본문에 "같은 이유로 n번째 실패입니다 …" 한 줄이 붙고 `payload.recommended = restart` · `failures = n` (§4.7). owner 가 직전에 `wrap_up` 을 골랐으면 질문 대신 system 이 올린 `final_review` (§4.7) |
+| `run_cancelled` | system | 런이 `cancelled` 로 끝남 (owner 의 중지 포함, §6.4. 런이 이미 멈춘 줄 선 작업의 `stop` 은 런 상태가 `cancelled` 가 아니어도 이 사유를 쓴다) | `retry` · `wrap_up` · `restart` |
 | `no_review_request` | system | 런이 검수 요청 없이 `done` | 없음 |
 | `exchange_limit` | system | 직원 간 왕복 한도 (§4.6) | `continue`(다시 세고 계속) · `wrap_up` |
 | `editor_unresponsive` | system | 에디터 무응답 (M-7) | `retry` |
@@ -1400,7 +1408,7 @@ payload (저장):
 | `hire` | `approve` | — | `none` | `action` 별 동작 (아래) |
 | | `reject` | — | `none` | 아무것도 쓰지 않는다. 인사의 1:1 방에 시스템 글(초안 id). 인사 턴은 넣지 않는다 — 인사는 다시 올리지 않고 owner 의 다음 글을 기다린다 |
 | | `revise` | — | `none` | 인사의 1:1 방에 시스템 글(코멘트 · 초안 id) + 인사의 채팅 턴. 인사가 그 `draft_id` 로 고쳐 다시 제출하면 새 결재가 생긴다 |
-| 차단 6종 | 모든 값 | T5 | `pending` | 결정문(§5.6)을 `run_id` 의 런에 넣고 잇는다 (§4.7). 작업방에 시스템 글. 종류별 덧붙임은 아래 |
+| 차단 6종 | 모든 값 | T5 | `pending` | 결정문(§5.6)을 `run_id` 의 런에 넣고 잇는다 (§4.7). 작업방에 시스템 글. 종류별 덧붙임은 아래 `restart` 는 §4.3 T5 · restart 를 본다 |
 | `final_review` | `pass` | T7 | `none` | 반영 · 커밋 (§4.3). 그 작업에 남은 `delivery = 'pending'` 을 `none` 으로, 쓰지 않은 1회 허용을 `void` 로 (§10.5) |
 | | `rework` | T8 | `pending` | 코멘트가 결정문이다. 런이 `done` 이면 같은 런을 다시 열어 그 대화에 넣는다 (§4.7 의 `done` 행. S-12 확정) |
 | | `revert` | T9 | `none` | 변경 되돌림 (§4.3). 남은 `pending` 을 `none` 으로, 쓰지 않은 1회 허용을 `void` 로 (§10.5) |
@@ -1431,7 +1439,7 @@ payload (저장):
 |---|---|
 | `design_approval` | `approve` · `revise` 모두 `engine.approve` 로 다음 단계로 간다. 멈출 때 엔진이 이미 단계 순번을 올렸기 때문이다(`pipeline.py` 1777). `revise` 의 코멘트는 다음 단계가 시작할 때 지시로 들어간다(`_merge_notes`, 1594). owner 가 설계 단계를 다시 돌리게 하는 기존 경로는 없다 (S-5 에서 확인): 엔진에서 순번이 뒤로 가는 곳은 단계의 `on_retry` 로 보내는 두 줄뿐이고(1771 — 단계 결과가 `retry` · `fail` 일 때, 1532 — 그렇게 `failed` 로 끝난 런을 재개할 때), 단계를 골라 되돌리는 메서드나 엔드포인트는 없다. 그래서 `revise` 도 다음 단계로 간다 |
 | `structure_choice` | `choose` 로 결정된 결재만 T6 하네스 게이트의 근거다 (§4.3 T6). `revise` 로 닫힌 것은 근거가 아니다 |
-| `question` | `reason = exchange_limit` 이면 `exchange_count = 0` (§4.3 T5). `editor_unresponsive` 면 재개 직전에 에디터를 다시 검사한다 (§4.7). `option_id = wrap_up` 이면 결정문이 "검수 요청을 올려라"가 된다 (§5.6). 끼어들기는 `notes.jsonl` 에 쌓여 이후 모든 단계에 남으므로 이 지시는 저절로 사라지지 않는다 — 나중에 `retry` 로 결정하면 그 결정문이 앞선 검수 요청 지시를 거둔다고 직접 말한다 |
+| `question` | `reason = exchange_limit` 이면 `exchange_count = 0` (§4.3 T5). `editor_unresponsive` 면 재개 직전에 에디터를 다시 검사한다 (§4.7). `option_id = wrap_up` 이면 결정문이 "검수 요청을 올려라"가 된다 (§5.6). 그 런이 검수 요청 없이 다시 실패하거나 끝나면 서버가 대신 `final_review` 로 넘긴다 (§4.7). 끼어들기는 `notes.jsonl` 에 쌓여 이후 모든 단계에 남으므로 이 지시는 저절로 사라지지 않는다 — 나중에 `retry` 로 결정하면 그 결정문이 앞선 검수 요청 지시를 거둔다고 직접 말한다 |
 | `pre_approval` | `reject` 도 T5 다. 그 변경 없이 진행하라는 지시가 간다 |
 | `budget` | 아래 |
 | `risky_command` | `approve` 는 그 작업(`inbox.task_id`)의 그 명령에 1회 허용을 남긴다. 쓰는 것은 그때의 작업 런이다 — 토큰의 `run` 이 `tasks.run_id` 와 같은 런 (§6.4). 런이 `done` 으로 끝나 새 런이 `tasks.run_id` 를 바꿔도(§4.7) 새 작업 런이 그 허용을 쓴다. 한 번 쓰면 없어진다. T8 뒤에도 남고, T9 · T11 은 쓰지 않은 허용을 버리며, T7 뒤에는 쓸 작업 런이 없다(F9). owner 확정 (§12.6 의 2): T8 뒤에도 허용이 남는다. 허용은 서버가 갖고, 훅은 직접 읽지 않고 `POST /studio/guard/check` 로 묻는다 (§6.4 가드의 분기 1). 저장 자리(`decision_json.grant`), 키의 형식, 같은 명령으로 보는 기준은 §10.5 다. `reject` 는 결정문만 간다 |
@@ -1460,6 +1468,7 @@ payload (저장):
 | | `answer` (`run_failed` · `run_cancelled` · `editor_unresponsive`, `retry`) | 멈췄던 자리에서 이어서 하라. 앞선 '검수 요청' 지시는 거둔다 — 새 일을 막던 말은 더는 따르지 않고 남은 일을 이어서 한다. |
 | | `answer` (`exchange_limit`, `continue`) | 왕복 수를 다시 셌다. 이어서 하라. |
 | | `answer` (`no_review_request`) | 검수 요청 없이 끝났다. 남은 일을 마치고 `task_request_review` 를 올려라. |
+| | `answer` (`restart`) | 지난 런은 닫고 새 대화로 시작한다. 변경은 되돌리지 않았다. 지난 요약과 코멘트를 읽고 남은 일을 이어 하라. |
 | | `answer` (`wrap_up`) | 새 일을 벌이지 말고 지금까지 한 것으로 `task_request_review` 를 올려라. 검증하지 못한 완료 기준은 `unverified` 로 적어라. |
 | `pre_approval` | `approve` | 올린 변경이 승인됐다. 올린 범위 안에서 진행하라. |
 | | `reject` | 올린 변경은 하지 않는다. 그 변경 없이 할 수 있는 범위로 진행하고, 못 하면 `ask_owner` 로 다시 물어라. |
@@ -3016,6 +3025,7 @@ studio MCP 서버(§8)와 가드 훅(§10)이 기대는 자리다. "studio 런"�
 | 52 | §10.1 · §11.2 | (CAMPAIGN 에 없음) 게임 프로젝트 런과 작업 런에 사용자 폴더의 하네스 스킬을 허용한다 | `projctx.game_root` 가 게임 프로젝트를 가린다(`*.uproject` · `ProjectSettings/ProjectVersion.txt`, 마커 없어도 됨). 인덱스 조회 명령은 하네스(정션 기준) SKILL.md 의 `python Tools/x.py` 형태에서 뽑고(`projctx.harness_commands`), `projctx.INDEX_COMMANDS`(`python Tools/gq.py` · `cindex.py` · `ue_q.py` · `ue_q`)는 대체 추정값이라 경로가 다르면 이 상수만 고치면 된다. `studio_harness_root` 설정은 이 경로에 쓰이지 않는다. 가드 판정 규칙은 그대로다 |
 | 54 | §9.1 · §10.1 · §11.2 | (CAMPAIGN 에 없음) 게임 프로젝트의 직원 작업 런이 스스로 빌드하고 검증한다 | UE 프로젝트의 작업 런에 '빌드·검증' 절을 단계마다 `guard_stage` 의 `prompt_append` 로 붙이고(`work.build_section` — 에디터 상태 · MCP 포트 · 엔진 폴더는 단계를 시작할 때 서버가 계산), 게임 프로젝트(UE · Unity)의 작업 런은 `run.stage_budget_boost` 를 설정 `studio_game_budget_boost`(2.5)로 시작한다. 가드 규칙은 그대로다. 서버는 MCP 도구 이름을 모르고 절이 ToolSearch 로 찾게 한다 |
 | 55 | §4.7 · §5.6 · §9.1 | (CAMPAIGN 에 없음) 검수 요청 뒤 `retry` 가 `wrap_up` 을 풀고, 플레이 검증은 `ask_owner` 로 사람에게 맡긴다 | `wrap_up` 끼어들기는 `notes.jsonl` 에 남아 이후 단계에도 "새 일을 벌이지 말라"로 읽혔다(MNYS 작업 `task_9c6b748c` — '다시 시도'를 눌러도 직원이 검수 요청만 하려 했다). `retry` 문구에 "앞선 '검수 요청' 지시는 거둔다"를 더해 해결했고 `wrap_up` 문구와 예산 `reject` 는 그대로다. 빌드·검증 절의 공통 꼬리에는 사람이 플레이해야 볼 검증을 `ask_owner` 로 올리라는 줄을 더했다 (`inbox.ANSWERS` · `work.PLAY_REQUEST`) |
+| 56 | §4.3 · §4.7 · §5 | (CAMPAIGN 에 없음) 같은 런의 거듭 실패에는 `restart` 를 권하고, `wrap_up` 뒤 검수 없이 끝난 런은 서버가 `final_review` 로 넘긴다 | 실제 사례(MNYS `task_9c6b748c`)에서 런이 같은 이유로 여섯 번 넘게 `run_failed` 로 끝났고 owner 에게 남은 길은 다시 시도뿐이었다. 두 번째부터 본문에 권장 문구와 `recommended = restart` 를 두고(비슷한 오류는 숫자 · id · 공백을 지운 `SequenceMatcher` 비율 0.7 이상), `wrap_up` 을 골랐는데 직원이 검수를 올리지 못한 채 런이 다시 실패하거나 끝나면 system 이 T6 를 올린다. 그래서 `RULE_ACTORS[T6]` 에 system 을 더했고(담당이 있는 작업만), 이력에는 직원이 아니라 `system` 으로 남는다. wrap_up 판별은 "가장 최근에 닫힌 결재가 `wrap_up` 으로 답한 질문"으로 하고 별도 표지를 두지 않는다 (`work.failures` · `wrapped_up` · `wrap_review`) |
 
 (T3, 태그 없음) 파트 지침(`studio/parts/*.md`)에 하네스 스킬 줄을 넣었다: 기획(문서)=`game-design-doc`, 프로그램=`game-onboard` · `game-architecture`(구현 전 구조 제시와 승인) · `game-testing`, 기획(세팅)=`game-design-doc` · `game-mcp`, 아트=`game-mcp`. 이미 채용된 직원의 `GUIDE.md` 는 고치지 않는다(새 직원이 파트 지침을 받을 때 실린다).
 
