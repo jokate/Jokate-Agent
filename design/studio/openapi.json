@@ -568,8 +568,16 @@
       },
       "McpAskOwner": {
         "additionalProperties": false,
-        "description": "`kind` is question · choice · approval (§1.5). question: body, options `{id, label}`. choice: body,\noptions `{id, label, detail, figure}` (two or more), recommended, fix_points. approval: what, why, if_not,\npolicy_ref.",
+        "description": "`kind` is question · choice · approval (§1.5). question: body, options `{id, label}`. choice: body,\noptions `{id, label, detail, figure}` (one or more), recommended, fix_points, attachments `{id, name}` (T4:\nthe structure document posted to the room). approval: what, why, if_not,\npolicy_ref.",
         "properties": {
+          "attachments": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Attachments",
+            "type": "array"
+          },
           "body": {
             "default": "",
             "title": "Body",
@@ -625,6 +633,12 @@
           }
         },
         "title": "McpAskOwner",
+        "type": "object"
+      },
+      "McpEditorBuild": {
+        "additionalProperties": false,
+        "properties": {},
+        "title": "McpEditorBuild",
         "type": "object"
       },
       "McpEmployeeDraft": {
@@ -2646,6 +2660,50 @@
         ]
       }
     },
+    "/studio/devices/{id}/test_push": {
+      "post": {
+        "operationId": "test_push_studio_devices__id__test_push_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "title": "Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Test Push Studio Devices  Id  Test Push Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Test Push",
+        "tags": [
+          "studio"
+        ]
+      }
+    },
     "/studio/employees": {
       "get": {
         "description": "`retired=1` adds the retired employees to the list.",
@@ -3895,6 +3953,50 @@
           }
         },
         "summary": "Mcp Ask Owner",
+        "tags": [
+          "studio"
+        ]
+      }
+    },
+    "/studio/mcp/editor_build": {
+      "post": {
+        "description": "Build the project's C++ (the editor is closed and started again; takes minutes).\n`{built, seconds, errors[], editor_up, editor_note, was_running}`.",
+        "operationId": "mcp_editor_build_studio_mcp_editor_build_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/McpEditorBuild"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Mcp Editor Build Studio Mcp Editor Build Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Mcp Editor Build",
         "tags": [
           "studio"
         ]

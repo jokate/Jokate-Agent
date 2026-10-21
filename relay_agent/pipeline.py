@@ -208,6 +208,8 @@ class RunState(BaseModel):
     stage_budget_boost: dict[str, float] = {}  # stage -> multiplier on max_budget_usd, doubled per approval
     done_sessions: dict[str, str] = {}  # stage -> conversation of its last finished attempt (a redo continues it)
     auto_extends: int = 0  # auto mode: how many times a budget was extended without asking
+    spend_noticed_usd: float = 0.0  # studio run: the cost at the last spend notice (0 = none told yet)
+    studio_mode: str | None = None  # 'work' | 'chat' once studio took the run: survives a server restart
     pending_budget_stage: str | None = None  # stage paused because it hit its own budget
     repo: str | None = None  # registered repository name, if the run targets one
     auto_apply: bool = False
@@ -321,6 +323,14 @@ class RelayEngine:
         # ({allowed_tools, settings_path, env, claude_only}), or None = this run's call stays as it is. None
         # unless a layer registers one (studio: design/studio/ARCHITECTURE.md §11.4). If it raises, the stage fails.
         self.guard_stage: Callable[..., dict | None] | None = None
+        # (run id) -> 'work' | 'chat' for a run studio started, None for any other run. A studio run is not stopped
+        # by the run · stage budget or by a human gate: `run_notice` (run id, kind, detail) tells its room instead,
+        # about the spending at the first budget and then at every `spend_notice_step_usd` more (studio/notice.py).
+        self.studio_mode: Callable[[str], str | None] | None = None
+        self.run_notice: Callable[[str, str, dict], None] | None = None
+        self.spend_notice_step_usd: float = 5.0
+        self.studio_auto_restarts: int = 1  # task runs the studio starts over by itself after a failure (studio/work.py)
+        self.studio_auto_review: bool = True  # a studio run that ends without a review request has it filed by the server
         self.notifier = notifier
         self.handoff_writer = handoff_writer  # lightweight model that writes the stop hand-over
         self.router = router  # (prompt, model) -> (answer, usage): picks the relay for an `auto` run
@@ -522,6 +532,7 @@ class RelayEngine:
     AUTO_MAX_EXTENDS = 4        # stage-budget doublings + run-budget extensions, per run
     AUTO_RUN_COST_FACTOR = 4.0  # x relay max_run_cost_usd
     AUTO_MIN_RETRIES = 3
+    STUDIO_BOOST_MAX = 8.0      # studio run: a stage budget is doubled up to this multiple, then kept (told, not stopped)
 
     def create(self, relay_path: Path, goal: str, workdir: Path | None = None, session_id: str | None = None,
                workspace: str | None = None, repo: str | None = None, auto_apply: bool | None = None,
@@ -1629,6 +1640,35 @@ class RelayEngine:
                 pass
             self._let_go(run_id, lock)  # frees the run, then after_advance — both at the end of the class
 
+    def _studio_mode_of(self, run_id: str) -> str | None:
+        if self.studio_mode is None:
+            return None
+        try:
+            return self.studio_mode(run_id)
+        except Exception:  # noqa: BLE001 - not knowing is "not a studio run": the old stops stay
+            return None
+
+    def _tell(self, run_id: str, kind: str, detail: dict) -> None:
+        if self.run_notice is None:
+            return
+        try:
+            self.run_notice(run_id, kind, detail)
+        except Exception:  # noqa: BLE001 - a notice must not break a run
+            pass
+
+    def _spend_check(self, run: RunState, stage: str, budget_hit: bool) -> None:
+        """Studio run: tell once when the budget is first reached, then at every `spend_notice_step_usd` more."""
+        step, cost = self.spend_notice_step_usd, run.cost_usd
+        if run.spend_noticed_usd <= 0:
+            due = budget_hit
+        else:
+            due = step > 0 and cost >= run.spend_noticed_usd + step
+        if not due:
+            return
+        run.spend_noticed_usd = max(cost, 1e-9)
+        self._event(run, stage, "spend_notice", spent_usd=round(cost, 4))
+        self._tell(run.id, "spend", {"spent_usd": round(cost, 4), "stage": stage})
+
     def _advance(self, run_id: str, cancel: threading.Event, resume: bool) -> RunState:
         run = self.load(run_id)
         if run.status not in (RESUMABLE if resume else ("pending",)):
@@ -1696,26 +1736,35 @@ class RelayEngine:
             entry["args"] = list(entry.get("args", []))[:-1] + [str(repo.docs_root)]
             mcp_overrides["docs_read"] = entry  # this repo's docs, not the global docs_root
 
+        mode = self._studio_mode_of(run.id) or run.studio_mode  # 'work' | 'chat' | None: a studio run is told, not stopped
+        if mode and run.studio_mode != mode:
+            run.studio_mode = mode  # kept: a run resumed after a restart is still studio's
+            self.save(run)
         while run.index < len(spec.stages):
             stage = spec.stages[run.index]
             if cancel.is_set():  # a cancel that arrived between stages
                 return self._fail(run, stage.name, "사용자가 취소함", status="cancelled")
             limit = spec.max_run_cost_usd
-            if (limit and run.cost_usd >= limit + run.budget_extra_usd and run.approval == "auto"
-                    and run.cost_usd < limit * self.AUTO_RUN_COST_FACTOR):
-                run.budget_extra_usd = run.cost_usd  # as an approval would: one more full budget from here
-                self._event(run, stage.name, "budget_auto_extended", scope="run", spent_usd=round(run.cost_usd, 4),
-                            limit_usd=round(limit + run.budget_extra_usd, 4),
-                            ceiling_usd=round(limit * self.AUTO_RUN_COST_FACTOR, 2))
-            if limit and run.cost_usd >= limit + run.budget_extra_usd:
-                run.status = "awaiting_approval"
-                self._event(run, stage.name, "budget_exceeded", spent_usd=round(run.cost_usd, 4),
-                            limit_usd=limit + run.budget_extra_usd, next=stage.name)
-                self._write_stop(run, "budget", stage.name,
-                                 f"실행 비용 ${run.cost_usd:.2f} 가 한도 ${limit + run.budget_extra_usd:.2f} 에 도달")
-                self._settle_workspace(run)
-                self.save(run)
-                return run
+            if mode:  # no stop and no approval: the room is told (limit 0 = no limit: told from the first step)
+                step = self.spend_notice_step_usd
+                hit = (run.cost_usd >= limit + run.budget_extra_usd) if limit else (step > 0 and run.cost_usd >= step)
+                self._spend_check(run, stage.name, hit)
+            else:
+                if (limit and run.cost_usd >= limit + run.budget_extra_usd and run.approval == "auto"
+                        and run.cost_usd < limit * self.AUTO_RUN_COST_FACTOR):
+                    run.budget_extra_usd = run.cost_usd  # as an approval would: one more full budget from here
+                    self._event(run, stage.name, "budget_auto_extended", scope="run", spent_usd=round(run.cost_usd, 4),
+                                limit_usd=round(limit + run.budget_extra_usd, 4),
+                                ceiling_usd=round(limit * self.AUTO_RUN_COST_FACTOR, 2))
+                if limit and run.cost_usd >= limit + run.budget_extra_usd:
+                    run.status = "awaiting_approval"
+                    self._event(run, stage.name, "budget_exceeded", spent_usd=round(run.cost_usd, 4),
+                                limit_usd=limit + run.budget_extra_usd, next=stage.name)
+                    self._write_stop(run, "budget", stage.name,
+                                     f"실행 비용 ${run.cost_usd:.2f} 가 한도 ${limit + run.budget_extra_usd:.2f} 에 도달")
+                    self._settle_workspace(run)
+                    self.save(run)
+                    return run
 
             new_notes = self._merge_notes(run)
             if new_notes:
@@ -1880,6 +1929,14 @@ class RelayEngine:
                         run.history.append(StageRecord(stage=stage.name, at=_now(), verdict="retry", runner=stage.primary,
                                                        model=call.model or "?", total_input=0, output_tokens=0,
                                                        cost_usd=spent))  # money spent counts toward the run budget
+                    if mode:  # studio: no approval for a stage budget — twice the budget, same stage and conversation
+                        boost = min(run.stage_budget_boost.get(stage.name, 1.0) * 2, self.STUDIO_BOOST_MAX)
+                        run.stage_budget_boost[stage.name] = boost
+                        self._event(run, stage.name, "budget_auto_extended", scope="stage", studio=True, spent_usd=spent,
+                                    limit_usd=(stage.max_budget_usd or 0) * boost, capped=boost >= self.STUDIO_BOOST_MAX)
+                        self._spend_check(run, stage.name, True)
+                        self.save(run)
+                        continue
                     run_cap = (spec.max_run_cost_usd or 0) * self.AUTO_RUN_COST_FACTOR
                     if (run.approval == "auto" and run.auto_extends < self.AUTO_MAX_EXTENDS
                             and (not run_cap or run.cost_usd < run_cap)):
@@ -1923,6 +1980,8 @@ class RelayEngine:
                         provider=usage.runner, model=usage.model, estimated=usage.estimated,
                         input_tokens=usage.total_input, output_tokens=usage.output_tokens,
                         cost_usd=usage.cost_usd, duration_ms=usage.duration_ms)
+            if mode:
+                self._spend_check(run, stage.name, False)  # every `spend_notice_step_usd` after the first notice
 
             auto_redo = (result.verdict == "fail" and run.approval == "auto" and stage.on_retry
                          and run.retries.get(stage.name, 0) < max(stage.max_retries, self.AUTO_MIN_RETRIES))
@@ -1943,9 +2002,16 @@ class RelayEngine:
             run.index += 1
             pause = stage.gate == "human" and run.index < len(spec.stages) and (
                 run.approval == "always" or (run.approval == "ai" and result.needs_approval))
+            studio_gate = mode == "work" and stage.gate == "human" and run.index < len(spec.stages)
+            if studio_gate:
+                pause = False  # a studio task run does not wait at a design gate: it goes on and says so
             if stage.gate == "human" and run.index < len(spec.stages) and not pause:
                 self._event(run, stage.name, "gate_skipped", next=spec.stages[run.index].name, mode=run.approval,
-                            reason={"ai": "AI 판단: 사람이 정할 것 없음", "auto": "자동 진행 모드"}.get(run.approval, "승인 생략 설정"))
+                            reason="스튜디오 작업: 설계 승인 넘김" if studio_gate else
+                            {"ai": "AI 판단: 사람이 정할 것 없음", "auto": "자동 진행 모드"}.get(run.approval, "승인 생략 설정"))
+                if studio_gate:
+                    self._tell(run.id, "gate", {"stage": stage.name, "next": spec.stages[run.index].name,
+                                                "summary": result.summary})
             elif pause:
                 run.status = "awaiting_approval"
                 why = result.approval_reason.strip() if result.needs_approval else ""

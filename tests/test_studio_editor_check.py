@@ -53,6 +53,14 @@ class Ed:
         return self.now
 
 
+@pytest.fixture(autouse=True)
+def outside_the_studio(monkeypatch):
+    """The tests below are the contract of a run outside the studio (question + cut), which is unchanged. The
+    runs of `line` do have an employee and a room, so they would count as studio runs: the studio's own
+    contract (told, not cut) is tests/test_studio_editor_build.py."""
+    monkeypatch.setattr(work, "studio_run", lambda run_id: False)
+
+
 def uses(line, on):  # noqa: F811
     """The repository of the project names the editor's MCP server, or not."""
     repo = line.store.get_project(line.pid)["repo"]

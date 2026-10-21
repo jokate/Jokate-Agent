@@ -90,6 +90,7 @@ PC 에서 릴레이 서버를 켜고, 폰 앱을 설치해 페어링하고, 하�
 - 연결된 기기 목록: `GET /studio/devices` (폐기한 기기는 안 나온다).
 - 이름 바꾸기: `PATCH /studio/devices/{id}`.
 - 폐기: `POST /studio/devices/{id}/revoke`. 다음 요청부터 401 이고 실시간 연결(WS)도 끊긴다.
+- 시험 알림: `POST /studio/devices/{id}/test_push`. 그 기기로 알림 하나를 보내고 결과(`sent` · `dead` · `failed` · `off` · `no_token`)와 이유를 돌려준다. 푸시가 안 오면 먼저 이것을 부른다.
 - **기기 목록·폐기 화면은 아직 없다.** 지금은 API 로만 한다. 폰을 잃어버렸다면 바로 폐기한다.
 - 이 경로들은 서버 토큰이 필요하다. 토큰 없이 받는 것은 `POST /studio/devices/pair` 하나다.
 

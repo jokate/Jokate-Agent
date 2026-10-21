@@ -27,6 +27,7 @@ from mcp.server.fastmcp import FastMCP  # noqa: E402
 # this process does not import the studio package.
 END_TURN = "이제 턴을 끝내라. 도구를 더 부르지 말고, 지금까지 한 일과 기다리는 것을 한 문단으로 적고 멈춰라."
 TIMEOUT_S = 60
+BUILD_TIMEOUT_S = 3900  # `editor_build` waits for Build.bat (at most 3600 s) and for the editor to come up again
 MISTAKES, MISTAKES_CHARS = 5, 300  # how much of a 422 goes into the message
 
 
@@ -75,11 +76,11 @@ def _mistakes(resp: httpx.Response) -> str:
     return "; ".join(parts)[:MISTAKES_CHARS] or "HTTP 422"
 
 
-def _call(tool: str, **args) -> dict:
+def _call(tool: str, _timeout: float = TIMEOUT_S, **args) -> dict:
     """POST the arguments to `/studio/mcp/<tool>`. A 200 is the server's result, passed on as it is."""
     headers = {"Authorization": f"Bearer {TOKEN}"} if TOKEN else {}
     try:
-        resp = httpx.post(f"{BASE}/studio/mcp/{tool}", json=args, headers=headers, timeout=TIMEOUT_S)
+        resp = httpx.post(f"{BASE}/studio/mcp/{tool}", json=args, headers=headers, timeout=_timeout)
     except (httpx.HTTPError, httpx.InvalidURL) as e:
         return _fail("server_unreachable", f"studio 서버({BASE})에 닿지 못했다 — {type(e).__name__}.")
     if resp.status_code == 401:
@@ -144,6 +145,15 @@ def task_progress(note: str, percent: float | None = None) -> dict:
 
 
 @mcp.tool()
+def editor_build() -> dict:
+    """C++ 를 바꿨으면 이 도구로 빌드한다 (담당만, 자기 작업 런에서). 에디터가 떠 있으면 저장하고 닫은 뒤 그 엔진의
+    Build.bat 만 돌리고, 에디터를 다시 켜서 MCP 가 답할 때까지 기다린다 — 몇 분 걸린다. Live Coding 은 .cpp 안의
+    작은 수정에만 쓴다. 돌려주는 것: {built, seconds, errors[], editor_up, editor_note, was_running}. built 가
+    false 면 errors 를 읽고 고쳐 다시 부른다 (빌드가 실패하면 에디터는 켜지 않는다)."""
+    return _call("editor_build", BUILD_TIMEOUT_S)
+
+
+@mcp.tool()
 def task_request_review(summary: str, checklist: list[dict], evidence: list[dict] | None = None,
                         judgment_calls: list[dict] | None = None) -> dict:
     """지금 작업의 검수를 요청한다 (담당만). checklist 는 완료 기준마다 {criterion, status, note} — status 는
@@ -156,14 +166,17 @@ def task_request_review(summary: str, checklist: list[dict], evidence: list[dict
 
 @mcp.tool()
 def ask_owner(kind: str, title: str, body: str = "", options: list[dict] | None = None, recommended: str = "",
-              fix_points: str = "", what: str = "", why: str = "", if_not: str = "", policy_ref: str = "") -> dict:
+              fix_points: str = "", what: str = "", why: str = "", if_not: str = "", policy_ref: str = "",
+              attachments: list[dict] | None = None) -> dict:
     """owner 의 결정이 있어야 나아갈 수 있을 때 결재를 올린다 (그 작업방의 구성원만). kind 는 셋이다.
-    question: body(필수), options 각 {id, label}. choice: body, options 2개 이상 각 {id, label, detail, figure} —
-    figure 는 "" 또는 {mermaid} —, recommended(options 의 id), fix_points. approval: what · why · if_not 모두
+    question: body(필수), options 각 {id, label}. choice: body, options 1개 이상(하나면 owner 의 choose 가 승인,
+    revise 가 수정 요청) 각 {id, label, detail, figure} — figure 는 "" 또는 {mermaid} —, recommended(options 의 id),
+    fix_points, attachments 각 {id, name} — room_post 가 돌려준 첨부(구조 문서)이고 서버가 크기를 채운다. approval: what · why · if_not 모두
     필수, policy_ref. 성공하면 {inbox_id} 와 함께 이제 턴을 끝내라고 답한다 — 도구를 더 부르지 말고, 지금까지 한
     일과 기다리는 것을 한 문단으로 적고 멈춘다. 결정은 이 작업방에 온다."""
     return _call("ask_owner", kind=kind, title=title, body=body, options=options or [], recommended=recommended,
-                 fix_points=fix_points, what=what, why=why, if_not=if_not, policy_ref=policy_ref)
+                 fix_points=fix_points, what=what, why=why, if_not=if_not, policy_ref=policy_ref,
+                 attachments=attachments or [])
 
 
 @mcp.tool()

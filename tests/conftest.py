@@ -67,10 +67,16 @@ def no_push_with_this_pcs_key(monkeypatch):
     """The server module's FCM sender (N-1, studio/push.py) reads the key file `Config.studio_fcm_key` names. On a
     PC that has one, every test that files an inbox item through the server would send a real push — so no key
     file is read in a test. A test of the sender puts `load_key` back and names a key of its own
-    (tests/test_studio_push.py)."""
+    (tests/test_studio_push.py).
+
+    The server module's own setting is blanked too: a test that puts `load_key` back for a sender of its own would
+    otherwise switch the server's sender on as well, with this PC's key (2026-10-22: `relay.config.local.yaml`
+    got `studio_fcm_key`, and tests/test_studio_e2e.py counted every push twice)."""
+    from relay_agent import server
     from relay_agent.studio import push
 
     monkeypatch.setattr(push, "load_key", lambda path: None)
+    monkeypatch.setattr(server.cfg, "studio_fcm_key", "")
 
 
 @pytest.fixture(autouse=True)

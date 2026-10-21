@@ -1,5 +1,10 @@
 """The editor of a task's run, looked at while the run is at work (M-7): one that stops answering ends the run.
 
+A run of the studio (`work.studio_run`) is not ended: the room is told once (`work.editor_quiet`, a quiet push),
+the watch goes on, and no `editor_unresponsive` question is made. While `editor_build` runs (`paused`) and for
+`QUIET_AFTER` seconds after it, the looks of that project do not count at all. The paragraphs below are the
+contract of a run outside the studio, which is unchanged.
+
 Contract: design/studio/ARCHITECTURE.md §4.5 '에디터 무응답을 감지', §4.3 T3 · T4, §4.7.
 
 The check before a run goes on is work.py's (`WorkEffects.editor_ready`). A run that passed it is handed here
@@ -21,14 +26,17 @@ No FastAPI, no api.py and no queue.py here: server.py builds the `EditorWatch` o
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import threading
+import time
 from typing import Any, Callable
 
 from . import work
 
 EVERY = 30.0   # seconds between two looks
 MISSES = 3     # looks in a row without an answer that make an editor one that is gone
+QUIET_AFTER = 120.0  # seconds the watch of a project stays paused after an editor build ended
 WATCHED = ("working", "blocked", "review")  # the states in which a task's run may be at work
 AT_WORK = ("pending", "running")            # without a queue to ask: the run has not stopped
 
@@ -52,12 +60,39 @@ class EditorWatch:
 
     def __init__(self, engine, effects, inbox: Callable[[], Any], holds: Callable[[str], bool] | None = None, *,
                  every: float = EVERY, misses: int = MISSES,
-                 timer: Callable[[float, Callable[[], None]], Any] | None = None):
+                 timer: Callable[[float, Callable[[], None]], Any] | None = None,
+                 clock: Callable[[], float] = time.monotonic, quiet_after: float = QUIET_AFTER):
         self.engine, self.effects, self.inbox, self.holds = engine, effects, inbox, holds
         self.every, self.misses = float(every), max(1, int(misses))
         self.timer = timer or _timer
+        self.clock, self.quiet_after = clock, float(quiet_after)
         self._lock = threading.Lock()
-        self._watches: dict[str, dict] = {}  # task id -> {run_id, missed, handle}
+        self._watches: dict[str, dict] = {}  # task id -> {run_id, missed, told, handle}
+        self._paused: dict[str, int] = {}    # project id -> how many editor builds are at work
+        self._quiet_until: dict[str, float] = {}  # project id -> the clock time the last build's quiet ends
+
+    @contextlib.contextmanager
+    def paused(self, project_id: str):
+        """No look at the editors of that project's tasks counts while this is open, nor for `quiet_after`
+        seconds after it closes: the editor is closed and started again on purpose (`editor_build`)."""
+        with self._lock:
+            self._paused[project_id] = self._paused.get(project_id, 0) + 1
+        try:
+            yield
+        finally:
+            with self._lock:
+                left = self._paused.get(project_id, 1) - 1
+                if left > 0:
+                    self._paused[project_id] = left
+                else:
+                    self._paused.pop(project_id, None)
+                self._quiet_until[project_id] = self.clock() + self.quiet_after
+
+    def _paused_now(self, project_id: str | None) -> bool:
+        if not project_id:
+            return False
+        with self._lock:
+            return project_id in self._paused or self.clock() < self._quiet_until.get(project_id, float("-inf"))
 
     def watching(self) -> list[str]:
         """The ids of the tasks whose editor a timer is still to look at."""
@@ -71,7 +106,7 @@ class EditorWatch:
             self._drop(task_id)
             if self.every <= 0:
                 return False
-            mine = {"run_id": run_id, "missed": 0, "handle": None}
+            mine = {"run_id": run_id, "missed": 0, "told": False, "handle": None}
             with self._lock:
                 self._watches[task_id] = mine
             self._arm(task_id, mine)
@@ -118,14 +153,22 @@ class EditorWatch:
             return False
         if not self._at_work(task_id, mine["run_id"]):
             return False
+        if self._paused_now(task.get("project_id")):
+            mine["missed"], mine["told"] = 0, False  # an editor closed on purpose (editor_build) is not a lost one
+            return True
         alive = self.effects.editor_alive(inbox.store, task)
         if alive is None:
             return False
         if alive:
-            mine["missed"] = 0
+            mine["missed"], mine["told"] = 0, False
             return True
         mine["missed"] += 1
         if mine["missed"] < self.misses:
+            return True
+        if work.studio_run(mine["run_id"]):  # a studio run is told, not cut: the owner decides less
+            if not mine["told"]:
+                mine["told"] = True
+                work.editor_quiet(mine["run_id"], f"{mine['missed']}번 연속 응답하지 않았다")
             return True
         log.warning("studio: 작업 %s 의 에디터가 %d번 연속 응답하지 않았다 (런 %s)", task_id, mine["missed"],
                     mine["run_id"])

@@ -208,7 +208,8 @@ def test_the_seven_tools_are_in_the_contract():
     assert all(list(schema["paths"][f"/studio/mcp/{name}"]) == ["post"] for name in served)
     models = schema["components"]["schemas"]
     assert set(models["McpAskOwner"]["properties"]) == {
-        "kind", "title", "body", "options", "recommended", "fix_points", "what", "why", "if_not", "policy_ref"}
+        "kind", "title", "body", "options", "recommended", "fix_points", "what", "why", "if_not", "policy_ref",
+        "attachments"}
     assert set(models["McpFollowupPropose"]["properties"]) == set(models["McpTaskPropose"]["properties"]) | {
         "parent_task_id"}
     assert all("required" not in models[name] for name in models if name.startswith("Mcp"))  # all have defaults
@@ -458,7 +459,7 @@ def test_ask_owner_says_which_argument_is_missing(desk):
     assert fields() == ["kind", "title"] and fields(kind="poll", title="?") == ["kind"]
     assert fields(kind="question", title="?") == ["body"]
     assert fields(kind="question", title="?", body="?", options=[{"id": "a"}]) == ["options"]
-    assert fields(kind="choice", title="?", options=OPTIONS[:1]) == ["body", "options"]
+    assert fields(kind="choice", title="?", options=[]) == ["body", "options"]
     assert fields(kind="choice", title="?", body="?", options=OPTIONS, recommended="z") == ["recommended"]
     drawn = [OPTIONS[0], {**OPTIONS[1], "figure": {"svg": "<svg/>"}}]
     assert fields(kind="choice", title="?", body="?", options=drawn) == ["options"]

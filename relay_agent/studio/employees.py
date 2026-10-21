@@ -890,6 +890,66 @@ def add_harness_lines(store: StudioStore, studio_dir: Path | str, *,
     return done
 
 
+STRUCTURE_DOC_MARK = "구조 문서 결재"
+STRUCTURE_DOC_HEAD = "## " + STRUCTURE_DOC_MARK
+STRUCTURE_DOC_AUTO_MESSAGE = "guide: 구조 문서 결재 (자동)"
+
+
+def structure_doc_block(original: str) -> str:
+    """T4: the `## 구조 문서 결재` section of a part's template (up to the next `## ` heading), '' when it has none."""
+    lines = original.splitlines()
+    at = next((i for i, line in enumerate(lines) if line.strip() == STRUCTURE_DOC_HEAD), None)
+    if at is None:
+        return ""
+    end = next((i for i in range(at + 1, len(lines)) if lines[i].startswith("## ")), len(lines))
+    return "\n".join(lines[at:end]).strip()
+
+
+def with_structure_doc(guide: str, original: str) -> str:
+    """T4: `guide` with the `## 구조 문서 결재` section of `original` (the program part's template), only when `guide`
+    has a value and has no such words yet. It goes before the first `## 결재 기준` line, else at the end; the rest of
+    `guide` is not changed. Idempotent, like `with_harness_lines`: the caller checks the history for a deleted one."""
+    if not guide.strip() or STRUCTURE_DOC_MARK in guide:
+        return guide
+    block = structure_doc_block(original)
+    if not block:
+        return guide
+    guide_lines = guide.splitlines(keepends=True)
+    at = next((i for i, line in enumerate(guide_lines) if line.startswith(HARNESS_BEFORE)), None)
+    if at is None:
+        return guide.rstrip() + "\n\n" + block + "\n"
+    return "".join(guide_lines[:at]).rstrip() + "\n\n" + block + "\n\n" + "".join(guide_lines[at:])
+
+
+def add_structure_doc(store: StudioStore, studio_dir: Path | str, *,
+                      write: Callable[[Path, str], None] | None = None,
+                      already: Callable[[Path], bool] | None = None) -> list[str]:
+    """T4: `with_structure_doc` on the GUIDE.md of every program-part employee in service. `already(folder)` true =
+    the automatic commit is in the folder's history (the owner has had the section and may have deleted it): skipped.
+    Each employee is tried apart. Returns the ids changed. `write(folder, text)` writes the file — the caller commits."""
+    original = part_defaults()["program"]["guide_template"]
+    done = []
+    for row in store.list_employees():
+        if row["department_id"] != "program":
+            continue
+        try:
+            target = folder(studio_dir, row["id"]) / "GUIDE.md"
+            text = _read(target)
+            if text is None:
+                continue
+            fresh = with_structure_doc(text, original)
+            if fresh == text or (already is not None and already(target.parent)):
+                continue
+            if write is not None:
+                write(target.parent, fresh)
+            else:
+                target.write_text(fresh, encoding="utf-8", newline="")
+            done.append(row["id"])
+        except Exception:  # noqa: BLE001 - one employee's file or git must not stop the others
+            log.exception("studio: %s 의 GUIDE.md 에 구조 문서 결재 절을 덧붙이지 못했다", row["id"])
+    return done
+
+
 def fill_parts(store: StudioStore) -> list[dict]:
     """Fill `guide_template` · `default_mcp` · `default_models` of the rows of PART_IDS from `part_defaults()`,
     each cell on its own and only while it is empty ('' · [] · {}): a value that is there is never written over,

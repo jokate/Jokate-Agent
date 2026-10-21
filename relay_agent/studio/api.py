@@ -163,6 +163,7 @@ _run_cost: Callable[[str], float] | None = None  # run id -> USD so far (`GET /s
 _engine: Callable[[], Any] | None = None  # -> the server's RelayEngine as it is now (use_engine); None = no engine
 _tokens: Callable[[str], dict] | None = None  # run id -> the server's `GET /runs/{id}/tokens` (use_engine)
 _liveness: Callable[[str], dict] | None = None  # run id -> RelayEngine.liveness(run id); None = no engine connected
+_pusher: Any = None  # push.Pusher: what a device's test push asks (use_pusher); None = no push attached
 _workdir: Callable[[str], Path | None] | None = None  # run id -> the folder that run's stages work in (§6.6)
 _repos: Callable[[], Any] | None = None  # -> the server's RepoRegistry as it is now (§3.3); None = no registry
 _commit_listeners: list[Callable[[tuple[int, ...]], None]] = []  # see on_commit
@@ -374,6 +375,40 @@ def add_harness_skills() -> list[str]:
         return _add_harness_skills(store)
     except Exception:  # noqa: BLE001 - a start must not depend on a line of a guide
         log.exception("studio: 직원 GUIDE.md 에 하네스 줄을 덧붙이지 못했다")
+        return []
+
+
+def _add_structure_doc(store: StudioStore) -> list[str]:
+    """T4: the `## 구조 문서 결재` section of the program part's template added to the GUIDE.md of a program employee
+    in service that lacks it (`employees.add_structure_doc`), each folder committed and `employee.updated` sent. An
+    employee whose history already has the automatic commit is skipped — the owner who deleted it is not undone."""
+    def already(folder: Path) -> bool:
+        return any(h["message"] == employees.STRUCTURE_DOC_AUTO_MESSAGE
+                   for h in employee_git.history(folder, "GUIDE.md", limit=10000))
+
+    def write(folder: Path, text: str) -> None:
+        (folder / "GUIDE.md").write_text(text, encoding="utf-8", newline="")
+        _folder_commit(folder, employees.STRUCTURE_DOC_AUTO_MESSAGE)
+        row = store.get_employee(folder.name)
+        if row is not None:
+            _file_changed(store, row)
+
+    with employee_git.lock:
+        return employees.add_structure_doc(store, _cfg.studio_dir, write=write, already=already)
+
+
+def add_structure_doc() -> list[str]:
+    """T4: add the structure-document section to the GUIDE.md of the program employees already hired. Called once at
+    the server's start. Returns the ids changed; [] when nothing was needed, the store is not open, or it failed
+    (logged — the server starts without it)."""
+    with _lock:
+        store = _store
+    if store is None or _cfg is None:
+        return []
+    try:
+        return _add_structure_doc(store)
+    except Exception:  # noqa: BLE001 - a start must not depend on a section of a guide
+        log.exception("studio: 프로그램 직원 GUIDE.md 에 구조 문서 결재 절을 덧붙이지 못했다")
         return []
 
 
@@ -1994,6 +2029,13 @@ def use_effects(effects: Effects | None, *, models: Callable[[], list[dict]] | N
     _effects, _models = effects, models
 
 
+def use_pusher(pusher: Any) -> None:
+    """Set the sender `POST /studio/devices/<id>/test_push` asks (studio/push.py `Pusher.test`): `push.attach`
+    calls it. Without one the answer of a test push is `off` for `not_attached`."""
+    global _pusher
+    _pusher = pusher
+
+
 def use_queue(queue: Any) -> None:
     """Set the line `stop` asks (studio/queue.py `TaskQueue`), after install(): server.py builds it on its
     engine. `start` needs none — the effects reach the queue themselves (`WorkEffects.kick`)."""
@@ -2975,6 +3017,10 @@ class McpTaskProgress(BaseModel):
     percent: float | None = None        # 0–100
 
 
+class McpEditorBuild(BaseModel):
+    model_config = ConfigDict(extra="forbid")   # no arguments: the project is the task's
+
+
 class McpTaskRequestReview(BaseModel):
     """The shapes are §5.4: checklist `{criterion, status, note}`, evidence `{kind, ref, caption}`,
     judgment_calls `{text, why}`."""
@@ -2988,7 +3034,8 @@ class McpTaskRequestReview(BaseModel):
 
 class McpAskOwner(BaseModel):
     """`kind` is question · choice · approval (§1.5). question: body, options `{id, label}`. choice: body,
-    options `{id, label, detail, figure}` (two or more), recommended, fix_points. approval: what, why, if_not,
+    options `{id, label, detail, figure}` (one or more), recommended, fix_points, attachments `{id, name}` (T4:
+    the structure document posted to the room). approval: what, why, if_not,
     policy_ref."""
     model_config = ConfigDict(extra="forbid")
 
@@ -3002,6 +3049,7 @@ class McpAskOwner(BaseModel):
     why: str = ""
     if_not: str = ""
     policy_ref: str = ""
+    attachments: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class McpRoomPost(BaseModel):
@@ -3191,6 +3239,14 @@ def mcp_task_progress(body: McpTaskProgress, caller: tools.Caller = Depends(get_
                       machine: TaskMachine = Depends(get_machine), inbox: Inbox = Depends(get_inbox)) -> dict:
     """Leave a `progress` event on the task of this turn. `{event_id}`."""
     return _tool("task_progress", body, caller, machine, inbox)
+
+
+@router.post("/mcp/editor_build")
+def mcp_editor_build(body: McpEditorBuild, caller: tools.Caller = Depends(get_caller),
+                     machine: TaskMachine = Depends(get_machine), inbox: Inbox = Depends(get_inbox)) -> dict:
+    """Build the project's C++ (the editor is closed and started again; takes minutes).
+    `{built, seconds, errors[], editor_up, editor_note, was_running}`."""
+    return _tool("editor_build", body, caller, machine, inbox)
 
 
 @router.post("/mcp/task_request_review")
@@ -3583,3 +3639,16 @@ def revoke_device(id: str, store: StudioStore = Depends(get_store)) -> dict:
         except Exception:  # the revoke is committed either way; a listener must not turn it into a 500
             log.exception("기기 폐기를 알리지 못했습니다: %s", id)
     return devices.public(row)
+
+
+# 시험 알림: that device gets one push now and the answer of FCM comes back — `result` is `sent` · `dead` (the token
+# is cleared) · `failed` (`reason` is what FCM said) · `off` (the push is off: `reason` is `no_key` · `unreadable`
+# · `not_attached`, `detail` says which in a line) · `no_token`. Always 200 for a device that is paired; a device
+# that is not, or was revoked, is 404 like the other device paths.
+@router.post("/devices/{id}/test_push")
+def test_push(id: str, store: StudioStore = Depends(get_store)) -> dict:
+    row = store.get_device(id)
+    row = _need(row if row is not None and row["revoked_at"] is None else None, "기기", id)
+    if _pusher is None:
+        return {"device_id": id, "result": "off", "reason": "not_attached", "detail": "푸시가 연결되지 않았습니다"}
+    return {"device_id": id, **_pusher.test(row)}

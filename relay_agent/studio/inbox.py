@@ -218,6 +218,15 @@ def _options_ok(options: Any, *, detail: bool, minimum: int) -> bool:
     return len(set(ids)) == len(ids)
 
 
+def _attachments_ok(value: Any) -> bool:
+    """T4: `payload.attachments` of a structure_choice — the structure document(s) posted to the room, each
+    `{id, name, size}`: id (the room message's id) and name are texts, size an integer."""
+    return isinstance(value, list) and all(
+        isinstance(a, dict) and _text(a.get("id")) and _text(a.get("name"))
+        and isinstance(a.get("size"), int) and not isinstance(a.get("size"), bool) and a["size"] >= 0
+        for a in value)
+
+
 def _hire_problems(payload: dict) -> list[str]:
     action = payload.get("action")
     if not _one_of(action, HIRE_BODY):
@@ -323,7 +332,8 @@ def validate_payload(kind: str, payload: Any) -> list[str]:
         bad += [key for key in _plan_problems(payload) if key not in bad]
     elif kind == "structure_choice":
         options = payload.get("options")
-        flag("options", not _options_ok(options, detail=True, minimum=2))
+        flag("options", not _options_ok(options, detail=True, minimum=1))
+        flag("attachments", "attachments" in payload and not _attachments_ok(payload["attachments"]))
         if "options" not in bad and payload.get("recommended") is not None:
             flag("recommended", payload["recommended"] not in [option["id"] for option in options])
     elif kind == "question":

@@ -53,7 +53,6 @@ from ..pipeline import RelaySpec, cap_effort, cap_model
 from . import campaigns, cutoff, employees, gate, harness_root, plugins, review, runs
 from . import editor as editor_control
 from . import machine as machine_info
-from .creator import build_bat
 from .importer import find_uproject
 from .inbox import SYSTEM_ROOM, InboxError
 from .store import StudioStore
@@ -63,6 +62,12 @@ CODES = ("unknown_stage", "provider_unguarded", "model_unavailable", "effort_uns
          "effort_over_cap")  # §9.5: the `failed[]` of a `start` that is refused, in the order of the steps 4 · 5 · 6
 ANY = "*"  # the key of `work` that stands for every stage without a key of its own
 SERVER_CODE = "relay_agent"  # the folder of the server root a project must not hold to be worked on in place
+# T4: a line in the goal of a program employee's task run that names the structure-document order (the order itself is
+# the `## 구조 문서 결재` section of program.md — the employee's guide)
+STRUCTURE_DOC_FEATURE = ("구조 문서 결재 대상 — 코드를 바꾸기 전에 지침의 「구조 문서 결재」 순서대로 한다 "
+                         "(HTML 구조 문서를 작업방에 올리고 structure_choice 결재를 받는다).")
+STRUCTURE_DOC_CHANGE = "구조를 바꾸는 일(리팩터링)이면 코드를 바꾸기 전에 지침의 「구조 문서 결재」 순서대로 한다."
+STRUCTURE_DOC_NOTES = {"feature": STRUCTURE_DOC_FEATURE, "fix": STRUCTURE_DOC_CHANGE, "chore": STRUCTURE_DOC_CHANGE}
 GOAL_SECTIONS = (("사유", "reason"), ("명세", "spec"), ("완료 기준", "done_criteria"))  # after the title, this order
 RELAY_ERRORS = (OSError, ValueError, yaml.YAMLError)  # what reading a relay file raises
 JOINS_LINE = ("queued", "T5", "T8")  # what `Effects.after` hears when a task has got a `queued_at` (§4.6)
@@ -80,6 +85,8 @@ SIMILAR = 0.7                      # how alike two errors are, 0..1, for 'the sa
 RESTARTED = "서버 재시작"   # how the error of a run `RelayEngine.recover_interrupted` closed begins
 FOLDER_BUSY = "다른 실행("  # in the error of a run whose folder another run was editing (`pipeline.py` _advance)
 AGAIN = "끊긴 런을 다시 잇는다"
+RESTART_WHY = "런이 실패해 새 대화로 다시 시작한다"
+RESTARTED_AGAIN = "자동으로 {n}번 다시 시작했지만 또 실패했다"
 SKIPPED = "stage_skipped"   # the engine's event of an `optional` stage no AI could run (§4.7)
 WITH_RUN = ("working", "blocked", "review")  # the states whose run the recovery reads (§4.8 의 1)
 BROKEN = "작업 '{title}' ({id}) 이 {status} 인데 대기 중인 결재가 없다. 고치지 않고 알린다 — 작업 상태를 확인하라."
@@ -106,6 +113,11 @@ LIVE_CODING = "LiveCoding.Compile"  # the Unreal console command of a Live Codin
 TOOL_HINT = ("MCP 도구 이름은 서버가 모른다 — ToolSearch 로 찾는다 (검색어 예: `unreal console command` 는 콘솔 명령 실행, "
              "`unreal PIE play stop` 은 PIE 시작·정지). 찾지 못하면 도구 이름을 지어내지 말고, 그 일을 하지 못했다고 "
              "`unverified` 에 적는다.")
+BUILD_TOOL = "editor_build"  # the studio MCP tool that builds the C++ (studio/editor_build.py)
+BUILD_TOOL_OFF = (f"C++ 를 바꿨으면 MCP 도구 `{BUILD_TOOL}` 로 빌드한다 — 에디터를 저장하고 닫은 뒤 그 엔진의 Build.bat 으로 "
+                  f"빌드하고 에디터를 다시 켠다.")
+# Live Coding needs an editor that answers, so only the section of a running one names it
+BUILD_TOOL_LINE = BUILD_TOOL_OFF + f" Live Coding(`{LIVE_CODING}`)은 .cpp 안의 작은 수정에만, 원하면 쓴다."
 UNVERIFIED = ("빌드나 측정을 하지 못하면 검수 요청(`task_request_review`)의 checklist `unverified` 에 "
               "무엇을 왜 하지 못했는지 적는다 — 해 본 것처럼 쓰지 않는다.")
 
@@ -126,8 +138,7 @@ def build_section(project: dict, uproject: Path, state: dict, engines: list[dict
     lines = [f"===== {BUILD_TITLE} =====", "아래는 이 단계를 시작할 때 서버가 본 값이다 — 도는 동안 에디터 상태는 바뀔 수 있다."]
     if state.get("running") and state.get("healthy") and port:
         lines += [f"- 에디터: 켜져 있고 MCP(포트 {port})가 응답한다 (이 단계 시작 시점).",
-                  f"- 빌드: UBT 나 Build.bat 을 돌리지 않는다. MCP 의 콘솔 명령 도구로 "
-                  f"`{LIVE_CODING}` 을 실행해 Live Coding 으로 컴파일한다.",
+                  f"- 빌드: {BUILD_TOOL_LINE}",
                   "- PIE: MCP 도구로 시작하고 정지한다.",
                   f"- 도구: {TOOL_HINT}"]
     else:
@@ -141,8 +152,7 @@ def build_section(project: dict, uproject: Path, state: dict, engines: list[dict
         engine = next((e for e in engines if version and str(e.get("version")) == version and e.get("exists")), None)
         lines.append(f"- 에디터: {why} (이 단계 시작 시점).")
         if engine is not None:
-            lines.append(f'- 빌드: 에디터 없이 `"{build_bat(str(engine["path"]))}" {stem}Editor Win64 Development '
-                         f'-Project="{uproject}" -WaitMutex` 로 빌드한다.')
+            lines.append(f"- 빌드: {BUILD_TOOL_OFF}")
         else:
             lines.append("- 빌드: 이 컴퓨터의 엔진 폴더를 몰라 빌드 명령을 줄 수 없다 — 명령을 지어내지 않는다.")
         lines.append("- PIE: 에디터가 켜져 MCP 가 응답할 때만 MCP 도구로 시작하고 정지한다. 지금은 측정하지 못할 수 있다.")
@@ -507,6 +517,8 @@ class WorkEffects(Effects):
             log.info("studio: 작업 %s 의 런 %s 을 진행하지 않는다 — %s", task["id"], run_id, e.message)
             if gone():
                 return False  # stopped meanwhile: the owner is not asked about the editor of a task they stopped
+            if editor_quiet(run_id, e.message):
+                return True  # a studio run is told, not stopped; no watch: the agent can start it with `editor_build`
             try:
                 ask(inbox, task["id"], EDITOR_EVENT, EDITOR_DOWN.format(why=e.message), error=e.message)
             except TransitionError as t:
@@ -742,6 +754,9 @@ class WorkEffects(Effects):
         parts = [f"작업: {(task['title'] or '').strip()}"]
         if lead:
             parts.append(lead)
+        note = STRUCTURE_DOC_NOTES.get(task.get("type")) if employee.get("department_id") == "program" else None
+        if note:
+            parts.append(note)
         parts += [f"===== {title} =====\n{task[key].strip()}" for title, key in GOAL_SECTIONS
                   if (task[key] or "").strip()]
         parts.append(employees.prompt_for(store, self.cfg.studio_dir, employee, room["id"] if room else None,
@@ -792,6 +807,53 @@ class WorkEffects(Effects):
 def ask(inbox, task_id: str, reason: str, body: str, **extra: Any) -> dict:
     """T4 by the system: a `question` of that reason (§5.3), and the task ends in blocked. The item."""
     return inbox.create("question", SYSTEM, task_id=task_id, payload={"reason": reason, "body": body, **extra})
+
+
+def studio_run(run_id: str) -> bool:
+    """Is that run one studio started (a task run or a chat turn)? The same test as the budget notice's
+    (`notice.mode`): a run that is not studio's keeps the old stops."""
+    from . import notice  # not at import: notice imports api
+
+    try:
+        return notice.mode(run_id) is not None
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def editor_quiet(run_id: str, why: str) -> bool:
+    """The editor does not answer and the run is a studio run: the room is told (`notice.tell`, a quiet push)
+    and nothing else — no question, no cut. True when it was told; False for a run outside studio, which the
+    caller stops as before. Never raises."""
+    if not studio_run(run_id):
+        return False
+    from . import notice
+
+    log.info("studio: 런 %s 의 에디터가 응답하지 않아 안내만 한다 — %s", run_id, why)
+    notice.tell(run_id, "editor", {"why": why})
+    return True
+
+
+def _release_editor(engine, inbox, out: dict) -> None:
+    """Step 0: an `editor_unresponsive` question that is still open from before is closed — the editor no longer
+    stops a studio run — and the run goes on: the owner's `retry` (the editor is checked, and a studio run is
+    told, not stopped). Only the questions of a task whose run is a studio run. `out["editor_released"]` gets the
+    ids closed. One failing item does not keep the others."""
+    from . import notice
+
+    released = out.setdefault("editor_released", [])
+    for item in inbox.store.list_inbox(status="pending"):
+        try:
+            payload = item["payload"] or {}
+            if item["kind"] != "question" or payload.get("reason") != EDITOR_EVENT or not item["task_id"]:
+                continue
+            task = inbox.store.get_task(item["task_id"])
+            run_id = task["run_id"] if task else None
+            if not run_id or not (notice.mode(run_id) or _saved_mode(engine, run_id)):
+                continue
+            inbox.decide(item["id"], "answer", comment="", data={"option_id": "retry"}, via="app")
+            released.append(item["id"])
+        except Exception:  # noqa: BLE001
+            log.exception("studio: 재시작 복구가 에디터 무응답 질문 %s 을 닫지 못했다", item["id"])
 
 
 def editor_lost(engine, inbox, task_id: str, run_id: str) -> bool:
@@ -913,12 +975,18 @@ def table(engine, inbox, task: dict | None, run, *, owner_stop: bool = False,
         item = runs.file_stop(engine, inbox, run)
         return (FILED, item) if item is not None else None
     if status == "done":
-        if wrapped_up(inbox, task["id"]):
+        owners = wrapped_up(inbox, task["id"])
+        if owners or (getattr(engine, "studio_auto_review", True) and studio_run(run.id)):  # a studio run's review is filed for it, not asked about
             item = wrap_review(engine, inbox, task, run, "런이 검수 요청 없이 끝났다")
             if item is not None:
+                if not owners:
+                    _tell(run.id, "review", {})
                 return FILED, item
         return FILED, ask(inbox, task["id"], "no_review_request", NO_REVIEW)
     if status == "cancelled":
+        done = _auto_restart(engine, inbox, task, run, "런이 취소됐다")
+        if done is not None:
+            return done
         return FILED, ask(inbox, task["id"], "run_cancelled", CANCELLED)
     if status == "failed" or (error is not None and status == "pending"):
         if error is None and resumes(run):
@@ -930,13 +998,55 @@ def table(engine, inbox, task: dict | None, run, *, owner_stop: bool = False,
             item = wrap_review(engine, inbox, task, run, told)
             if item is not None:
                 return FILED, item
+        done = _auto_restart(engine, inbox, task, run, told)
+        if done is not None:
+            return done
         body = (FAILED if ended else NOT_ADVANCED).format(error=told[:500])
         count = failures(inbox, task, told)
+        tried = auto_restarts(inbox, task["id"])
+        if tried:  # the server started it over by itself and it failed again: the owner is asked, restart advised
+            more = "\n" + REPEAT.format(n=count) if count >= 2 else ""
+            return FILED, ask(inbox, task["id"], "run_failed", body + "\n" + RESTARTED_AGAIN.format(n=tried) + more,
+                              error=told, recommended="restart", failures=count, auto_restarts=tried)
         if count >= 2:
             return FILED, ask(inbox, task["id"], "run_failed", body + "\n" + REPEAT.format(n=count),
                               error=told, recommended="restart", failures=count)
         return FILED, ask(inbox, task["id"], "run_failed", body, error=told)
     return None
+
+
+def auto_restarts(inbox, task_id: str) -> int:
+    """How many times the server started this task over by itself (`TaskMachine.restart`) since the owner last
+    did anything to it: the system's `queued` rows with `detail.restart`, after the last row of the owner."""
+    count = 0
+    for event in inbox.store.list_task_events(task_id):
+        if event["actor_kind"] == "owner":
+            count = 0
+        elif event["kind"] == "queued" and (event["detail"] or {}).get("restart"):
+            count += 1
+    return count
+
+
+def _tell(run_id: str, kind: str, detail: dict) -> None:
+    from . import notice  # not at import: notice imports api
+
+    notice.tell(run_id, kind, detail)
+
+
+def _auto_restart(engine, inbox, task: dict, run, why: str) -> tuple[str, dict] | None:
+    """A studio run failed (or was cancelled with nobody's stop): start the task over by itself — the changes
+    stay, a new conversation with the last summary — and only tell the room. None when it does not (the run is
+    not studio's, `studio_auto_restarts` is used up or 0, or the new run cannot be made): the caller asks."""
+    limit = int(getattr(engine, "studio_auto_restarts", 1) or 0)
+    if limit <= 0 or run is None or not studio_run(run.id) or auto_restarts(inbox, task["id"]) >= limit:
+        return None
+    try:
+        outcome = inbox.machine.restart(task["id"], SYSTEM, reason=f"{RESTART_WHY} — {why[:200]}")
+    except (TransitionError, InboxError, OSError, ValueError) as e:
+        log.info("studio: 작업 %s 를 스스로 새로 시작하지 못했다: %s", task["id"], e)
+        return None
+    _tell(run.id, "restart", {"why": why})
+    return REQUEUED, outcome.task
 
 
 def _plain(text: str) -> str:
@@ -1049,6 +1159,49 @@ def _stopped_runs(engine, inbox, out: dict) -> list[str]:
     return again
 
 
+BUDGET_STOPS = ("budget", "stage_budget")  # StopNote.kind of the stops a studio run no longer makes
+
+
+def _saved_mode(engine, run_id: str):
+    """The `studio_mode` stored in the run (None when the run is gone or never was studio's)."""
+    try:
+        return getattr(_load(engine, run_id), "studio_mode", None)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _release_budget(engine, inbox, out: dict) -> None:
+    """Step 0: a studio run is not stopped by a budget any more (studio/notice.py), so a budget stop that is
+    still open from before is closed and its run goes on. The pending `budget` items of a task or of a run
+    studio started are approved (the decision path of the inbox does the rest: the task's block, the run, the
+    record; a run studio took before a restart is known by its stored `studio_mode`); the V-4 hold (`usage_hold`) is not a run's stop and stays. A working task whose run waits at a
+    budget stop with no item is approved at the engine — step 1 then finds the run `pending` and queues it.
+    `out["released"]` gets the ids of the items closed. One failing item does not keep the others."""
+    from . import notice  # not at import: notice imports api
+
+    released = out.setdefault("released", [])
+    for item in inbox.store.list_inbox(status="pending"):
+        try:
+            payload = item["payload"] or {}
+            if item["kind"] != "budget" or payload.get("stop_reason") == "usage_hold":
+                continue
+            if not item["task_id"] and not (item["run_id"] and (notice.mode(item["run_id"])
+                                                                or _saved_mode(engine, item["run_id"]))):
+                continue
+            inbox.decide(item["id"], "approve", comment="예산 안내 모드: 자동 승인", via="app")
+            released.append(item["id"])
+        except Exception:  # noqa: BLE001
+            log.exception("studio: 재시작 복구가 예산 결재 %s 을 닫지 못했다", item["id"])
+    for task in inbox.store.list_tasks(status="working"):
+        try:
+            run = _load(engine, task["run_id"]) if task["run_id"] else None
+            stop = run.baton.stop if run is not None else None
+            if run is not None and run.status == "awaiting_approval" and stop is not None and stop.kind in BUDGET_STOPS:
+                engine.approve(run.id)
+        except Exception:  # noqa: BLE001
+            log.exception("studio: 재시작 복구가 작업 %s 의 예산 정지를 풀지 못했다", task["id"])
+
+
 def _statuses(inbox) -> list[str]:
     """Step 4: §4.9 for everyone employed. The ids of the employees whose status changed."""
     changed = []
@@ -1145,6 +1298,8 @@ def recover(engine, inbox_factory: Callable[[], Any], kick: Callable[[], Any] | 
         log.exception("studio: 재시작 복구가 결재함을 얻지 못했다")
     again: list[str] = []
     if inbox is not None:
+        step("0", lambda: _release_budget(engine, inbox, out))
+        step("0e", lambda: _release_editor(engine, inbox, out))
         step("1", lambda: again.extend(_stopped_runs(engine, inbox, out)))
         step("2", lambda: out["delivered"].extend(deliver(inbox)))
         for task_id in again:

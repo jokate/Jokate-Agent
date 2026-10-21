@@ -424,7 +424,8 @@ def test_who_files_what(world):
 
 BROKEN = [  # kind, payload, the keys named
     ("design_approval", {"stage": "design"}, ["stop_reason"]),
-    ("structure_choice", {"question": "구조?", "options": OPTIONS[:1]}, ["options"]),
+    ("structure_choice", {"question": "구조?", "options": []}, ["options"]),
+    ("structure_choice", {**PAYLOAD["structure_choice"], "attachments": [{"id": "5", "name": "a.html"}]}, ["attachments"]),
     ("structure_choice", {"question": "구조?", "options": [OPTIONS[0], OPTIONS[0]]}, ["options"]),
     ("structure_choice", {**PAYLOAD["structure_choice"], "recommended": "z"}, ["recommended"]),
     ("question", {"reason": "bored", "body": " "}, ["body", "reason"]),

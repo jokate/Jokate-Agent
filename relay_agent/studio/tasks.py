@@ -1010,6 +1010,43 @@ class TaskMachine:
         return self._change(task, actor, "queued", reason or "끊긴 런을 다시 잇는다", cols={"queued_at": now()},
                             guard=" AND queued_at IS NULL", detail={"resume": True})
 
+    def restart(self, task_id: str, actor: Actor, *, reason: str = "") -> Outcome:
+        """Start a working task over without a question to the owner: its run failed, the server makes a new run
+        (the changes stay, the last summary is carried — `Effects.create_run(restart_from=)`, as T5 does), closes
+        the old one and puts the task in the line again. Only the system does it (a `queued` row with
+        `detail.restart`, which `work.auto_restarts` counts). `Effects.after` hears `queued`."""
+        task = self._task(task_id)
+        if actor.kind != "system":
+            raise TransitionError("actor_not_allowed", "런을 스스로 새로 시작하는 것은 system 만 한다",
+                                  from_status=task["status"])
+        problems = []
+        if task["status"] != "working":
+            problems.append("working 작업만 새로 시작한다")
+        if task["queued_at"] is not None:
+            problems.append("이미 줄 서 있다")
+        if not task["run_id"]:
+            problems.append("새로 시작할 런이 없다")
+        if problems:
+            raise self._unmet(problems, task, None, None)
+        old = task["run_id"]
+        try:
+            new = self.effects.create_run(task, restart_from=old, note="")
+            if _blank(new):
+                raise RuntimeError("create_run returned no run id")
+        except Exception as exc:
+            raise TransitionError("precondition_failed",
+                                  f"새 런을 만들지 못했다: {str(exc) or exc.__class__.__name__}",
+                                  from_status=task["status"], failed=list(getattr(exc, "failed", []) or [])) from exc
+        try:
+            outcome = self._change(task, actor, "queued", reason or "런이 실패해 새 대화로 다시 시작한다",
+                                   cols={"queued_at": now(), "run_id": new}, guard=" AND queued_at IS NULL",
+                                   detail={"restart": True, "run_id": new, "restarted_from": old})
+        except BaseException:
+            self.effects.cancel_run(new)
+            raise
+        self.effects.cancel_run(old)  # closed, not reverted: the changes stay
+        return outcome
+
     def assign(self, task_id: str, actor: Actor, employee_id: str | None, *, reason: str = "") -> Outcome:
         """Set or clear the assignee. Only in backlog (§3.10), and not while the task is in the line — the
         start request was checked against the assignee it had."""

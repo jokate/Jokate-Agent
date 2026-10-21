@@ -540,7 +540,9 @@ turn re-read all of them.
 """
 
 # a digest over dozens of files is one long tool call
-os.environ.setdefault("MCP_TOOL_TIMEOUT", "900000")
+# (`editor_build` may take 3900 s on the server side: the client's limit must be longer than that)
+MCP_TOOL_TIMEOUT_MS = 4_000_000
+os.environ.setdefault("MCP_TOOL_TIMEOUT", str(MCP_TOOL_TIMEOUT_MS))
 
 
 def os_name() -> str:

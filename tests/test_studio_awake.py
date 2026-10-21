@@ -99,6 +99,7 @@ def test_a_task_thread_that_raises_still_lets_the_pc_sleep(line, monkeypatch):  
         raise ValueError("boom")
 
     monkeypatch.setattr(line.engine, "advance", boom)
+    monkeypatch.setattr(line.engine, "studio_auto_restarts", 0, raising=False)  # one thread: no start-over after the failure
     line.gate.go.set()
     task = line.backlog(title="실패")
     ok(line.ask(task))

@@ -75,6 +75,8 @@ class Shop:
         monkeypatch.setattr(api, "_effects", self.fx)
         self.m = TaskMachine(lab.store, self.fx)
         self.pid, self.n = lab.world.pid, 0
+        # the old tests ask at the first failure and at a run without a review request; test_studio_auto_restart turns both on
+        lab.engine.studio_auto_restarts, lab.engine.studio_auto_review = 0, False
 
     def hire(self, text=YAML, **files):
         """An employee placed in the project, with a folder: `text` is its employee.yaml."""
@@ -410,7 +412,8 @@ def test_an_open_editor_that_answers_is_built_with_live_coding_through_mcp(shop)
     folder = unreal(shop, running=True, healthy=True)
     assert "빌드·검증" not in run_of(shop).baton.goal  # the goal no longer carries it: every stage is given it
     section = section_of(shop)
-    assert "포트 8101" in section and "LiveCoding.Compile" in section and "Win64" not in section
+    assert "포트 8101" in section and "editor_build" in section and "Win64" not in section
+    assert "LiveCoding.Compile" in section and ".cpp 안의 작은 수정에만" in section  # Live Coding stays, as the small way
     assert "ToolSearch" in section and "unreal console command" in section and "unreal PIE play stop" in section
     assert "지어내지" in section
     assert str(folder / "Saved" / "Logs" / "X.log") in section and "unverified" in section
@@ -420,16 +423,14 @@ def test_a_closed_editor_is_built_with_the_engines_build_bat(shop, tmp_path):
     engine = tmp_path / "UE_5.7"
     unreal(shop, running=False, healthy=False, engines=[{"version": "5.7", "path": str(engine), "exists": True}])
     section = section_of(shop)
-    assert "꺼져 있다" in section and "LiveCoding.Compile" not in section
-    assert str(engine / "Engine" / "Build" / "BatchFiles" / "Build.bat") in section
-    assert "XEditor Win64 Development" in section and "-WaitMutex" in section and "X.uproject" in section
+    assert "꺼져 있다" in section and "`editor_build` 로 빌드한다" in section and "C++ 를 바꿨으면" in section
     assert "unverified" in section and "ToolSearch" not in section
 
 
 def test_an_editor_that_does_not_answer_is_built_like_a_closed_one(shop, tmp_path):
     unreal(shop, running=True, healthy=False, engines=[{"version": "5.7", "path": str(tmp_path / "E"), "exists": True}])
     section = section_of(shop)
-    assert "응답하지 않았다" in section and "LiveCoding.Compile" not in section and "Build.bat" in section
+    assert "응답하지 않았다" in section and "editor_build" in section
     assert "ToolSearch" not in section
 
 
@@ -438,7 +439,7 @@ def test_an_engine_folder_that_is_not_known_leaves_the_build_line_out(shop, tmp_
            engines=[{"version": "5.7", "path": str(tmp_path / "E"), "exists": True},
                     {"version": "9.9", "path": str(tmp_path / "Gone"), "exists": False}])
     section = section_of(shop)
-    assert "엔진 폴더를 몰라" in section and "Build.bat" not in section and "Win64" not in section
+    assert "엔진 폴더를 몰라" in section and "editor_build" not in section and "Win64" not in section
 
 
 def test_a_computer_that_cannot_be_read_counts_as_off_and_unknown(shop):
@@ -497,12 +498,12 @@ def test_build_section_words_the_three_cases_from_its_inputs():
     uproject = Path("D:/g/X.uproject")
     project = {"path": "D:/g", "mcp_port": 55557, "engine_version": "5.7"}
     on = work.build_section(project, uproject, {"running": True, "healthy": True}, [])
-    assert "LiveCoding.Compile" in on and "55557" in on and "-WaitMutex" not in on
+    assert "LiveCoding.Compile" in on and "55557" in on and "`editor_build`" in on and "-WaitMutex" not in on
     engines = [{"version": "5.7", "path": "C:/UE", "exists": True}]
     off = work.build_section(project, uproject, {"running": False, "healthy": False}, engines)
-    assert "-WaitMutex" in off and 'XEditor Win64 Development -Project="' in off and "LiveCoding" not in off
+    assert "`editor_build` 로 빌드한다" in off and "-WaitMutex" not in off and "LiveCoding" not in off
     none = work.build_section(project, uproject, {"running": False, "healthy": False}, [])
-    assert "엔진 폴더를 몰라" in none and "-WaitMutex" not in none and "unverified" in none
+    assert "엔진 폴더를 몰라" in none and "editor_build" not in none and "unverified" in none
     noport = work.build_section({**project, "mcp_port": None}, uproject, {"running": True, "healthy": True}, engines)
     assert "포트가 정해져 있지 않다" in noport and "LiveCoding" not in noport
     for section in (on, off, none, noport):  # the play request is in the common tail of all four

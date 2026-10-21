@@ -22,7 +22,7 @@ from .campaign import CampaignRunner, to_dict as campaign_dict
 from .config import Config, build_engine
 from .pipeline import RelaySpec, RunState
 from .runners import RunnerError, probe_claude_limits
-from .studio import api as studio_api, chat as studio_chat, runs as studio_runs, work as studio_work, ws as studio_ws
+from .studio import api as studio_api, chat as studio_chat, notice as studio_notice, runs as studio_runs, work as studio_work, ws as studio_ws
 
 cfg = Config.load()
 engine = build_engine(cfg)
@@ -33,6 +33,10 @@ studio_api.install(app, cfg, liveness=lambda run_id: engine.liveness(run_id),  #
                    repos=lambda: engine.repos)  # a function: _reload_repos replaces the object
 engine.mcp_env["studio"] = studio_api.mcp_env  # §8.2: the actor token of a studio run's stage; None = not attached
 engine.guard_stage = studio_api.guard_stage  # §11.4: studio-full and the guard hook on a studio run; None = as it was
+engine.studio_mode = studio_notice.mode  # a studio run is told of its spending and gates, not stopped by them
+engine.run_notice = studio_notice.tell
+engine.spend_notice_step_usd = cfg.studio_spend_notice_step_usd
+engine.studio_auto_restarts = cfg.studio_auto_restarts
 DASHBOARD = Path(__file__).with_name("dashboard.html")
 
 
@@ -985,6 +989,13 @@ def add_studio_harness_skills() -> None:
     studio_api.add_harness_skills()
 
 
+# T4: the `## 구조 문서 결재` section of the program part's template goes into the GUIDE.md of a program employee
+# already hired, once and as its own commit (`guide: 구조 문서 결재 (자동)`), the same way as the harness lines.
+@app.on_event("startup")
+def add_studio_structure_doc() -> None:
+    studio_api.add_structure_doc()
+
+
 # Task runs (S-8, part 1; design/studio/ARCHITECTURE.md §9.5 · §11.2): what T3 makes a task's run with on this
 # engine, and the models `GET /studio/models` lists — this engine's registry, which knows the benched ones. Down
 # here for the reasons given above.
@@ -1080,6 +1091,7 @@ pusher = studio_push.attach(engine, studio_api.run_inbox, key_path=lambda: cfg.s
 
 @app.on_event("startup")
 def start_push_reminders() -> None:
+    pusher.announce_off(studio_api.get_store)  # one line in the system room when the push is off, and why (no path in it)
     pusher.watch()
 
 
@@ -1181,8 +1193,9 @@ def recover_studio_jobs() -> None:
 # then). A run that passed is handed to this watch, which looks at the editor while the run is at
 # work and cuts the run of one that stops answering. No timer runs until a run that uses the editor has passed the
 # check. Down here for the reasons given above.
-from .studio import editor_watch as studio_editor_watch  # noqa: E402
+from .studio import editor_build as studio_editor_build, editor_watch as studio_editor_watch  # noqa: E402
 
 task_editor_watch = studio_editor_watch.EditorWatch(engine, task_runs, studio_api.run_inbox, task_queue.holds)
 task_runs.watch = task_editor_watch.begin
+studio_editor_build.DEPS.pause = task_editor_watch.paused  # `editor_build` closes the editor on purpose: no watch meanwhile
 task_runs.staffing_look = studio_api.staffing_on_task  # a task filed: the triggers for a hire (§5.3 가·나)

@@ -475,6 +475,7 @@ def test_a_cut_task_run_is_taken_up_by_the_new_engines_queue(line, monkeypatch):
 
     engine, store = reborn(line.lab, line.repos)  # killed: the engine, the store and the queue are all new
     line.engine, line.store = engine, store
+    engine.studio_auto_restarts, engine.studio_auto_review = 0, False  # a new engine: the old question path
     line.fx.engine = engine
     line.m = TaskMachine(store, line.fx)
     assert engine.recover_interrupted() == [run.id]
