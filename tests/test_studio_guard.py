@@ -394,6 +394,8 @@ def test_what_passes(tool, command):
 def test_tools_that_are_not_a_shell():
     assert rule(None, "Read", file_path=r"C:\Users\kim\.ssh\id_rsa") == "secret_access"
     assert rule(None, "Read", file_path="~/.claude.json") == "secret_access"
+    assert rule(None, "Read", file_path=HOME + r"\.claude\.credentials.json") == "secret_access"  # T3: credentials stay shut
+    assert rule(None, "Read", file_path=HOME + r"\.claude\skills\x\SKILL.md") is None  # the harness is readable
     assert rule(None, "Grep", pattern="token", path=r"C:\Users\kim") == "secret_access"       # recursive: an ancestor
     assert rule(None, "Glob", pattern="C:/Users/kim/.ssh/*") == "secret_access"
     assert rule(None, "Glob", pattern="**/id_rsa", cwd=HOME) == "secret_access"

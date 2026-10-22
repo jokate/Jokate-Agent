@@ -231,9 +231,8 @@ def check(text: object, *, department_id: str | None, department: dict | None, c
     chat_mcp = data.get("chat_mcp")
     if chat_mcp is not None and not _names(chat_mcp):  # 7
         flag("chat_mcp_not_subset", "chat_mcp 는 MCP 서버 이름의 목록이어야 한다")
-    elif chat_mcp:
-        within = _mapping(department).get("default_mcp") if mcp is None else mcp
-        outside = [name for name in chat_mcp if name not in (within if _names(within) else [])]
+    elif chat_mcp and mcp:  # an empty `mcp` is every server: `chat_mcp` is within it whatever it names
+        outside = [name for name in chat_mcp if name not in mcp]
         if outside:
             flag("chat_mcp_not_subset", f"chat_mcp 가 mcp 밖의 이름을 가졌다: {', '.join(outside)}")
     cap, limit = data.get("cap"), {"model": None, "effort": None}
@@ -321,19 +320,20 @@ def resolve(data: dict, employee: dict, department: dict | None, config_cap: dic
     """The settings of an employee: `{department, relay, mcp, chat_mcp, chat, work, cap}`.
 
     `department` is the DB's, whatever the file says (§9.6). A key the file does not have takes the part's:
-    `default_relay` · `default_mcp` · `default_models` (chat · work · cap); `chat_mcp` is [] and never wider
-    than `mcp`. `cap` is `{model, effort}`, each looked for on its own: the file -> the part -> `config_cap`
+    `default_relay` · `default_models` (chat · work · cap). `mcp` and `chat_mcp` are only what the file writes
+    ([] = every server: the part's `default_mcp` does not set the scope); `chat_mcp` is within `mcp` when that has names.
+    `cap` is `{model, effort}`, each looked for on its own: the file -> the part -> `config_cap`
     -> None (no cap). Nothing is written back. A value of the wrong type counts as not written — the checks
     refuse it when the file is written, and a file changed by hand must not stop the reading."""
     part = _mapping(department)
     models = _mapping(part.get("default_models"))
     relay = data.get("relay") if isinstance(data.get("relay"), str) and data["relay"] else part.get("default_relay")
-    mcp = _name_list(data["mcp"] if _names(data.get("mcp")) else part.get("default_mcp"))
+    mcp = _name_list(data["mcp"] if _names(data.get("mcp")) else None)  # empty = every server; the part does not narrow it
     work = data["work"] if isinstance(data.get("work"), dict) else models.get("work")
     caps = (_mapping(data.get("cap")), _mapping(models.get("cap")), _mapping(config_cap))
     return {
         "department": employee["department_id"], "relay": relay, "mcp": mcp,
-        "chat_mcp": [name for name in _name_list(data.get("chat_mcp")) if name in mcp],
+        "chat_mcp": [name for name in _name_list(data.get("chat_mcp")) if not mcp or name in mcp],
         "chat": _slot(data["chat"] if isinstance(data.get("chat"), dict) else models.get("chat")),
         "work": {stage: _slot(slot) for stage, slot in _mapping(work).items() if isinstance(stage, str)},
         "cap": {key: next((c[key] for c in caps if isinstance(c.get(key), str) and c[key] in order), None)
@@ -374,14 +374,16 @@ def lower(slot: dict, cap: dict) -> dict:
 
 
 def chat_values(settings: dict, checks: Checks) -> dict:
-    """What a chat or read turn is made with (§9.5): `{slot, mcp, model_cap, effort_cap, failed}`.
+    """What a chat or read turn is made with (§9.5): `{slot, mcp, mcp_scope, model_cap, effort_cap, failed}`.
 
-    `slot` is `chat` under the cap, `mcp` is `chat_mcp` + `studio`, the two caps go to the engine as well.
+    `slot` is `chat` under the cap, `mcp` is `chat_mcp` (else `mcp`) + `studio`, `mcp_scope` is 'only' when the
+    employee names servers and 'all' when it names none, the two caps go to the engine as well.
     `failed` is `["provider_unguarded"]` when the slot names a provider that is no Claude Code runner — the
     turn is not made then. The provider the relay's stage names is looked at where the turn is made."""
     slot, cap = lower(settings["chat"], settings["cap"]), settings["cap"]
-    return {"slot": slot, "mcp": [*settings["chat_mcp"], STUDIO_MCP], "model_cap": cap["model"],
-            "effort_cap": cap["effort"], "failed": [] if checks.guarded(slot.get("provider")) else ["provider_unguarded"]}
+    names = settings["chat_mcp"] or settings.get("mcp") or []  # both empty = every server (scope 'all'), else only these
+    return {"slot": slot, "mcp": [*names, STUDIO_MCP], "mcp_scope": "only" if names else "all",
+            "model_cap": cap["model"], "effort_cap": cap["effort"], "failed": [] if checks.guarded(slot.get("provider")) else ["provider_unguarded"]}
 
 
 # --- the prompt (§9.1) --------------------------------------------------------------------------------------

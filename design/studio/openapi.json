@@ -3914,6 +3914,32 @@
         ]
       }
     },
+    "/studio/mcp-servers": {
+      "get": {
+        "operationId": "list_mcp_servers_studio_mcp_servers_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "title": "Response List Mcp Servers Studio Mcp Servers Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Mcp Servers",
+        "tags": [
+          "studio"
+        ]
+      }
+    },
     "/studio/mcp/ask_owner": {
       "post": {
         "description": "T4: file a blocking item (§5.7). `{inbox_id}` and `end_turn: true`.",
@@ -6501,7 +6527,7 @@
     },
     "/studio/tasks/{id}": {
       "get": {
-        "description": "The row and what a task screen shows next to it. `queue_position` counts from 1 in the server's whole\nline (provisional); `run` is `{id, status, changes_status}` of the task's run, null when it has none.",
+        "description": "The row and what a task screen shows next to it. `queue_position` counts from 1 in the server's whole\nline (provisional); `run` is `{id, status, changes_status}` of the task's run, null when it has none. `capabilities` is what the run's last stage got\n(`{stage, tools, allowed_tools, mcp, skills, at}`, from its `stage_capabilities` event), null when there is none.",
         "operationId": "get_task_studio_tasks__id__get",
         "parameters": [
           {

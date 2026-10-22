@@ -108,3 +108,12 @@ def harness_is_not_this_pcs(monkeypatch, tmp_path_factory):
 
     empty = tmp_path_factory.mktemp("no_home")
     monkeypatch.setattr(harness_root, "default_home", lambda: empty)
+
+
+@pytest.fixture(autouse=True)
+def home_without_this_pcs_mcp_servers(monkeypatch, tmp_path_factory):
+    """A studio run of scope 'all' counts the user's `unreal` (~/.claude.json) as a live editor, so it works in the
+    folder itself and not in a copy. Whether this PC has that server must not decide a test: the home is an empty
+    folder, a test that needs servers there sets its own (`Path.home` patched later wins)."""
+    home = tmp_path_factory.mktemp("home")
+    monkeypatch.setattr("relay_agent.projctx.Path.home", staticmethod(lambda: home))

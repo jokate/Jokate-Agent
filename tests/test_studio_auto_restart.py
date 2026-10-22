@@ -52,7 +52,7 @@ def test_the_run_started_over_goes_on_to_a_review_filed_for_it(line, monkeypatch
     task, _ = start(line)
     assert line.run_of(task).status == "done"
     assert ("final_review", None) in kinds(line, task) and "no_review_request" not in reasons(line, task)
-    assert [kind for _, kind in told] == ["restart", "review"]
+    assert [kind for _, kind in told] == ["restart", "continue", "review"]  # continued once, then the review is filed
 
 
 def test_a_second_failure_is_asked_to_the_owner_with_restart_advised(line, monkeypatch):  # noqa: F811
@@ -84,7 +84,70 @@ def test_a_studio_run_without_a_review_request_gets_its_review_filed(line, monke
     told = wire(line, monkeypatch, failures=0)
     task, _ = start(line)
     assert ("final_review", None) in kinds(line, task) and "no_review_request" not in reasons(line, task)
-    assert [kind for _, kind in told] == ["review"]
+    assert [kind for _, kind in told] == ["continue", "review"]
+
+
+def continues(line, task):  # noqa: F811
+    return [e for e in line.store.list_task_events(task["id"])
+            if e["kind"] == "run" and (e["detail"] or {}).get("event") == "auto_continue"]
+
+
+def test_a_studio_run_without_a_review_request_is_continued_once_and_then_reviewed(line, monkeypatch):  # noqa: F811
+    told = wire(line, monkeypatch, failures=0)
+    task, _ = start(line)
+    run = line.run_of(task)
+    rows = continues(line, task)
+    assert len(rows) == 1 and rows[0]["detail"]["run_id"] == run.id  # the same run, once
+    assert work.continued(api.run_inbox(), task["id"], run.id) and not work.continued(api.run_inbox(), task["id"], "run_other")
+    assert [i for i in kinds(line, task) if i[0] == "question"] == []  # no question to the owner at any point
+    assert [kind for _, kind in told] == ["continue", "review"]
+
+
+def test_recovery_continues_an_old_open_question_once_and_then_the_review_is_filed(line, monkeypatch):  # noqa: F811
+    told = wire(line, monkeypatch, studio=False, failures=0)
+    task, _ = start(line)
+    assert reasons(line, task) == ["no_review_request"] and line.row(task)["status"] == "blocked"  # outside studio: asked
+    inbox, out = api.run_inbox(), {}
+    with monkeypatch.context() as patch:  # a run that is not studio's: left alone
+        patch.setattr(work, "_saved_mode", lambda engine, run_id: None)
+        patch.setattr(notice, "mode", lambda run_id: None)
+        work._release_no_review(line.engine, inbox, out)
+    assert out["no_review_released"] == [] and reasons(line, task) == ["no_review_request"]
+    monkeypatch.setattr(work, "studio_run", lambda run_id: True)
+    monkeypatch.setattr(notice, "mode", lambda run_id: "work")
+    work._release_no_review(line.engine, inbox, out)
+    assert len(out["no_review_released"]) == 1 and reasons(line, task) == []
+    assert len(continues(line, task)) == 1 and ("continue" in [kind for _, kind in told])
+    line.settled(task)
+    assert ("final_review", None) in kinds(line, task) and len(continues(line, task)) == 1  # the second end: the review
+
+
+def test_recovery_leaves_the_question_of_a_run_the_server_already_continued(line, monkeypatch):  # noqa: F811
+    wire(line, monkeypatch, studio=False, failures=0)
+    task, _ = start(line)
+    inbox, run = api.run_inbox(), line.run_of(task)
+    monkeypatch.setattr(work, "studio_run", lambda run_id: True)
+    monkeypatch.setattr(notice, "mode", lambda run_id: "work")
+    inbox.machine.record(task["id"], work.SYSTEM, "run", work.AUTO_CONTINUE, detail=dict(run_id=run.id, event="auto_continue"))
+    out = {}
+    work._release_no_review(line.engine, inbox, out)
+    assert out["no_review_released"] == [] and reasons(line, task) == ["no_review_request"]
+
+
+def test_recovery_keeps_the_question_left_when_the_review_could_not_be_filed(line, monkeypatch):  # noqa: F811
+    told = wire(line, monkeypatch, failures=0)
+    monkeypatch.setattr(work, "wrap_review", lambda *a, **k: None)  # the review cannot be made
+    task, _ = start(line)
+    assert len(continues(line, task)) == 1  # continued once, then the review failed
+    assert reasons(line, task) == ["no_review_request"] and line.row(task)["status"] == "blocked"
+    assert "review" not in [kind for _, kind in told]
+    monkeypatch.setattr(notice, "mode", lambda run_id: "work")
+    inbox = api.run_inbox()
+    for _ in range(2):  # a restart of the server, twice: the question stays, nothing is continued again
+        out = {}
+        work._release_no_review(line.engine, inbox, out)
+        assert out["no_review_released"] == [] and reasons(line, task) == ["no_review_request"]
+        assert len(continues(line, task)) == 1 and [kind for _, kind in told].count("continue") == 1
 
 
 def test_a_run_outside_studio_without_a_review_request_still_asks(line, monkeypatch):  # noqa: F811
@@ -99,3 +162,6 @@ def test_the_notices_and_the_quiet_push():
     assert event == notice.RESTART_EVENT == "restart_notice" and "다시 시작" in body and "boom" in body
     assert notice._text("review", {})[0] == notice.REVIEW_EVENT
     assert "review_filed" not in push.QUIET_NOTICES  # the final_review item has its own push
+    # only the room is told, no push (T4.1 decision): 작업방 안내만, 푸시는 하지 않는다
+    assert notice.UNREAL_NOTICE_EVENT not in push.QUIET_NOTICES
+    assert notice.CONTINUE_EVENT not in push.QUIET_NOTICES

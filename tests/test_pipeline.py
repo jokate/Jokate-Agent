@@ -5,7 +5,7 @@ import pytest
 from relay_agent.baton import Baton, LogEntry, StageResult, result_schema
 from relay_agent.history import HistoryStore
 from relay_agent.pipeline import RelayEngine
-from relay_agent.runners import ClaudeCliRunner, MockRunner, StageCall
+from relay_agent.runners import FINISH_SCHEMA, FINISH_TEXT, SHELL_GUARDED, ClaudeCliRunner, MockRunner, StageCall
 from relay_agent.usage import UsageStore
 
 RELAY = """
@@ -206,6 +206,17 @@ def test_cli_system_prompt_modes(tmp_path):
     append = runner.build_args(StageCall(**base, system_mode="append", isolate=True, mcp_servers=["docs_read"]), None)
     assert "--exclude-dynamic-system-prompt-sections" in append and "--system-prompt" not in append
     assert "--disable-slash-commands" in append and "--safe-mode" not in append  # safe-mode would kill MCP
+
+
+def test_cli_append_claude_only_finishes_with_schema(tmp_path):
+    runner = ClaudeCliRunner(exe="claude")
+    call = StageCall(stage="s", model="haiku", effort=None, system="ROLE", prompt="p", cwd=tmp_path,
+                     system_mode="append", claude_only=True, tools=["Bash", "Read"], result_mode="text")
+    args = runner.build_args(call, None)
+    appended = args[args.index("--append-system-prompt") + 1]
+    assert "--json-schema" in args
+    assert FINISH_SCHEMA in appended and SHELL_GUARDED in appended and FINISH_TEXT not in appended
+    assert appended.endswith("ROLE")
 
 
 def _sys_prompt(tmp_path, **kw):

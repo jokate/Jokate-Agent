@@ -6,9 +6,9 @@ Contract: design/studio/ARCHITECTURE.md §3.7 (`room_members`: the one conversat
 turn, its relay and its folder, and what happens when it cannot be made), §11.2 (`create` and `mcp_only`).
 
 A turn is one run of `relays/employee-chat.yaml` — a single stage, `chat` — on the server's engine:
-- what it is made with is read at the start of every turn: the `chat` slot under the cap, `chat_mcp` + `studio`
-  and nothing else (`mcp_only` drops the project's other servers, so unreal is off unless the employee's file
-  turns it on), the employee's project as `repo`, or the employee's own folder for one who is placed nowhere
+- what it is made with is read at the start of every turn: the `chat` slot under the cap, `chat_mcp` (else `mcp`)
+  + `studio` and nothing else when the employee names servers (`mcp_scope` 'only'), and every server Claude Code
+  has + `studio` when it names none ('all'), the employee's project as `repo`, or the employee's own folder for one who is placed nowhere
   (`studio` is attached there too, whether or not that folder has a project context — §9.5);
 - the three columns of `room_members`: `session_id` is the session of history.sqlite the turns of this room are
   filed under (one per employee and room, kept when the conversation changes), `conversation_id` the Claude Code
@@ -869,7 +869,8 @@ class ChatTurns:
             run = self.engine.create(
                 self.relay, goal, None if repo else folder, session_id=session_id, repo=repo,
                 stage_models={STAGE: dict(values["slot"])}, attachments=self._files(fresh) or None, approval="ai",
-                mcp=list(values["mcp"]), mcp_only=list(values["mcp"]), model_cap=values["model_cap"],
+                mcp=list(values["mcp"]), mcp_only=list(values["mcp"]) if values["mcp_scope"] == "only" else None,
+                mcp_scope=values["mcp_scope"], model_cap=values["model_cap"],
                 effort_cap=values["effort_cap"])
         except ValueError as e:
             raise Refused(f"엔진이 런을 만들지 않았다: {e}") from e

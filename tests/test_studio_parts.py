@@ -43,7 +43,7 @@ def test_the_originals_are_a_guide_for_each_part_and_one_file_of_defaults():
         assert FRAME in guide[guide.index("## 결재 기준"):]  # the frame of the approvals, empty
         assert len(guide.encode("utf-8")) <= 4096 and "모델" not in guide.replace("3D 모델", "")
         assert set(values["default_models"]) == set(employees.MODEL_KEYS)
-        assert values["default_mcp"] and employees.STUDIO_MCP not in values["default_mcp"]
+        assert values["default_mcp"] == []  # a part does not set the MCP scope (T2): the employee's `mcp` does
     program = defaults["program"]["guide_template"]  # the harness: in this order
     steps = [program.index(step) for step in
              ("1. 기획 사양", "2. 구조 조사", "3. owner 선택", "4. 완료 기준", "5. 구현", "6. 리뷰")]
@@ -127,7 +127,7 @@ def test_the_defaults_pass_the_checks_of_an_employee_yaml(world):
     # a registry without `unreal`, whatever the relay.config of this PC names: `unreal` is a project's own server
     # (.mcp.json), and the names of a part are not held against the registry (§3.4) — the loop below passes so
     checks = dataclasses.replace(checks, mcp_names=checks.mcp_names - {"unreal"})
-    assert "unreal" in defaults["program"]["default_mcp"] and "unreal" in defaults["design_setup"]["default_mcp"]
+    assert not any(defaults[p]["default_mcp"] for p in PARTS)
     named = yaml.safe_dump({"version": 1, "department": "program", "mcp": ["unreal"]})  # written in the yaml: §9.4 의 6
     assert [problem["code"] for problem in employees.check(
         named, department_id="program", department=world.store.get_department("program"), checks=checks)] == [
@@ -174,11 +174,11 @@ def test_a_hire_is_told_the_defaults_and_the_frame_of_each_part(world):
     text = employees.hiring_notes(store, checks)
     assert "틀 없음" not in text and all(defaults[p]["guide_template"].strip() in text for p in PARTS)
     line = next(line for line in text.splitlines() if line.startswith("- `program` relay "))
-    assert line.startswith("- `program` relay auto · mcp unreal · work ") and line.endswith(" · cap opus/high")
+    assert line.startswith("- `program` relay auto · mcp 없음 · work ") and line.endswith(" · cap opus/high")
     assert "plan=opus/high" in line and "scout=sonnet/low" in line
-    assert "- `design_doc` relay doc-write · mcp docs_read · work " in text
+    assert "- `design_doc` relay doc-write · mcp 없음 · work " in text
     art = next(line for line in text.splitlines() if line.startswith("- `art` relay "))  # the fifth part is listed
-    assert art.startswith("- `art` relay editor-task · mcp unreal · work ") and "edit=sonnet/medium" in art
+    assert art.startswith("- `art` relay editor-task · mcp 없음 · work ") and "edit=sonnet/medium" in art
     mine = world.owner.post("/studio/departments", json={"name": "사운드"}).json()  # and so is the owner's
     assert f"- `{mine['id']}` 사운드" in employees.hiring_notes(store, checks)
     assert "`hr` " not in text  # HR hires no HR: neither its defaults nor its guide

@@ -18,6 +18,7 @@ from relay_agent.config import ROOT, Config
 from relay_agent.pipeline import CampaignSpec
 from relay_agent.runners import ClaudeCliRunner, StageCall
 from relay_agent.studio import TaskMachine, api, guard, tools
+from relay_agent.studio.claude_tools import FULL_TOOLS, READ_TOOLS
 from relay_agent.studio.inbox import grant_key
 from test_mcp_attach import RELAY, setup as engine_setup
 from test_studio_api_tasks import TOKEN as SHARED  # the shared token of the `world` fixture's server
@@ -26,6 +27,8 @@ from test_studio_tools import bearer, desk  # noqa: F401 - `desk` is that file's
 
 PUSH = dict(tool="Bash", command="git push origin main", rule_id="git_risky")
 PROFILE = ["Bash", "Edit", "Write", "MultiEdit", "NotebookEdit", "mcp__studio"]
+FULL = list(FULL_TOOLS)
+ALLOWED = list(dict.fromkeys(FULL + PROFILE))  # a task run: every Claude Code tool, then the studio MCP
 
 
 def ask(desk, token, **over):  # noqa: F811
@@ -155,6 +158,9 @@ def test_a_grant_is_used_once_by_the_task_run_and_outlives_a_restart(desk):  # n
 def test_guard_stage_gives_a_studio_run_the_profile_the_hook_and_its_material(desk, tmp_path, monkeypatch):  # noqa: F811
     monkeypatch.delenv("KATAE_TOKEN", raising=False)  # with it the env has one key more: its own test below
     monkeypatch.setattr(api._cfg, "studio_fcm_key", "", raising=False)  # whatever this PC's settings name
+    home = tmp_path / "home"
+    (home / ".claude" / "skills").mkdir(parents=True)  # the harness skills a chat turn may read
+    monkeypatch.setattr("relay_agent.projctx.Path.home", staticmethod(lambda: home))  # Path.home itself
     task = desk.working()
     desk.turn(desk.w.emp)
     chat = desk.tracked[-1]
@@ -164,8 +170,9 @@ def test_guard_stage_gives_a_studio_run_the_profile_the_hook_and_its_material(de
     assert not (tmp_path / "other").exists()  # a dashboard · CLI run: nothing is given and nothing is written
 
     out = api.guard_stage(task["run_id"], "build", run_dir=run_dir, cwd=cwd)
-    assert set(out) == {"allowed_tools", "settings_path", "env", "claude_only", "skills"} and out["claude_only"] is True
-    assert out["allowed_tools"] == PROFILE and guard.profile("read") == guard.profile("chat") == ["mcp__studio"]
+    assert set(out) == {"allowed_tools", "settings_path", "env", "claude_only", "skills", "system_mode", "tools"}
+    assert out["claude_only"] is True and out["system_mode"] == "append" and out["tools"] == FULL
+    assert out["allowed_tools"] == ALLOWED and guard.profile("read") == guard.profile("chat") == ["mcp__studio"]
     assert out["settings_path"] == run_dir / "studio_settings.json"
     assert set(out["env"]) == {"STUDIO_URL", "STUDIO_ACTOR_TOKEN"} and out["env"]["STUDIO_URL"] == api._cfg.server_url
     claims = studio_guard.claims(out["env"]["STUDIO_ACTOR_TOKEN"])
@@ -192,7 +199,10 @@ def test_guard_stage_gives_a_studio_run_the_profile_the_hook_and_its_material(de
     journal.write_text(json.dumps({"hooks": {"PreToolUse": [backup]}}), encoding="utf-8")
     (run_dir / "guard_ctx.json").write_text("{}", encoding="utf-8")  # whatever became of it: written again
     out = api.guard_stage(chat, "chat", run_dir=run_dir, cwd=cwd, settings=journal)
-    assert out["allowed_tools"] == ["mcp__studio"] and studio_guard.claims(out["env"]["STUDIO_ACTOR_TOKEN"])["mode"] == "chat"
+    assert out["tools"] == list(READ_TOOLS) and out["system_mode"] == "append"  # a chat turn: the read-only tools
+    assert not {"Write", "Edit", "MultiEdit", "NotebookEdit", "Bash", "Task"} & set(out["tools"])
+    assert out["add_dirs"] == [(home / ".claude" / "skills").as_posix()]  # the harness, not all of ~/.claude
+    assert out["allowed_tools"] == READ_TOOLS + ["mcp__studio"] and studio_guard.claims(out["env"]["STUDIO_ACTOR_TOKEN"])["mode"] == "chat"
     assert json.loads(out["settings_path"].read_text(encoding="utf-8"))["hooks"]["PreToolUse"] == [hook, backup]
     assert json.loads(journal.read_text(encoding="utf-8")) == {"hooks": {"PreToolUse": [backup]}}
     ctx = studio_guard.load_ctx(str(run_dir / "guard_ctx.json"))
@@ -265,7 +275,10 @@ def test_the_engine_guards_studio_runs_and_leaves_every_other_run_as_it_was(desk
     engine.advance(turn.id)
     call, run_dir = runner.seen[-1], engine._dir(turn.id)
     assert call.claude_only and call.settings_path == run_dir / "studio_settings.json"
-    assert call.allowed_tools == before[0][2] + ["mcp__studio"] and call.tools == before[0][0]  # no tool is added
+    # a chat turn gets the read-only tools (T3), the user's skills too (T2), and the skill-less flags are gone
+    assert call.tools == READ_TOOLS and set(READ_TOOLS + ["mcp__studio"] + before[0][2]) <= set(call.allowed_tools)
+    assert not {"Write", "Edit", "MultiEdit", "NotebookEdit", "Bash", "Task"} & set(call.tools) and not call.isolate
+    assert call.system_mode == "append"
     assert call.env == {**before[0][4], "STUDIO_URL": api._cfg.server_url, "STUDIO_ACTOR_TOKEN": call.env["STUDIO_ACTOR_TOKEN"]}
     assert studio_guard.claims(call.env["STUDIO_ACTOR_TOKEN"])["run"] == turn.id
     assert studio_guard.load_ctx(str(run_dir / "guard_ctx.json"))["run_id"] == turn.id
@@ -277,8 +290,8 @@ def test_the_engine_guards_studio_runs_and_leaves_every_other_run_as_it_was(desk
     with desk.store.transaction() as tx:
         tx.exec("UPDATE tasks SET run_id = ? WHERE id = ?", (work.id, task["id"]))
     engine.advance(work.id)
-    assert runner.seen[-1].allowed_tools == before[0][2] + PROFILE + ["Skill"] and runner.seen[-1].claude_only
-    assert runner.seen[-1].tools == before[0][0] + ["Skill"] and not runner.seen[-1].isolate  # a task run: user skills
+    assert runner.seen[-1].allowed_tools == ALLOWED + before[0][2] and runner.seen[-1].claude_only
+    assert runner.seen[-1].tools == FULL and not runner.seen[-1].isolate  # a task run: all tools, user skills
 
     # closed side: a callback that cannot tell fails the stage — the run does not go on without its guard
     def broken(run_id, stage, **given):
@@ -326,14 +339,14 @@ def test_a_guarded_task_run_keeps_the_bash_its_relay_gave(desk, tmp_path, monkey
     api.track_run(turn.id, mode="chat", employee_id=desk.w.emp, room_id=desk.dms[desk.w.emp])
     desk.tracked.append(turn.id)
     engine.advance(turn.id)
-    assert runner.seen[-1].tools == outside
+    assert runner.seen[-1].tools == READ_TOOLS and not runner.seen[-1].isolate  # T3: not its relay's own list
 
     task, work = desk.working(), engine.create(shell, "g", repo="game")  # a task run: tasks.run_id is the ledger
     with desk.store.transaction() as tx:
         tx.exec("UPDATE tasks SET run_id = ? WHERE id = ?", (work.id, task["id"]))
     engine.advance(work.id)
     call = runner.seen[-1]
-    assert call.tools == outside + ["Bash", "Skill"] and "Bash" in call.allowed_tools and call.claude_only
+    assert call.tools == FULL and "Bash" in call.allowed_tools and call.claude_only
     args = ClaudeCliRunner(exe="claude").build_args(call, None)
     assert "Bash" in args[args.index("--tools") + 1].split(",")
 
@@ -341,7 +354,7 @@ def test_a_guarded_task_run_keeps_the_bash_its_relay_gave(desk, tmp_path, monkey
     with desk.store.transaction() as tx:
         tx.exec("UPDATE tasks SET run_id = ? WHERE id = ?", (plain.id, task["id"]))
     engine.advance(plain.id)
-    assert "Bash" not in runner.seen[-1].tools and runner.seen[-1].claude_only
+    assert runner.seen[-1].tools == FULL and runner.seen[-1].claude_only  # a task run: all tools whatever its stage lists
 
 
 def test_a_stage_with_the_hook_is_never_started_in_safe_mode(tmp_path):
@@ -552,3 +565,56 @@ def test_an_mcp_entrys_own_token_is_written_to_the_runs_mcp_config_and_the_inher
     assert "--strict-mcp-config" in seen["args"]  # no other MCP config is read: this file is all the run has
     assert seen["path"].name == "mcp.json" and seen["path"].parent.name.startswith("katae-")  # of secrets[] (§10.3)
     assert not seen["path"].exists()  # gone when the CLI process ended
+
+
+def test_a_task_run_gets_every_tool_and_the_default_prompt_in_any_relay(desk, tmp_path, monkeypatch):  # noqa: F811
+    """(a) the quick relay's build stage too: `--tools` and `--allowedTools` are all of FULL_TOOLS; (b) a studio run
+    appends to Claude Code's prompt; (c) a run outside studio keeps its arguments."""
+    engine, relay, runner, _ = engine_setup(tmp_path, monkeypatch)
+    monkeypatch.delenv("KATAE_TOKEN", raising=False)
+    quick = tmp_path / "quick.yaml"
+    quick.write_text("name: q\nworkspace: none\nstages:\n  - {name: build, provider: mock, prompt: role.md, "
+                     "tools: [Read]}\n", encoding="utf-8")
+    cli = ClaudeCliRunner(exe="claude")
+
+    engine.advance(engine.create(quick, "g", repo="game").id)  # outside studio: nothing registered
+    plain = cli.build_args(runner.seen[-1], None)
+    engine.guard_stage = api.guard_stage
+    engine.advance(engine.create(quick, "g", repo="game").id)  # registered, but not in studio's ledger
+    again = cli.build_args(runner.seen[-1], None)
+    for one in (plain, again):  # the session id is new at every run
+        one[one.index("--session-id") + 1] = "-"
+    assert again == plain and "--system-prompt" in plain
+    outside = plain[plain.index("--tools") + 1]  # what the relay's stage gave (the engine adds ToolSearch)
+    assert "Read" in outside.split(",") and "Bash" not in outside and "--append-system-prompt" not in plain
+
+    home = tmp_path / "home"  # engine_setup's: Path.home is already this
+    (home / ".claude" / "skills").mkdir(parents=True)  # exists before the work run, so its absence below means something
+    task, work = desk.working(), engine.create(quick, "g", repo="game")
+    with desk.store.transaction() as tx:
+        tx.exec("UPDATE tasks SET run_id = ? WHERE id = ?", (work.id, task["id"]))
+    engine.advance(work.id)
+    args = cli.build_args(runner.seen[-1], None)
+    # a work run gets no harness folder through --add-dir (it can open write access too; an intended limit)
+    assert (home / ".claude" / "skills").as_posix() not in [a for i, a in enumerate(args) if args[i - 1] == "--add-dir"]
+    assert args[args.index("--tools") + 1].split(",") == FULL and "ToolSearch" in FULL
+    assert set(FULL) <= set(args[args.index("--allowedTools") + 1].split(","))
+    assert "--system-prompt" not in args and "--disable-slash-commands" not in args and "--safe-mode" not in args
+    appended = args[args.index("--append-system-prompt") + 1]
+    assert "Korean" in appended and "A guard judges every command" in appended
+
+    desk.turn(desk.w.emp)
+    turn = engine.create(quick, "g", repo="game")
+    api.track_run(turn.id, mode="chat", employee_id=desk.w.emp, room_id=desk.dms[desk.w.emp])
+    desk.tracked.append(turn.id)
+    engine.advance(turn.id)
+    args = cli.build_args(runner.seen[-1], None)
+    assert "--append-system-prompt" in args and "--system-prompt" not in args
+    chat_tools = args[args.index("--tools") + 1].split(",")
+    assert chat_tools == READ_TOOLS  # a chat turn: read, search, web, Skill, ToolSearch; nothing that writes
+    assert not {"Write", "Edit", "MultiEdit", "NotebookEdit", "Bash", "Task"} & set(chat_tools)
+    assert (home / ".claude" / "skills").as_posix() in [a for i, a in enumerate(args) if args[i - 1] == "--add-dir"]
+    assert Path(args[args.index("--settings") + 1]).name == "studio_settings.json"  # the guard hook stays
+    assert set(READ_TOOLS) <= set(args[args.index("--allowedTools") + 1].split(","))
+    assert "--disable-slash-commands" not in args and "--safe-mode" not in args
+    assert "A guard judges every command" not in args[args.index("--append-system-prompt") + 1]  # no Bash here

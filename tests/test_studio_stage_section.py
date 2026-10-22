@@ -27,7 +27,8 @@ def test_guard_stage_adds_the_build_section_to_a_task_run_only(desk, tmp_path, m
     chat = desk.tracked[-1]
     cwd = tmp_path / "work"
     cwd.mkdir()
-    keys = {"allowed_tools", "settings_path", "env", "claude_only", "skills"}
+    keys = {"allowed_tools", "settings_path", "env", "claude_only", "skills", "system_mode", "tools"}
+    turn_keys = keys  # a chat turn has the read-only tool list (add_dirs only when ~/.claude/skills exists)
     stub = SectionStub(f"{HEAD}\nX")
     monkeypatch.setattr(api, "_effects", stub)
     out = api.guard_stage(task["run_id"], "build", run_dir=tmp_path / "r1", cwd=cwd)
@@ -39,7 +40,7 @@ def test_guard_stage_adds_the_build_section_to_a_task_run_only(desk, tmp_path, m
     assert set(api.guard_stage(task["run_id"], "build", run_dir=tmp_path / "r1", cwd=cwd)) == keys
     stub.give = f"{HEAD}\nX"  # a chat turn is not a task run: not even asked
     stub.asked.clear()
-    assert set(api.guard_stage(chat, "chat", run_dir=tmp_path / "r2", cwd=cwd)) == keys and stub.asked == []
+    assert set(api.guard_stage(chat, "chat", run_dir=tmp_path / "r2", cwd=cwd)) == turn_keys and stub.asked == []
     stub.give = RuntimeError("에디터를 못 읽는다")  # a section that fails is a stage without it
     assert set(api.guard_stage(task["run_id"], "build", run_dir=tmp_path / "r1", cwd=cwd)) == keys
 

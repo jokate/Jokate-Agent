@@ -83,6 +83,11 @@ class StageCall:
     # resume_session instead of re-exploring from scratch
     session_id: str | None = None
     resume_session: str | None = None
+    # claude_cli: None = `--strict-mcp-config`, the run has the servers of mcp_servers only. A list (even an empty
+    # one) = not strict: Claude Code also loads the user's · project's · plugins' · connectors' servers itself,
+    # and these names (not written to the config file) are pre-approved. denied_mcp: servers that did not answer
+    native_mcp: list[str] | None = None
+    denied_mcp: list[str] = field(default_factory=list)
     fresh_prompt: str | None = None  # the full prompt, used if resuming the conversation fails
 
     def emit(self, kind: str, detail: dict) -> None:
@@ -585,8 +590,9 @@ class ClaudeCliRunner:
             "--include-partial-messages",  # thinking/text as it is written -> the dashboard shows what the AI is doing
             "--input-format", "stream-json",  # keeps stdin open so a user note can join the running session
             "--permission-mode", call.permission_mode,
-            "--strict-mcp-config",
         ]
+        if call.native_mcp is None:
+            args.append("--strict-mcp-config")
         if call.result_mode != "text" or call.system_mode != "replace":
             args += ["--json-schema", json.dumps(result_schema(), ensure_ascii=False)]
         if call.resume_session:
@@ -604,10 +610,18 @@ class ClaudeCliRunner:
                      + (DIGEST_RULE if "digest" in call.mcp_servers else "") + call.system]
         else:
             # Moves cwd/git-status out of the system prompt so it caches across working directories.
-            args += ["--append-system-prompt", call.system, "--exclude-dynamic-system-prompt-sections"]
+            system = call.system
+            if call.claude_only:
+                # a studio run keeps Claude Code's default prompt (it states the tools), so only what it lacks is added:
+                # how a guarded shell is judged, how to finish, the digest tool
+                # append mode always attaches --json-schema (see above), so the structured-output finish applies
+                finish = FINISH_SCHEMA
+                system = ("\n".join([SHELL_GUARDED] if "Bash" in (call.tools or []) else []) + "\n" + finish + "\n"
+                          + (DIGEST_RULE if "digest" in call.mcp_servers else "")).strip() + "\n\n" + call.system
+            args += ["--append-system-prompt", system, "--exclude-dynamic-system-prompt-sections"]
         if call.isolate and not call.project:
             # --safe-mode also disables MCP servers and hooks, so only disable skills when either is needed.
-            args += ["--disable-slash-commands"] if (call.mcp_servers or call.settings_path) else ["--safe-mode"]
+            args += ["--disable-slash-commands"] if (call.mcp_servers or call.settings_path or call.native_mcp is not None) else ["--safe-mode"]
         if call.settings_path:
             args += ["--settings", str(call.settings_path)]
         for extra in call.add_dirs:
@@ -620,11 +634,13 @@ class ClaudeCliRunner:
             args += ["--effort", call.effort]
         args += ["--tools", ",".join(call.tools) if call.tools else ""]
         # Headless runs cannot answer permission prompts: pre-approve listed MCP servers and tools.
-        allowed = [f"mcp__{s}" for s in call.mcp_servers] + call.allowed_tools
+        allowed = [f"mcp__{s}" for s in [*call.mcp_servers, *(call.native_mcp or [])]] + call.allowed_tools
         if "Bash" in (call.tools or []):
             allowed += [r for r in READ_ONLY_BASH if r not in allowed]
         if allowed:
             args += ["--allowedTools", ",".join(allowed)]
+        if call.denied_mcp:
+            args += ["--disallowedTools", ",".join(f"mcp__{s}" for s in call.denied_mcp)]
         if mcp_config_path:
             args += ["--mcp-config", str(mcp_config_path)]
         return args

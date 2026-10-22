@@ -25,6 +25,9 @@ log = logging.getLogger(__name__)
 
 SPEND_EVENT, GATE_EVENT = "spend_notice", "gate_passed"
 RESTART_EVENT, REVIEW_EVENT = "restart_notice", "review_filed"
+MCP_NOTICE_EVENT = "mcp_notice"
+UNREAL_NOTICE_EVENT = "unreal_notice"  # a game project without the editor's MCP server (missing) or with it not answering (down)
+CONTINUE_EVENT = "continue_notice"  # a run that ended without a review request was continued once by the server
 EDITOR_NOTICE_EVENT = "editor_notice"  # the editor does not answer; the run goes on (pushed quietly)
 SUMMARY_MAX = 300
 
@@ -65,13 +68,26 @@ def _text(kind: str, detail: dict) -> tuple[str, str] | None:
         why = " ".join(str(detail.get("why") or "").split())[:SUMMARY_MAX]
         return RESTART_EVENT, ("런이 실패해 바뀐 파일은 두고 지난 요약을 실어 새 대화로 다시 시작했습니다" +
                                (f" — {why}" if why else ""))
+    if kind == "mcp":
+        failed = detail.get("failed") if isinstance(detail.get("failed"), dict) else {}
+        what = "; ".join(f"{name}: {' '.join(str(why).split())[:SUMMARY_MAX]}" for name, why in failed.items())
+        return (MCP_NOTICE_EVENT, f"MCP 연결 안 됨 — {what}. 이 서버 없이 진행합니다") if failed else None
+    if kind == "unreal":
+        if detail.get("state") == "down":
+            why = " ".join(str(detail.get("why") or "").split())[:SUMMARY_MAX]
+            return UNREAL_NOTICE_EVENT, ("언리얼 MCP는 설정돼 있지만 연결되지 않았습니다(에디터가 꺼져 있을 수 있습니다)" +
+                                         (f" — {why}" if why else "") + ". 에디터를 켜면 다음 런부터 씁니다")
+        return UNREAL_NOTICE_EVENT, ("언리얼 MCP(unreal)가 설정에 없어 에디터 도구 없이 진행합니다 — "
+                                     "~/.claude.json이나 플러그인에 unreal 서버를 추가해 주세요")
+    if kind == "continue":
+        return CONTINUE_EVENT, "검수 요청 없이 끝나 서버가 같은 런을 한 번 이어, 남은 일을 마치고 검수를 요청하게 했습니다"
     if kind == "review":
         return REVIEW_EVENT, "검수 요청 없이 끝나 서버가 검수를 대신 올렸습니다"
     return None
 
 
 def tell(run_id: str, kind: str, detail: dict) -> None:
-    """`engine.run_notice`: write the notice of `kind` ('spend' | 'gate' | 'editor' | 'restart' | 'review') into the run's room."""
+    """`engine.run_notice`: write the notice of `kind` ('spend' | 'gate' | 'editor' | 'restart' | 'review' | 'mcp' | 'unreal' | 'continue') into the run's room."""
     try:
         said = _text(kind, detail)
         found = _head(run_id) if said else None

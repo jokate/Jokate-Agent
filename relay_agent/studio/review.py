@@ -104,6 +104,24 @@ def run_view(engine: Any, run_id: str | None) -> dict | None:
     return None if run is None else {"id": run.id, "status": run.status, "changes_status": run.changes_status}
 
 
+def capabilities(engine: Any, run_id: str | None) -> dict | None:
+    """`capabilities` of `GET /studio/tasks/{id}`: what the run's latest stage really got — the last
+    `stage_capabilities` event as `{stage, tools, allowed_tools, mcp, skills, at}`. None for a run with no such
+    event (not a studio run, no stage started yet) or one the engine cannot read."""
+    if not run_id:
+        return None
+    try:
+        found = [e for e in engine.history.events(run_id) if e["kind"] == "stage_capabilities"]
+    except Exception:  # noqa: BLE001
+        return None
+    if not found:
+        return None
+    last = found[-1]
+    detail = last["detail"] or {}
+    return {"stage": last["stage"], "tools": detail.get("tools") or [], "allowed_tools": detail.get("allowed_tools") or [],
+            "mcp": detail.get("mcp") or [], "skills": detail.get("skills") or [], "at": last.get("ts") or last.get("at")}
+
+
 def run_cost(engine: Any, run_id: str | None) -> float:
     """What that run has cost so far in USD (`RunState.cost_usd`), for `GET /studio/stats` (§6.4). 0.0 when
     the engine cannot read the run."""

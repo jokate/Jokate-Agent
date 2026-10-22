@@ -19,11 +19,24 @@ import shutil
 import socket
 import subprocess
 import threading
+from datetime import datetime, timezone
 from urllib.parse import urlparse
 
 TIMEOUT_S = 20.0
 INITIALIZE = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
     "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "katae-mcp-check", "version": "1"}}}
+
+
+LAST: dict[str, dict] = {}  # server name -> {ok, why, at}: what the last check of it found (memory only)
+
+
+def record(name: str, why: str | None) -> None:
+    """Keep the result of a check (`why` None = it answered) for `GET /studio/mcp-servers`."""
+    LAST[name] = {"ok": why is None, "why": why, "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+
+
+def last() -> dict[str, dict]:
+    return dict(LAST)
 
 
 def probe(config: dict, timeout_s: float = TIMEOUT_S) -> str | None:

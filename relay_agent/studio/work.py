@@ -30,8 +30,9 @@ each `stage_skipped` (`skipped`), and step 3, the table (`table`): T4 by the sys
 failed run that goes on by itself. `recover` is the five steps of the server's start. A run that waits for
 approval is filed by `runs.RunSink` when `advance` lets go of it; the table asks the same code
 (`runs.file_stop`), which files nothing for a task that is blocked by then — so no stop is filed twice.
-A task's run is not narrowed with `mcp_only`: the project's own MCP servers are part of the work. In a folder
-without a project context `studio` and the registry servers the employee picked are attached all the same (§9.5).
+A task's run is not narrowed unless employee.yaml `mcp` names servers (`mcp_scope` 'only', `mcp_only`); with none
+it is 'all': Claude Code's own servers (user · project · plugin · connector) plus `studio`. In a folder without a
+project context `studio` and the registry servers the employee picked are attached all the same (§9.5).
 """
 
 from __future__ import annotations
@@ -49,12 +50,12 @@ import yaml
 
 from .. import projctx
 from ..config import ROOT
-from ..pipeline import RelaySpec, cap_effort, cap_model
+from ..pipeline import RelaySpec, cap_effort, cap_model, native_live_mcp
 from . import campaigns, cutoff, employees, gate, harness_root, plugins, review, runs
 from . import editor as editor_control
 from . import machine as machine_info
 from .importer import find_uproject
-from .inbox import SYSTEM_ROOM, InboxError
+from .inbox import ANSWERS, SYSTEM_ROOM, InboxError
 from .store import StudioStore
 from .tasks import PRE_EFFECT, STATE_INBOX, SYSTEM, Effects, TransitionError
 
@@ -85,6 +86,7 @@ SIMILAR = 0.7                      # how alike two errors are, 0..1, for 'the sa
 RESTARTED = "서버 재시작"   # how the error of a run `RelayEngine.recover_interrupted` closed begins
 FOLDER_BUSY = "다른 실행("  # in the error of a run whose folder another run was editing (`pipeline.py` _advance)
 AGAIN = "끊긴 런을 다시 잇는다"
+AUTO_CONTINUE = "검수 요청 없이 끝나 서버가 한 번 이어 간다"  # the `run` row (event 'auto_continue') of a run the server continued
 RESTART_WHY = "런이 실패해 새 대화로 다시 시작한다"
 RESTARTED_AGAIN = "자동으로 {n}번 다시 시작했지만 또 실패했다"
 SKIPPED = "stage_skipped"   # the engine's event of an `optional` stage no AI could run (§4.7)
@@ -327,8 +329,11 @@ def holds_server_code(*paths: Any, root: Path | str | None = None) -> bool:
 def uses_editor(run, repo_spec=None) -> bool:
     """Does that run work through the editor (M-7)? `EDITOR_MCP` is among the servers picked for the run
     (`run.mcp`), the repository's own (`repo_spec.mcp`) or those of a stage the relay has still to run
-    (`stages[run.index:]`). A relay file that cannot be read adds nothing."""
+    (`stages[run.index:]`). A relay file that cannot be read adds nothing. A run of `mcp_scope` 'all' also has the
+    user's · plugins' editor server Claude Code loads itself (`pipeline.native_live_mcp`)."""
     names = [*(getattr(run, "mcp", None) or []), *(getattr(repo_spec, "mcp", None) or [])]
+    if getattr(run, "mcp_scope", None) == "all":
+        names += native_live_mcp(None)
     try:
         spec, _ = RelaySpec.load(Path(run.relay))
         for stage in spec.stages[int(getattr(run, "index", 0) or 0):]:
@@ -433,6 +438,9 @@ class WorkEffects(Effects):
             run = self.engine.create(
                 path, goal, None if repo else folder, session_id=session_id, repo=repo, auto_apply=False,
                 stage_models=slots, approval="ai", mcp=[*settings["mcp"], employees.STUDIO_MCP],
+                # employee.yaml `mcp` empty = every server Claude Code has; names = narrowed to them (+ studio)
+                mcp_only=[*settings["mcp"], employees.STUDIO_MCP] if settings["mcp"] else None,
+                mcp_scope="only" if settings["mcp"] else "all",
                 model_cap=settings["cap"]["model"], effort_cap=settings["cap"]["effort"], needs_writes=True,
                 pin_copy=holds_server_code(project["path"], folder, root=self.server_root), routed=routed)
         except ValueError as e:
@@ -856,6 +864,38 @@ def _release_editor(engine, inbox, out: dict) -> None:
             log.exception("studio: 재시작 복구가 에디터 무응답 질문 %s 을 닫지 못했다", item["id"])
 
 
+def _release_no_review(engine, inbox, out: dict) -> None:
+    """Step 0n: a `no_review_request` question still open from before is answered by the server — a studio run is
+    carried on for, not asked about — with the first continuation (the text reaches the run in step 2). A run the
+    server already continued once keeps its question (closing it would send the task back to work with a text
+    that clashes with the review): it is only logged. Only the questions of a task whose run is a studio run.
+    `out["no_review_released"]` gets the ids closed. One failing item does not keep the others."""
+    from . import notice
+
+    released = out.setdefault("no_review_released", [])
+    if not getattr(engine, "studio_auto_review", True):
+        return
+    for item in inbox.store.list_inbox(status="pending"):
+        try:
+            payload = item["payload"] or {}
+            if item["kind"] != "question" or payload.get("reason") != "no_review_request" or not item["task_id"]:
+                continue
+            task = inbox.store.get_task(item["task_id"])
+            run_id = task["run_id"] if task else None
+            if not run_id or not (notice.mode(run_id) or _saved_mode(engine, run_id)):
+                continue
+            if continued(inbox, task["id"], run_id):
+                log.info("studio: 작업 %s 의 런 %s 은 이미 한 번 이어 줬다 — 검수 요청 없음 질문 %s 은 그대로 둔다",
+                         task["id"], run_id, item["id"])
+                continue
+            inbox.decide(item["id"], "answer", comment=AUTO_CONTINUE, via="app")
+            inbox.machine.record(task["id"], SYSTEM, "run", AUTO_CONTINUE, detail=dict(run_id=run_id, event="auto_continue"))
+            released.append(item["id"])
+            _tell(run_id, "continue", {})
+        except Exception:  # noqa: BLE001
+            log.exception("studio: 재시작 복구가 검수 요청 없음 질문 %s 을 처리하지 못했다", item["id"])
+
+
 def editor_lost(engine, inbox, task_id: str, run_id: str) -> bool:
     """§4.5 '에디터 무응답을 감지': the editor stopped answering while that run was at work — the server cuts
     the run and writes a `run` row (`{run_id, event}`). True when the run was cut.
@@ -956,7 +996,8 @@ def table(engine, inbox, task: dict | None, run, *, owner_stop: bool = False,
     Only a task that is working and out of the line has anything done: in blocked · review the T4 or T6 has been
     done already, and a working task in the line was decided about before its run stopped. `owner_stop`: the
     owner's `stop` ended the run — `run_cancelled` whatever the run says. `awaiting_approval` -> the item of the
-    stop (`runs.file_stop`); `done` -> `no_review_request`; `cancelled` -> `run_cancelled`; `failed` -> the line
+    stop (`runs.file_stop`); `done` -> a studio run is continued once by the server (`_continue`: the same run, told to finish and file its
+    review), then its review is filed for it (`wrap_review`); any other run -> `no_review_request`; `cancelled` -> `run_cancelled`; `failed` -> the line
     again when it `resumes`, else `run_failed` with the run's error. `pending` · `running`: nothing.
     `error`: the thread of the slot came back with an exception, not from `advance` — the run was not advanced
     and is as it was. A `failed` run is then not put back in the line even when it `resumes` (it would come
@@ -976,7 +1017,12 @@ def table(engine, inbox, task: dict | None, run, *, owner_stop: bool = False,
         return (FILED, item) if item is not None else None
     if status == "done":
         owners = wrapped_up(inbox, task["id"])
-        if owners or (getattr(engine, "studio_auto_review", True) and studio_run(run.id)):  # a studio run's review is filed for it, not asked about
+        auto = getattr(engine, "studio_auto_review", True) and studio_run(run.id)  # a studio run is carried on for, not asked about
+        if not owners and auto and not continued(inbox, task["id"], run.id):
+            again = _continue(inbox, task, run)  # the first time: the same run is told to finish and file its review
+            if again is not None:
+                return again
+        if owners or auto:  # told once already (or the owner said wrap up): the server files the review
             item = wrap_review(engine, inbox, task, run, "런이 검수 요청 없이 끝났다")
             if item is not None:
                 if not owners:
@@ -1025,6 +1071,29 @@ def auto_restarts(inbox, task_id: str) -> int:
         elif event["kind"] == "queued" and (event["detail"] or {}).get("restart"):
             count += 1
     return count
+
+
+def continued(inbox, task_id: str, run_id: str) -> bool:
+    """Did the server already continue that run by itself once (a `run` row with `detail.event == 'auto_continue'`)?"""
+    return any(e["kind"] == "run" and (e["detail"] or {}).get("event") == "auto_continue"
+               and (e["detail"] or {}).get("run_id") == run_id for e in inbox.store.list_task_events(task_id))
+
+
+def _continue(inbox, task: dict, run) -> tuple[str, dict] | None:
+    """A studio run ended without `task_request_review`, the first time: the server opens the same run again with
+    the instruction to finish what is left and file its review (no question, no owner), writes the `run` row that
+    counts this, puts the task back in the line and tells the room. None when the run cannot be opened (the
+    log says why): the caller files the review instead."""
+    try:
+        if not inbox.hooks.interject(run.id, ANSWERS["no_review_request"]):
+            return None
+        inbox.machine.record(task["id"], SYSTEM, "run", AUTO_CONTINUE, detail=dict(run_id=run.id, event="auto_continue"))
+        outcome = inbox.machine.requeue(task["id"], SYSTEM, reason=AUTO_CONTINUE)
+    except (TransitionError, InboxError, OSError, ValueError) as e:
+        log.info("studio: 런 %s 을 스스로 이어 가지 못했다: %s", run.id, e)
+        return None
+    _tell(run.id, "continue", {})
+    return REQUEUED, outcome.task
 
 
 def _tell(run_id: str, kind: str, detail: dict) -> None:
@@ -1300,6 +1369,7 @@ def recover(engine, inbox_factory: Callable[[], Any], kick: Callable[[], Any] | 
     if inbox is not None:
         step("0", lambda: _release_budget(engine, inbox, out))
         step("0e", lambda: _release_editor(engine, inbox, out))
+        step("0n", lambda: _release_no_review(engine, inbox, out))
         step("1", lambda: again.extend(_stopped_runs(engine, inbox, out)))
         step("2", lambda: out["delivered"].extend(deliver(inbox)))
         for task_id in again:
