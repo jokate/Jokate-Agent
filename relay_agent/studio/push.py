@@ -47,7 +47,7 @@ from typing import Any, Callable
 
 from ..config import ROOT
 from ..notify import NOTIFY_KINDS, Fanout
-from .inbox import KIND_LABEL, NOTIFY_OK
+from .inbox import KIND_LABEL, NOTIFY_OK, SYSTEM_ROOM
 
 try:  # not named in pyproject.toml: they come with `mcp`. Without them only this sender is off (load_key)
     import httpx
@@ -84,6 +84,7 @@ NOTICE_EVENTS = {  # `meta.event` of the notices of §5.9 that are pushed at onc
     "usage_high": "사용량 한도",  # V-4: studio/usage.py
     "invariant_broken": "불변식 깨짐", "group_exchange_limit": "직원 대화 멈춤",  # the second: a group room held (§4.6)
 }
+QUIET_NOTICES = {"spend_notice": "예산 안내", "editor_notice": "에디터 안내", "restart_notice": "자동 재시작 안내"}  # `meta.event` of the notices pushed quietly (studio/notice.py)
 DAILY_REPORT = "daily_report"  # `meta.event` of the daily report (S-13): the one digest
 DAILY_TITLE, EMPLOYEE_TITLE, TASK_TITLE = "일일 보고", "직원", "작업"
 ATTACHED, STARTED, PROGRESS = "첨부", "작업 시작", "진행 상황"
@@ -93,6 +94,8 @@ REMIND_EVERY = 60.0    # seconds between two looks at the waiting items (`Pusher
 REMIND_NOTE = "다시 알림"
 
 SENT, DEAD, FAILED = "sent", "dead", "failed"  # what Sender.send answers
+PUSH_OFF = "push_off"  # `meta.event` of the line the system room gets when the push is off (`Pusher.announce_off`)
+TEST_TITLE, TEST_LINE = "시험 알림", "카태 스튜디오 시험 알림입니다"  # `Pusher.test`
 
 
 def key_file(path: str | Path | None) -> Path | None:
@@ -110,37 +113,48 @@ def key_file(path: str | Path | None) -> Path | None:
     return file if file.is_absolute() else ROOT / file
 
 
-def load_key(path: str | Path | None) -> dict | None:
-    """The service account of that key file — `project_id`, `client_email`, `private_key`, `token_uri` — or None:
-    no path, no such file, not readable, not JSON, a field missing, or a key that does not sign. One warning says
-    which (never the key's text) and nothing is raised: without a key the push is off, that is all. A relative
-    path is taken from this repository's folder (`key_file`). No other place is looked in."""
+NO_KEY, UNREADABLE = "no_key", "unreadable"  # why the push is off (`key_state`)
+
+
+def key_state(path: str | Path | None, *, warn: bool = True) -> tuple[dict | None, str, str]:
+    """`(key, code, detail)` of that key file: the service account — `project_id`, `client_email`, `private_key`,
+    `token_uri` — with `code` and `detail` empty, or no key with the reason: `no_key` (no path) or `unreadable`
+    (no httpx · pyjwt, no such file, not JSON, a field missing, or a key that does not sign). `detail` is one line
+    that says which, in the exception's kind or the missing field and never the path or the key's text. One
+    warning says which too (that one has the path; `warn=False` for a second look at the same file) and nothing is raised: without a key the push is off."""
+    warning = log.warning if warn else (lambda *args: None)
     file = key_file(path)
     if file is None:
-        return None
+        return None, NO_KEY, "FCM 키 경로가 비어 있습니다"
     if httpx is None or jwt is None:
-        log.warning("studio: httpx · pyjwt 가 없어 푸시를 끕니다")
-        return None
+        warning("studio: httpx · pyjwt 가 없어 푸시를 끕니다")
+        return None, UNREADABLE, "httpx · pyjwt 가 없습니다"
     try:
         data = json.loads(file.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError) as e:
-        log.warning("studio: FCM 키 파일을 읽지 못해 푸시를 끕니다 — %s (%s)", file, type(e).__name__)
-        return None
+        warning("studio: FCM 키 파일을 읽지 못해 푸시를 끕니다 — %s (%s)", file, type(e).__name__)
+        return None, UNREADABLE, f"FCM 키 파일을 읽지 못했습니다 ({type(e).__name__})"
     if not isinstance(data, dict):
         data = {}
     missing = [name for name in KEY_FIELDS if not isinstance(data.get(name), str) or not data[name].strip()]
     if missing:
-        log.warning("studio: FCM 키 파일에 %s 가 없어 푸시를 끕니다 — %s", " · ".join(missing), file)
-        return None
+        warning("studio: FCM 키 파일에 %s 가 없어 푸시를 끕니다 — %s", " · ".join(missing), file)
+        return None, UNREADABLE, f"FCM 키 파일에 {' · '.join(missing)} 가 없습니다"
     key = {name: data[name] for name in KEY_FIELDS}
     uri = data.get("token_uri")
     key["token_uri"] = uri.strip() if isinstance(uri, str) and uri.strip() else TOKEN_URI
     try:
         jwt.encode({"iss": key["client_email"]}, key["private_key"], algorithm="RS256")
     except Exception as e:  # noqa: BLE001 - whatever the crypto library says of a key it cannot use
-        log.warning("studio: FCM 키로 서명할 수 없어 푸시를 끕니다 — %s (%s)", file, type(e).__name__)
-        return None
-    return key
+        warning("studio: FCM 키로 서명할 수 없어 푸시를 끕니다 — %s (%s)", file, type(e).__name__)
+        return None, UNREADABLE, f"FCM 키로 서명할 수 없습니다 ({type(e).__name__})"
+    return key, "", ""
+
+
+def load_key(path: str | Path | None) -> dict | None:
+    """The service account of that key file, or None while the push is off (`key_state` says why). A relative
+    path is taken from this repository's folder (`key_file`). No other place is looked in."""
+    return key_state(path)[0]
 
 
 def _json(response) -> dict:
@@ -302,9 +316,11 @@ def _of_message(data: dict, store) -> Told | None:
         return DIGEST, DAILY_TITLE, line, room_link
     author = message.get("author_kind")
     if author == "system":
-        if name not in NOTICE_EVENTS:
+        if name not in NOTICE_EVENTS and name not in QUIET_NOTICES:
             return None
         link = {"type": "task", "id": meta["task_id"]} if meta.get("task_id") else room_link
+        if name in QUIET_NOTICES:  # a spend notice informs, it does not ask: a quiet push
+            return QUIET, QUIET_NOTICES[name], line, link
         return URGENT, NOTICE_EVENTS[name], line, link
     if author != "employee":
         return None  # the owner's own words
@@ -422,7 +438,15 @@ class Sender:
 
     def send(self, fcm_token: str, title: str, line: str = "", link: dict | None = None,
              grade: str = URGENT) -> str:
-        """Send one push to one device: `sent`, `dead` (FCM says that token is gone: the errorCode `UNREGISTERED`,
+        """The result of `deliver` alone: `sent`, `dead` or `failed`."""
+        return self.deliver(fcm_token, title, line, link, grade)[0]
+
+    def deliver(self, fcm_token: str, title: str, line: str = "", link: dict | None = None,
+                grade: str = URGENT) -> tuple[str, str]:
+        """`(result, reason)`; the reason is "" for `sent`, `UNREGISTERED` for `dead`, and for `failed` what FCM or
+        the network said last (`HTTP 400 INVALID_ARGUMENT`, `ConnectError`, no access token).
+
+        Send one push to one device: `sent`, `dead` (FCM says that token is gone: the errorCode `UNREGISTERED`,
         which comes with a 404 — not tried again) or `failed`. 429 · 5xx · a network error are tried again, and a
         401 after the access token was dropped: three tries in all. Any other 4xx is `failed` at once and says
         nothing about the token — a 400 may be this message's fault, and a 404 without that errorCode may be the
@@ -452,7 +476,7 @@ class Sender:
             wait = WAITS[min(attempt, len(WAITS) - 1)]
             access = self.access_token()
             if access is None:
-                return FAILED  # asked by the same rule already, and said why
+                return FAILED, "액세스 토큰 없음"  # asked by the same rule already, and said why
             try:
                 response = httpx.post(url, headers={"Authorization": f"Bearer {access}"},
                                       json={"message": message}, timeout=TIMEOUT)
@@ -461,10 +485,10 @@ class Sender:
                 continue
             code = response.status_code
             if code == 200:
-                return SENT
+                return SENT, ""
             reason = _error_code(response)
             if reason == "UNREGISTERED":
-                return DEAD
+                return DEAD, reason
             said = f"HTTP {code} {reason}".strip()
             if code == 401:
                 self._drop(access)
@@ -473,7 +497,7 @@ class Sender:
             else:
                 break
         log.warning("studio: 푸시를 보내지 못했습니다 — %s", said)
-        return FAILED
+        return FAILED, said
 
 
 class Pusher:
@@ -511,6 +535,7 @@ class Pusher:
         self._lock = threading.Lock()
         self._path: str | None = None        # the path `_sender` was made from; None = not looked at yet
         self._sender: Sender | None = None
+        self._why: tuple[str, str] = (NO_KEY, "")  # why `_sender` is None: (code, detail) of `key_state`
         self._jobs: queue.Queue = queue.Queue(maxsize=QUEUE_MAX)
         self._worker: threading.Thread | None = None
 
@@ -522,9 +547,71 @@ class Pusher:
             path = ""
         with self._lock:
             if path != self._path:
-                key = load_key(path) if path else None
+                key, code, detail = load_key(path) if path else None, "", ""
+                if key is None:  # `load_key` warned already: the second look only says why
+                    _, code, detail = key_state(path, warn=False)
+                    if not code:
+                        code, detail = UNREADABLE, "FCM 키를 쓸 수 없습니다"
                 self._path, self._sender = path, (self.make_sender(key) if key is not None else None)
+                self._why = (code, detail)
             return self._sender
+
+    def status(self) -> dict:
+        """`{on, reason, detail}`: whether the push is on, and when it is off why (`no_key` · `unreadable`)."""
+        sender = self.ready()
+        code, detail = self._why
+        return {"on": sender is not None, "reason": "" if sender is not None else code,
+                "detail": "" if sender is not None else detail}
+
+    def test(self, device: dict) -> dict:
+        """A test push to that device row (`POST /studio/devices/{id}/test_push`): `{result, reason, detail}` with
+        the result `sent` · `dead` (the token is cleared) · `failed` (the reason is what FCM said), `off` (the push
+        is off: the reason is `no_key` · `unreadable`) or `no_token` (the device has none). Nothing raises for a
+        push that did not go."""
+        state = self.status()
+        if not state["on"]:
+            return {"result": "off", "reason": state["reason"], "detail": state["detail"]}
+        token = device.get("fcm_token")
+        if not token:
+            return {"result": "no_token", "reason": "", "detail": "이 기기에는 푸시 토큰이 없습니다"}
+        result, reason = self.ready().deliver(token, TEST_TITLE, TEST_LINE, grade=URGENT)
+        if result == DEAD:
+            store = self._store()
+            if store is not None:
+                self._clear(store, device["id"], token)
+        return {"result": result, "reason": reason, "detail": ""}
+
+    def announce_off(self, open_store: Callable[[], Any] | None = None) -> dict | None:
+        """At the server's start: one line in the system room that says why the push is off — the message, or None
+        (on · no store · the newest `push_off` line of the room says the same · it failed). No path is in it.
+        `open_store` opens the studio store when the inbox is not there yet (the server's start comes first)."""
+        try:
+            state = self.status()
+            store = open_store() if open_store is not None else self._store()
+            if state["on"] or store is None:
+                return None
+            told, before = None, None
+            while told is None:
+                rows = store.list_messages(SYSTEM_ROOM, before_id=before, limit=200)
+                for row in reversed(rows):
+                    meta = row["meta"] or {}
+                    if meta.get("event") == PUSH_OFF:
+                        told = meta
+                        break
+                if told is not None or len(rows) < 200:
+                    break
+                before = rows[0]["id"]
+            if told is not None and (told.get("reason"), told.get("detail")) == (state["reason"], state["detail"]):
+                return None
+            meta = {"event": PUSH_OFF, "reason": state["reason"], "detail": state["detail"]}
+            with store.transaction() as tx:
+                message = store.create_message(SYSTEM_ROOM, "system", body=f"푸시가 꺼져 있습니다 — {state['detail']}",
+                                               meta=meta, tx=tx)
+                store.emit(tx, "message.created", {"message": message}, room_id=SYSTEM_ROOM)
+            return message
+        except Exception:  # noqa: BLE001 - a notice that could not be written must not stop the start
+            log.exception("studio: 푸시가 꺼진 이유를 알리지 못했습니다")
+            return None
 
     def _store(self):
         return getattr(self.inbox_factory(), "store", None)
@@ -757,6 +844,7 @@ def attach(engine, inbox_factory: Callable[[], Any], key_path: Callable[[], str 
 
     pusher = Pusher(inbox_factory, key_path, remind_after=remind_after,
                     is_turn=lambda run_id: api.tracked_run(run_id) is not None)
+    api.use_pusher(pusher)  # the test push of a device asks it
     engine.notifier = Fanout(engine.notifier, pusher)
     api.on_commit(pusher.committed)
     return pusher

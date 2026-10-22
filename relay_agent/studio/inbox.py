@@ -115,10 +115,11 @@ SCOPES = ("run", "stage")
 CHECK_STATUS = ("verified_auto", "verified_manual", "unverified")
 EVIDENCE_KINDS = ("screenshot", "log", "file", "url")
 QUESTION_OPTIONS = {  # reason -> the options the server puts in; None = the employee's own (provisional)
-    "asked": None, "run_failed": ("retry", "wrap_up"), "run_cancelled": ("retry", "wrap_up"),
+    "asked": None, "run_failed": ("retry", "wrap_up", "restart"), "run_cancelled": ("retry", "wrap_up", "restart"),
     "no_review_request": (), "exchange_limit": ("continue", "wrap_up"), "editor_unresponsive": ("retry",),
 }
-OPTION_LABEL = {"retry": "다시 시도", "wrap_up": "지금까지 한 것으로 검수 요청", "continue": "다시 세고 계속"}
+OPTION_LABEL = {"retry": "다시 시도", "wrap_up": "지금까지 한 것으로 검수 요청", "continue": "다시 세고 계속",
+                "restart": "새로 시작 — 지금까지의 변경은 두고 새 대화로"}
 
 # --- decision texts (§5.6) --------------------------------------------------------------------------------
 KIND_LABEL = {"task_proposal": "작업 제안", "hire": "채용", "design_approval": "설계 승인",
@@ -130,9 +131,12 @@ DECISION_LABEL = {"approve": "승인", "reject": "반려", "revise": "수정 요
                   "skip": "넘기기"}
 ANSWERS = {  # question: by reason (`asked`, `no_review_request`) or by the option the owner picked
     "asked": "질문의 답이다: `{label}`.",
-    "retry": "멈췄던 자리에서 이어서 하라.",
+    "retry": "멈췄던 자리에서 이어서 하라. 앞선 '검수 요청' 지시는 거둔다 — 새 일을 막던 말은 더는 따르지 않고 "
+             "남은 일을 이어서 한다.",
     "continue": "왕복 수를 다시 셌다. 이어서 하라.",
     "no_review_request": "검수 요청 없이 끝났다. 남은 일을 마치고 `task_request_review` 를 올려라.",
+    "restart": "지난 런은 닫고 새 대화로 시작한다. 변경은 되돌리지 않았다. 지난 요약과 코멘트를 읽고 남은 일을 "
+               "이어 하라.",
     "wrap_up": "새 일을 벌이지 말고 지금까지 한 것으로 `task_request_review` 를 올려라. 검증하지 못한 완료 기준은 "
                "`unverified` 로 적어라.",
 }
@@ -212,6 +216,15 @@ def _options_ok(options: Any, *, detail: bool, minimum: int) -> bool:
             return False
         ids.append(option["id"])
     return len(set(ids)) == len(ids)
+
+
+def _attachments_ok(value: Any) -> bool:
+    """T4: `payload.attachments` of a structure_choice — the structure document(s) posted to the room, each
+    `{id, name, size}`: id (the room message's id) and name are texts, size an integer."""
+    return isinstance(value, list) and all(
+        isinstance(a, dict) and _text(a.get("id")) and _text(a.get("name"))
+        and isinstance(a.get("size"), int) and not isinstance(a.get("size"), bool) and a["size"] >= 0
+        for a in value)
 
 
 def _hire_problems(payload: dict) -> list[str]:
@@ -319,13 +332,16 @@ def validate_payload(kind: str, payload: Any) -> list[str]:
         bad += [key for key in _plan_problems(payload) if key not in bad]
     elif kind == "structure_choice":
         options = payload.get("options")
-        flag("options", not _options_ok(options, detail=True, minimum=2))
+        flag("options", not _options_ok(options, detail=True, minimum=1))
+        flag("attachments", "attachments" in payload and not _attachments_ok(payload["attachments"]))
         if "options" not in bad and payload.get("recommended") is not None:
             flag("recommended", payload["recommended"] not in [option["id"] for option in options])
     elif kind == "question":
         flag("reason", not _one_of(payload.get("reason"), QUESTION_OPTIONS))
         if payload.get("options") is not None:
             flag("options", not _options_ok(payload["options"], detail=False, minimum=0))
+        if "options" not in bad and payload.get("recommended") is not None:
+            flag("recommended", payload["recommended"] not in [o["id"] for o in payload.get("options") or []])
     elif kind == "budget":
         flag("scope", not _one_of(payload.get("scope"), SCOPES))
     elif kind == "final_review":
@@ -967,10 +983,13 @@ class Inbox:
             # The predecessors (§3.11) are written in the transaction of T1: refused -> nothing of it stays.
             # What follows the decision runs as `committed`, before Effects.after resumes the run (§5.5:
             # interject -> approve -> advance) — and so also when Effects.after then raises (§4.5).
+            restart = (kind == "question" and data.get("option_id") == "restart"
+                       and payload.get("reason") in ("run_failed", "run_cancelled"))
+            extra = {"restart": True} if restart else {}  # §4.3 T5: a new run, the old one closed unreverted
             outcome = self.machine.transition(
                 task_id, TARGET[(kind, decision)], OWNER, inbox_id=item["id"], decision=decision, comment=comment,
                 data=stored, edits=edits or None, depends_on=depends_on,
-                committed=lambda out: self._follow(out.inbox))
+                committed=lambda out: self._follow(out.inbox), **extra)
         except TransitionError as e:
             fresh = self.store.get_inbox_item(item["id"])
             if fresh is not None and fresh["status"] != "pending":

@@ -324,6 +324,22 @@ DECIDE = [  # kind, payload (None = PAYLOAD[kind]), decision, comment, data, a p
 ]
 
 
+def test_retry_lifts_the_wrap_up_order_and_wrap_up_alone_stays_as_it_was(world):
+    """A note stays for every later stage (`notes.jsonl`), so the retry text itself must say it lifts the wrap-up."""
+    wrap, retry = inbox.ANSWERS["wrap_up"], inbox.ANSWERS["retry"]
+    assert retry.startswith("멈췄던 자리에서 이어서 하라.") and "'검수 요청' 지시는 거둔다" in retry and "이어서 한다" in retry
+    assert "거둔다" not in wrap and wrap.startswith("새 일을 벌이지 말고") and "task_request_review" in wrap
+    assert inbox.SENTENCES[("budget", "reject")] == "예산을 더 쓰지 않는다. " + wrap
+    task = world.task()
+    first = world.file("question", task, {"reason": "run_cancelled", "body": "런이 끊겼다"})
+    ok(world.decide(first, "answer", data={"option_id": "wrap_up"}))
+    second = world.file("question", task, {"reason": "run_failed", "body": "런이 실패했다", "error": "boom"})
+    ok(world.decide(second, "answer", data={"option_id": "retry"}))
+    (_, _, wrap_text), (_, _, retry_text) = world.hk.fed()  # in the order they were given: the retry comes later
+    assert wrap in wrap_text and "거둔다" not in wrap_text
+    assert retry in retry_text and "새 일을 막던 말은 더는 따르지 않고" in retry_text
+
+
 @pytest.mark.parametrize("kind, payload, decision, comment, data, piece", DECIDE)
 def test_blocking_item_is_filed_decided_and_fed_to_the_run(world, kind, payload, decision, comment, data, piece):
     task = world.task()
@@ -408,7 +424,8 @@ def test_who_files_what(world):
 
 BROKEN = [  # kind, payload, the keys named
     ("design_approval", {"stage": "design"}, ["stop_reason"]),
-    ("structure_choice", {"question": "구조?", "options": OPTIONS[:1]}, ["options"]),
+    ("structure_choice", {"question": "구조?", "options": []}, ["options"]),
+    ("structure_choice", {**PAYLOAD["structure_choice"], "attachments": [{"id": "5", "name": "a.html"}]}, ["attachments"]),
     ("structure_choice", {"question": "구조?", "options": [OPTIONS[0], OPTIONS[0]]}, ["options"]),
     ("structure_choice", {**PAYLOAD["structure_choice"], "recommended": "z"}, ["recommended"]),
     ("question", {"reason": "bored", "body": " "}, ["body", "reason"]),

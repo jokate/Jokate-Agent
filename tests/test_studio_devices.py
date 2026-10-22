@@ -389,6 +389,53 @@ def test_revoking_refuses_the_token_and_closes_the_devices_stream(world):
     refused(world.owner.post("/studio/devices/dev_none/revoke"), 404, "not_found")
 
 
+# --- 시험 알림 (T5, POST /studio/devices/{id}/test_push) -------------------------------------------------------
+class FakePusher:
+    def __init__(self, answer):
+        self.answer, self.asked = answer, []
+
+    def test(self, row):
+        self.asked.append(row["id"])
+        return dict(self.answer)
+
+
+def test_test_push_answers_with_what_the_pusher_says(world, monkeypatch):
+    device, bearer = world.phone()
+    fake = FakePusher({"result": "failed", "reason": "HTTP 400 INVALID_ARGUMENT", "detail": ""})
+    monkeypatch.setattr(api, "_pusher", fake)
+    for client, headers in ((world.owner, {}), (world.remote, bearer)):  # the PC's shared token, the device's own
+        r = client.post(f"/studio/devices/{device['id']}/test_push", headers=headers)
+        assert r.status_code == 200, r.text
+        assert r.json() == {"device_id": device["id"], "result": "failed", "reason": "HTTP 400 INVALID_ARGUMENT",
+                            "detail": ""}
+    assert fake.asked == [device["id"]] * 2
+    refused(world.remote.post(f"/studio/devices/{device['id']}/test_push"), 401, "unauthorized")  # no token
+
+
+def test_test_push_of_a_device_that_is_not_there_or_revoked_is_404(world, monkeypatch):
+    fake = FakePusher({"result": "sent", "reason": "", "detail": ""})
+    monkeypatch.setattr(api, "_pusher", fake)
+    device, _ = world.phone()
+    refused(world.owner.post("/studio/devices/dev_none/test_push"), 404, "not_found")
+    assert world.owner.post(f"/studio/devices/{device['id']}/revoke").status_code == 200
+    refused(world.owner.post(f"/studio/devices/{device['id']}/test_push"), 404, "not_found")
+    assert fake.asked == []
+
+
+def test_test_push_without_a_pusher_says_the_push_is_off(world, monkeypatch):
+    device, _ = world.phone()
+    monkeypatch.setattr(api, "_pusher", None)
+    r = world.owner.post(f"/studio/devices/{device['id']}/test_push")
+    assert r.status_code == 200 and (r.json()["result"], r.json()["reason"]) == ("off", "not_attached")
+
+
+def test_test_push_of_the_server_with_no_key_says_no_key(world, monkeypatch):
+    device, _ = world.phone()
+    monkeypatch.setattr(world.cfg, "studio_fcm_key", "")
+    r = world.owner.post(f"/studio/devices/{device['id']}/test_push")
+    assert r.status_code == 200 and (r.json()["result"], r.json()["reason"]) == ("off", "no_key")
+
+
 def test_a_listener_that_fails_does_not_undo_the_revoke(world, monkeypatch):
     device, bearer = world.phone()
     told = []
@@ -490,12 +537,13 @@ def test_routes_are_the_m2_rows_of_the_document():
     for line in doc_section("**컴퓨터 · 기기**", "- `machine` 의 필드").splitlines():
         cells = [c.strip() for c in line.strip().strip("|").split("|")]
         row = re.match(r"`(GET|POST|PATCH|PUT|DELETE) (/studio/[^`]+)`", cells[0]) if len(cells) == 5 else None
-        if row and re.search(r"M-2|N-2", cells[4]):
+        if row and re.search(r"M-2|N-2|T5", cells[4]):
             doc.add((row.group(1), row.group(2)))
     built = {(method, r.path) for r in api.router.routes for method in r.methods
              if r.path.startswith("/studio/devices")}
     assert ("PATCH", "/studio/devices/{id}") in doc  # A-11 · N-2's: the name, the push token, the quiet hours
-    assert len(doc) == 5 and built == doc
+    assert ("POST", "/studio/devices/{id}/test_push") in doc  # T5: the test push
+    assert len(doc) == 6 and built == doc
     assert api.TOKENLESS == {("POST", "/studio/devices/pair")}
 
 
@@ -508,13 +556,13 @@ def test_the_document_settles_where_the_url_comes_from():
     assert "잠정, M-2" not in doc_section("### 3.14 devices", "### 3.15")  # settings_json stays N-2's
 
 
-def test_openapi_holds_the_five_device_paths():
+def test_openapi_holds_the_six_device_paths():
     schema = api.openapi_schema()
     paths = {(method.upper(), path) for path, item in schema["paths"].items() for method in item
              if path.startswith("/studio/devices")}
     assert paths == {("POST", "/studio/devices/pairing"), ("POST", "/studio/devices/pair"),
                      ("GET", "/studio/devices"), ("PATCH", "/studio/devices/{id}"),
-                     ("POST", "/studio/devices/{id}/revoke")}
+                     ("POST", "/studio/devices/{id}/revoke"), ("POST", "/studio/devices/{id}/test_push")}
     patch = schema["components"]["schemas"]["DevicePatch"]
     assert set(patch["properties"]) == {"name", "fcm_token", "settings"} and not patch.get("required")
     hours = schema["components"]["schemas"]["QuietHours"]

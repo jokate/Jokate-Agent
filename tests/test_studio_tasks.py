@@ -28,7 +28,7 @@ ALLOWED_CELLS = [c for c in CELLS if c[2].startswith("T")]
 FORBIDDEN_CELLS = [c for c in CELLS if c[2].startswith("F")]
 PAIR = {code: (frm, to) for frm, to, code in ALLOWED_CELLS}
 WHO = {  # the "누가" column of §4.2
-    "T1": "owner", "T2": "owner", "T3": "system", "T4": "employee system", "T5": "owner", "T6": "employee",
+    "T1": "owner", "T2": "owner", "T3": "system", "T4": "employee system", "T5": "owner", "T6": "employee system",
     "T7": "owner", "T8": "owner", "T9": "owner", "T10": "owner", "T11": "owner",
 }
 ACTORS = ("owner", "employee", "system")
@@ -575,6 +575,25 @@ def test_t6_needs_a_running_run_and_passes_the_gate_codes_through(world):
     assert out.inbox["payload"] == {"summary": "끝"} and out.inbox["status"] == "pending"
     assert world.types(mark) == ["inbox.created", "task.transitioned", "employee.status"]
     assert world.store.get_employee(world.emp["id"])["status"] == "idle"
+
+
+def test_system_may_file_the_t6_review_for_the_assignee(world):
+    task = world.reach("working")
+    out = world.m.transition(task["id"], "review", SYSTEM, inbox={"title": "검수 요청", "payload": {"summary": "끝"}})
+    assert out.task["status"] == "review"
+    assert (out.inbox["kind"], out.inbox["requester_id"], out.inbox["run_id"], out.inbox["status"]) == \
+        ("final_review", None, task["run_id"], "pending")  # requester is the actor: system has no id
+    assert out.task["assignee_id"] == world.emp["id"]
+
+
+def test_system_t6_is_refused_for_a_task_without_an_assignee(world):
+    # the tasks table's CHECK already forbids a working task with no assignee, so the guard is
+    # defense in depth: exercise it directly on a task row whose assignee has been cleared
+    task = dict(world.reach("working"), assignee_id=None)
+    with pytest.raises(TransitionError) as caught:
+        world.m._check_actor("T6", task, "review", SYSTEM, None)
+    assert caught.value.code == "actor_not_allowed" and "담당 직원" in caught.value.detail
+    world.m._check_actor("T6", dict(task, assignee_id=world.emp["id"]), "review", SYSTEM, None)
 
 
 def test_inbox_created_leaves_the_package_out_of_the_stream(world):

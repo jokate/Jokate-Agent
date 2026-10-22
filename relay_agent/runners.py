@@ -83,6 +83,11 @@ class StageCall:
     # resume_session instead of re-exploring from scratch
     session_id: str | None = None
     resume_session: str | None = None
+    # claude_cli: None = `--strict-mcp-config`, the run has the servers of mcp_servers only. A list (even an empty
+    # one) = not strict: Claude Code also loads the user's · project's · plugins' · connectors' servers itself,
+    # and these names (not written to the config file) are pre-approved. denied_mcp: servers that did not answer
+    native_mcp: list[str] | None = None
+    denied_mcp: list[str] = field(default_factory=list)
     fresh_prompt: str | None = None  # the full prompt, used if resuming the conversation fails
 
     def emit(self, kind: str, detail: dict) -> None:
@@ -510,12 +515,17 @@ Rules:
   2) edit ONCE: all Edit/Write calls in one message;  3) verify ONCE: the single relevant command;  4) answer.
   Look a little wider in step 1 rather than coming back for one more grep. No no-op or "just checking" turns.
 - Edit with the Edit tool (small exact replacements). Run only the verification command you need, once.
-- Bash runs without a human: only pre-approved commands work — the verification/project commands listed in the
-  prompt and read-only inspection (ls, cat, head, tail, wc, grep, rg, find, tasklist, ps, git log/show/diff/status …). Every part of a chained
-  command is checked; one unapproved part blocks the whole line. Stay inside the working directory.
+{shell}
 - If a command is denied or needs approval, do NOT retry it or a variant. Note it in open_issues and continue.
 {finish}
 """
+
+SHELL_PLAIN = """- Bash runs without a human: only pre-approved commands work — the verification/project commands listed in the
+  prompt and read-only inspection (ls, cat, head, tail, wc, grep, rg, find, tasklist, ps, git log/show/diff/status …). Every part of a chained
+  command is checked; one unapproved part blocks the whole line. Stay inside the working directory."""
+# Guarded studio work runs (call.claude_only with Bash): a guard judges each command instead of a fixed allowlist.
+SHELL_GUARDED = """- Shell commands can be run. A guard judges every command: fatal actions are blocked, risky commands go to the
+  owner for approval (if rejected, do not retry by another route). Build, test and editor operations: do them yourself."""
 
 FINISH_SCHEMA = """- Finish with ONE structured output call: summary, state, open_issues, next_steps are required; add decisions_added,
   pointers_added, output, verdict (pass|retry|fail) when relevant. Write the text fields in Korean."""
@@ -535,7 +545,9 @@ turn re-read all of them.
 """
 
 # a digest over dozens of files is one long tool call
-os.environ.setdefault("MCP_TOOL_TIMEOUT", "900000")
+# (`editor_build` may take 3900 s on the server side: the client's limit must be longer than that)
+MCP_TOOL_TIMEOUT_MS = 4_000_000
+os.environ.setdefault("MCP_TOOL_TIMEOUT", str(MCP_TOOL_TIMEOUT_MS))
 
 
 def os_name() -> str:
@@ -578,8 +590,9 @@ class ClaudeCliRunner:
             "--include-partial-messages",  # thinking/text as it is written -> the dashboard shows what the AI is doing
             "--input-format", "stream-json",  # keeps stdin open so a user note can join the running session
             "--permission-mode", call.permission_mode,
-            "--strict-mcp-config",
         ]
+        if call.native_mcp is None:
+            args.append("--strict-mcp-config")
         if call.result_mode != "text" or call.system_mode != "replace":
             args += ["--json-schema", json.dumps(result_schema(), ensure_ascii=False)]
         if call.resume_session:
@@ -592,14 +605,23 @@ class ClaudeCliRunner:
             # Replacing Claude Code's default system prompt was measured at ~7.5K -> ~0.6K input tokens.
             # It also drops the environment/tool-usage guidance, so restate the essentials.
             finish = FINISH_TEXT if call.result_mode == "text" else FINISH_SCHEMA
-            args += ["--system-prompt", REPLACE_PREAMBLE.format(cwd=call.cwd, os_name=os_name(), finish=finish)
+            shell = SHELL_GUARDED if call.claude_only and "Bash" in (call.tools or []) else SHELL_PLAIN
+            args += ["--system-prompt", REPLACE_PREAMBLE.format(cwd=call.cwd, os_name=os_name(), finish=finish, shell=shell)
                      + (DIGEST_RULE if "digest" in call.mcp_servers else "") + call.system]
         else:
             # Moves cwd/git-status out of the system prompt so it caches across working directories.
-            args += ["--append-system-prompt", call.system, "--exclude-dynamic-system-prompt-sections"]
+            system = call.system
+            if call.claude_only:
+                # a studio run keeps Claude Code's default prompt (it states the tools), so only what it lacks is added:
+                # how a guarded shell is judged, how to finish, the digest tool
+                # append mode always attaches --json-schema (see above), so the structured-output finish applies
+                finish = FINISH_SCHEMA
+                system = ("\n".join([SHELL_GUARDED] if "Bash" in (call.tools or []) else []) + "\n" + finish + "\n"
+                          + (DIGEST_RULE if "digest" in call.mcp_servers else "")).strip() + "\n\n" + call.system
+            args += ["--append-system-prompt", system, "--exclude-dynamic-system-prompt-sections"]
         if call.isolate and not call.project:
             # --safe-mode also disables MCP servers and hooks, so only disable skills when either is needed.
-            args += ["--disable-slash-commands"] if (call.mcp_servers or call.settings_path) else ["--safe-mode"]
+            args += ["--disable-slash-commands"] if (call.mcp_servers or call.settings_path or call.native_mcp is not None) else ["--safe-mode"]
         if call.settings_path:
             args += ["--settings", str(call.settings_path)]
         for extra in call.add_dirs:
@@ -612,11 +634,13 @@ class ClaudeCliRunner:
             args += ["--effort", call.effort]
         args += ["--tools", ",".join(call.tools) if call.tools else ""]
         # Headless runs cannot answer permission prompts: pre-approve listed MCP servers and tools.
-        allowed = [f"mcp__{s}" for s in call.mcp_servers] + call.allowed_tools
+        allowed = [f"mcp__{s}" for s in [*call.mcp_servers, *(call.native_mcp or [])]] + call.allowed_tools
         if "Bash" in (call.tools or []):
             allowed += [r for r in READ_ONLY_BASH if r not in allowed]
         if allowed:
             args += ["--allowedTools", ",".join(allowed)]
+        if call.denied_mcp:
+            args += ["--disallowedTools", ",".join(f"mcp__{s}" for s in call.denied_mcp)]
         if mcp_config_path:
             args += ["--mcp-config", str(mcp_config_path)]
         return args

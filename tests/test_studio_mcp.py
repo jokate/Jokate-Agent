@@ -64,14 +64,14 @@ def room_of(desk, kind, **fields):  # noqa: F811
 def test_the_fourteen_tools_are_the_ones_of_8_4(process):
     twelve = tools_of_8_4()
     listed = asyncio.run(process.mcp.list_tools())
-    assert len(twelve) == 15 and {tool.name for tool in listed} == twelve == set(tools.TOOLS)
+    assert len(twelve) == 16 and {tool.name for tool in listed} == twelve == set(tools.TOOLS)
     schema = api.openapi_schema()
     assert {path.rsplit("/", 1)[1] for path in schema["paths"] if path.startswith("/studio/mcp/")} == twelve
     models = schema["components"]["schemas"]
     for tool in listed:  # the process sends what the server's model of that tool takes, and nothing else
         body = schema["paths"][f"/studio/mcp/{tool.name}"]["post"]["requestBody"]["content"]["application/json"]
         model = models[body["schema"]["$ref"].rsplit("/", 1)[1]]
-        assert set(tool.inputSchema["properties"]) == set(model["properties"]), tool.name
+        assert set(tool.inputSchema.get("properties", {})) == set(model.get("properties", {})), tool.name
         assert "required" not in model, tool.name  # a missing argument is a result, not a 422
     assert process.END_TURN == tools.END_TURN  # the sentence is written twice: the process imports no studio code
     assert api.openapi_is_current()

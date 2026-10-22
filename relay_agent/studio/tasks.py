@@ -106,7 +106,7 @@ FORBIDDEN_WHY = {
 RULE_ACTORS = {  # the "누가" column of §4.2. Anyone else is actor_not_allowed (A1–A4)
     "C1": ("employee",), "C2": ("owner",),
     "T1": ("owner",), "T2": ("owner",), "T3": ("system",), "T4": ("employee", "system"), "T5": ("owner",),
-    "T6": ("employee",), "T7": ("owner",), "T8": ("owner",), "T9": ("owner",), "T10": ("owner",),
+    "T6": ("employee", "system"), "T7": ("owner",), "T8": ("owner",), "T9": ("owner",), "T10": ("owner",),
     "T11": ("owner",),
 }
 T4_KINDS = {  # §4.3 T4: which blocking kind each actor may file
@@ -258,8 +258,10 @@ class Effects:
     `rule` is C1 · C2 · T1–T11. A hook that refuses raises TransitionError('precondition_failed',
     failed=[codes]); the codes reach the caller as they are."""
 
-    def create_run(self, task: dict) -> str:
-        """T3: make the task run (still pending) and return its id. Raising leaves the task in backlog."""
+    def create_run(self, task: dict, *, restart_from: str | None = None, note: str = "") -> str:
+        """T3: make the task run (still pending) and return its id. Raising leaves the task in backlog.
+        T5 with restart: the same, a new conversation; the goal is led by what run `restart_from` handed over and
+        the owner's `note`."""
         raise RuntimeError("no run factory is wired (S-8)")
 
     def cancel_run(self, run_id: str) -> None:
@@ -532,7 +534,7 @@ class TaskMachine:
     def transition(self, task_id: str, to: str, actor: Actor, *, reason: str = "", inbox: dict | None = None,
                    inbox_id: str | None = None, decision: str | None = None, comment: str = "",
                    data: dict | None = None, edits: dict | None = None, depends_on: list[str] | None = None,
-                   reset_exchange: bool | None = None,
+                   reset_exchange: bool | None = None, restart: bool = False,
                    committed: Callable[[Outcome], None] | None = None) -> Outcome:
         """Move a task to `to`, or raise TransitionError (nothing is written then, except what T3 records
         when the run cannot be made).
@@ -547,6 +549,8 @@ class TaskMachine:
         depends_on  T1: the tasks this one waits for from now on (§3.11). Checked and written in the transaction
                  of the transition, so a refused approval leaves the rows as they were. None: not touched.
         reset_exchange  T5: zero exchange_count. Default: the item's payload.reason is 'exchange_limit'.
+        restart  T5: a new run for the same task (a new conversation); the old run is closed after the commit
+                 without reverting anything, and the item's delivery is 'none'.
         committed  called with the Outcome after the commit and before Effects.after: what has to be in place
                  when the run is resumed (§5.5: the decision text goes in first). Effects.after runs even if
                  it raises.
@@ -570,6 +574,8 @@ class TaskMachine:
             raise ValueError("edits= belongs to T1 (approving a proposal)")
         if depends_on is not None and rule != "T1":
             raise ValueError("depends_on= belongs to T1 (approving a proposal)")
+        if restart and rule != "T5":
+            raise ValueError("restart= belongs to T5 (a blocked task going back to work)")
         decision = self._decision(rule, pending, decision)
         changed = self._check_edits(task, to, edits or {}) if rule == "T1" else {}
         if reset_exchange is None:
@@ -578,8 +584,20 @@ class TaskMachine:
 
         self.effects.check(rule, task)
         run_id = None
+        old_run = task["run_id"]
         if rule == "T3":
             run_id = self._create_run(task, to)
+        elif restart:
+            try:
+                run_id = self.effects.create_run(task, restart_from=old_run, note=comment or "")
+                if _blank(run_id):
+                    raise RuntimeError("create_run returned no run id")
+            except Exception as exc:
+                raise TransitionError("precondition_failed",
+                                      f"새 런을 만들지 못했다: {str(exc) or exc.__class__.__name__}",
+                                      from_status=frm, to_status=to, rule="T5",
+                                      failed=list(getattr(exc, "failed", []) or [])) from exc
+            why = f"{why} — 새로 시작: 런 {old_run} 을 닫고 {run_id} 를 만들었다"
         elif rule in PRE_EFFECT:
             noted = self.effects.before(rule, task)
             if noted:  # what the effect could not do, kept where the transition is read (§4.3 `run_gone` 의 예외)
@@ -587,11 +605,14 @@ class TaskMachine:
         try:
             outcome = self._commit(rule, task, to, actor, why, run_id=run_id, pending=pending, inbox=inbox or {},
                                    decision=decision, comment=comment or "", data=data, changed=changed,
-                                   reset=rule == "T5" and bool(reset_exchange), deps=depends_on)
+                                   reset=rule == "T5" and bool(reset_exchange), deps=depends_on,
+                                   restart_from=old_run if restart else None)
         except BaseException:
             if run_id is not None:
                 self.effects.cancel_run(run_id)  # §4.5: step 1 failed, close the run made for it
             raise
+        if restart and old_run:
+            self.effects.cancel_run(old_run)  # closed, not reverted: the changes stay (the workspace is settled)
         try:
             if committed is not None:
                 committed(outcome)  # before the run is started or resumed below (§5.5)
@@ -606,8 +627,10 @@ class TaskMachine:
         if actor.kind not in RULE_ACTORS[rule]:
             raise refuse(f"{rule}({task['status']} → {to})은 {' · '.join(RULE_ACTORS[rule])} 만 한다. "
                          f"{actor.kind} 는 할 수 없다")
-        if rule == "T6" and actor.id != task["assignee_id"]:
+        if rule == "T6" and actor.kind == "employee" and actor.id != task["assignee_id"]:
             raise refuse("검수 요청은 그 작업의 담당 직원만 한다")
+        if rule == "T6" and actor.kind == "system" and task["assignee_id"] is None:
+            raise refuse("서버가 대신 올리는 검수 요청도 담당 직원이 있는 작업만 받는다")
         if rule == "T4":
             kind = (inbox or {}).get("kind")
             if kind not in BLOCKING_KINDS:
@@ -719,7 +742,8 @@ class TaskMachine:
 
     def _commit(self, rule: str, task: dict, to: str, actor: Actor, why: str, *, run_id: str | None,
                 pending: dict | None, inbox: dict, decision: str | None, comment: str, data: dict | None,
-                changed: dict, reset: bool, deps: list[str] | None = None) -> Outcome:
+                changed: dict, reset: bool, deps: list[str] | None = None,
+                restart_from: str | None = None) -> Outcome:
         """Step 1 of §4.5: UPDATE -> task_events -> inbox -> employee status, and the stream events.
         `deps` (T1): the predecessors go in with it, after the `edited` · `assigned` rows."""
         frm, stamp = task["status"], now()
@@ -738,13 +762,17 @@ class TaskMachine:
             cols["queued_at"] = stamp  # waits for a slot to resume the run (§4.6)
         if rule in ("T9", "T11"):
             cols["run_id"] = None
+        if restart_from is not None:  # T5 · restart: the task goes on with the run made for it
+            cols["run_id"] = run_id
+            detail.update(run_id=run_id, restarted_from=restart_from)
         if rule == "T9" or reset:
             cols["exchange_count"] = 0
         if task["upstream_rejected"] and to not in STARTED:  # T7 · T9 · T11: what stood on the rejected result
             cols["upstream_rejected"] = 0                    # is closed or taken back — the mark goes with it
             detail["upstream_rejected"] = False
         if rule == "T6":
-            guard, guard_args = " AND queued_at IS NULL AND assignee_id = ?", (actor.id,)
+            guard, guard_args = (" AND queued_at IS NULL AND assignee_id = ?",
+                                 (actor.id if actor.kind == "employee" else task["assignee_id"],))
         cols["updated_at"] = stamp
         new_id = ((inbox or {}).get("id") or "inb_" + uuid.uuid4().hex[:8]) if rule in CREATES else None  # S-11 ②: a
         # caller whose item brings files makes the id first, so the files are copied under it before the write
@@ -768,7 +796,8 @@ class TaskMachine:
                 extra += self._edit_events(tx, task, actor, changed)
                 if deps is not None:
                     extra += self._approve_deps(tx, task, to, actor, deps)
-            item = self._write_inbox(tx, rule, fresh, actor, inbox, new_id, pending, decision, comment, data, stamp)
+            item = self._write_inbox(tx, rule, fresh, actor, inbox, new_id, pending, decision, comment, data, stamp,
+                                    restart_from is not None)
             # stream order = the WS column of §4.2: inbox.* -> task.transitioned -> employee.status (§7.4)
             if item is not None:
                 self._emit_inbox(tx, INBOX_EVENT[rule], item)
@@ -845,7 +874,7 @@ class TaskMachine:
 
     def _write_inbox(self, tx: Tx, rule: str, task: dict, actor: Actor, inbox: dict, new_id: str | None,
                      pending: dict | None, decision: str | None, comment: str, data: dict | None,
-                     stamp: str) -> dict | None:
+                     stamp: str, restart: bool = False) -> dict | None:
         if rule in CREATES:  # inbox.run_id is always the task run (§4.3 T4)
             kind = "final_review" if rule == "T6" else inbox["kind"]
             return self.store.create_inbox_item(
@@ -862,7 +891,7 @@ class TaskMachine:
                 "UPDATE inbox SET status = 'decided', decision = ?, decision_comment = ?, decision_json = ?,"
                 " closed_at = ?, delivery = ? WHERE id = ? AND status = 'pending'",
                 (decision, comment, json.dumps(data or {}, ensure_ascii=False), stamp,
-                 "pending" if rule in ("T5", "T8") else "none", pending["id"]))
+                 "pending" if rule in ("T5", "T8") and not restart else "none", pending["id"]))
         if cur.rowcount != 1:
             raise self._stale(task, task["status"], rule)
         if rule in PRE_EFFECT:  # the run goes no further: undelivered decision texts are dropped (§3.13)
@@ -980,6 +1009,43 @@ class TaskMachine:
             raise self._unmet(problems, task, None, None)
         return self._change(task, actor, "queued", reason or "끊긴 런을 다시 잇는다", cols={"queued_at": now()},
                             guard=" AND queued_at IS NULL", detail={"resume": True})
+
+    def restart(self, task_id: str, actor: Actor, *, reason: str = "") -> Outcome:
+        """Start a working task over without a question to the owner: its run failed, the server makes a new run
+        (the changes stay, the last summary is carried — `Effects.create_run(restart_from=)`, as T5 does), closes
+        the old one and puts the task in the line again. Only the system does it (a `queued` row with
+        `detail.restart`, which `work.auto_restarts` counts). `Effects.after` hears `queued`."""
+        task = self._task(task_id)
+        if actor.kind != "system":
+            raise TransitionError("actor_not_allowed", "런을 스스로 새로 시작하는 것은 system 만 한다",
+                                  from_status=task["status"])
+        problems = []
+        if task["status"] != "working":
+            problems.append("working 작업만 새로 시작한다")
+        if task["queued_at"] is not None:
+            problems.append("이미 줄 서 있다")
+        if not task["run_id"]:
+            problems.append("새로 시작할 런이 없다")
+        if problems:
+            raise self._unmet(problems, task, None, None)
+        old = task["run_id"]
+        try:
+            new = self.effects.create_run(task, restart_from=old, note="")
+            if _blank(new):
+                raise RuntimeError("create_run returned no run id")
+        except Exception as exc:
+            raise TransitionError("precondition_failed",
+                                  f"새 런을 만들지 못했다: {str(exc) or exc.__class__.__name__}",
+                                  from_status=task["status"], failed=list(getattr(exc, "failed", []) or [])) from exc
+        try:
+            outcome = self._change(task, actor, "queued", reason or "런이 실패해 새 대화로 다시 시작한다",
+                                   cols={"queued_at": now(), "run_id": new}, guard=" AND queued_at IS NULL",
+                                   detail={"restart": True, "run_id": new, "restarted_from": old})
+        except BaseException:
+            self.effects.cancel_run(new)
+            raise
+        self.effects.cancel_run(old)  # closed, not reverted: the changes stay
+        return outcome
 
     def assign(self, task_id: str, actor: Actor, employee_id: str | None, *, reason: str = "") -> Outcome:
         """Set or clear the assignee. Only in backlog (§3.10), and not while the task is in the line — the

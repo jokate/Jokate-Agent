@@ -71,10 +71,13 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt, StringConstraints
 from starlette.concurrency import run_in_threadpool
 from starlette.requests import HTTPConnection
 
+from .. import mcpcheck, projctx
 from . import app_release, creator, devices, employee_git, employees, files, gate, guard, harness_setup, importer,jobs as create_jobs, memory, policy as project_policy
 from . import editor as editor_control
 from . import usage
 from . import limits as machine_limits, machine as machine_info, review, sat, staffing, stats, tools, work
+from . import claude_tools
+from .claude_tools import FULL_TOOLS
 from .inbox import Hooks, Inbox, InboxError
 from .store import StudioStore, StudioStoreError, Tx, now
 from .tasks import (OWNER, STATES, TERMINAL, TEXT_FIELDS, CampaignNotFound, Effects, TaskMachine, TaskNotFound,
@@ -158,11 +161,13 @@ _queue: Any = None  # queue.TaskQueue: the line and its slots (§4.6); None = no
 _cutoff: Any = None  # cutoff.Cutoff: what follows the answer of a T4 (§8.3 '서버의 뒤처리'); None = no run is cut
 _hooks: Hooks | None = None  # what a decision asks of the engine and the turns (interject, commit, chat turn)
 _models: Callable[[], list[dict]] | None = None  # the engine's ProviderRegistry.catalog; None = the config's own
+_capabilities: Callable[[str], dict | None] | None = None  # run id -> the last stage's capabilities; use_engine sets it
 _run_view: Callable[[str], dict | None] | None = None  # run id -> {id, status, changes_status}; use_engine sets it
 _run_cost: Callable[[str], float] | None = None  # run id -> USD so far (`GET /studio/stats`); use_engine sets it
 _engine: Callable[[], Any] | None = None  # -> the server's RelayEngine as it is now (use_engine); None = no engine
 _tokens: Callable[[str], dict] | None = None  # run id -> the server's `GET /runs/{id}/tokens` (use_engine)
 _liveness: Callable[[str], dict] | None = None  # run id -> RelayEngine.liveness(run id); None = no engine connected
+_pusher: Any = None  # push.Pusher: what a device's test push asks (use_pusher); None = no push attached
 _workdir: Callable[[str], Path | None] | None = None  # run id -> the folder that run's stages work in (§6.6)
 _repos: Callable[[], Any] | None = None  # -> the server's RepoRegistry as it is now (§3.3); None = no registry
 _commit_listeners: list[Callable[[tuple[int, ...]], None]] = []  # see on_commit
@@ -377,6 +382,40 @@ def add_harness_skills() -> list[str]:
         return []
 
 
+def _add_structure_doc(store: StudioStore) -> list[str]:
+    """T4: the `## 구조 문서 결재` section of the program part's template added to the GUIDE.md of a program employee
+    in service that lacks it (`employees.add_structure_doc`), each folder committed and `employee.updated` sent. An
+    employee whose history already has the automatic commit is skipped — the owner who deleted it is not undone."""
+    def already(folder: Path) -> bool:
+        return any(h["message"] == employees.STRUCTURE_DOC_AUTO_MESSAGE
+                   for h in employee_git.history(folder, "GUIDE.md", limit=10000))
+
+    def write(folder: Path, text: str) -> None:
+        (folder / "GUIDE.md").write_text(text, encoding="utf-8", newline="")
+        _folder_commit(folder, employees.STRUCTURE_DOC_AUTO_MESSAGE)
+        row = store.get_employee(folder.name)
+        if row is not None:
+            _file_changed(store, row)
+
+    with employee_git.lock:
+        return employees.add_structure_doc(store, _cfg.studio_dir, write=write, already=already)
+
+
+def add_structure_doc() -> list[str]:
+    """T4: add the structure-document section to the GUIDE.md of the program employees already hired. Called once at
+    the server's start. Returns the ids changed; [] when nothing was needed, the store is not open, or it failed
+    (logged — the server starts without it)."""
+    with _lock:
+        store = _store
+    if store is None or _cfg is None:
+        return []
+    try:
+        return _add_structure_doc(store)
+    except Exception:  # noqa: BLE001 - a start must not depend on a section of a guide
+        log.exception("studio: 프로그램 직원 GUIDE.md 에 구조 문서 결재 절을 덧붙이지 못했다")
+        return []
+
+
 def fill_parts() -> list[dict]:
     """Fill the empty defaults of the three other parts from relay_agent/studio/parts/ (H-1; §3.4 · §3.15;
     studio/employees.py `fill_parts`): a cell that has a value is never written over,
@@ -584,8 +623,15 @@ def guard_stage(run_id: str, stage: str = "", *, run_dir: Path, cwd: Path, setti
     """The engine's guard callback (§11.4 의 1; server.py registers it as `engine.guard_stage`): what a stage of
     a studio run is given on top of its own — `allowed_tools` (`studio-full`, §10.1), `settings_path` (the hook,
     with the backup hook of `settings` when the workspace has one), `env` (where the hook asks and as whom) and
-    `claude_only` (§10.8 의 9) and `skills` (a task run: the engine adds Skill and drops the flags that switch
-    off the user's skills, §10.1). guard_ctx.json and the settings file are written again at every stage.
+    `claude_only` (§10.8 의 9) and `skills` (every studio run, a chat turn too: the engine adds Skill and drops the flags that switch
+    off the user's skills, §10.1). `system_mode` ('append', every studio run: Claude Code's own default prompt stays
+    and ours is added to it) and `tools` (a task run: all of `claude_tools.FULL_TOOLS`; a chat · read turn: `READ_TOOLS`, which write nothing, and
+    `add_dirs`, the harness folders it may read. The engine uses it for `--tools` in place of the relay stage's own, and
+    `allowed_tools` has the same names). guard_ctx.json and the settings file are written again at every stage.
+
+    A task run in a project that has a `.uproject` also gets `prompt_append`: the '빌드·검증' section as the editor
+    and the machine are at the start of this stage (`WorkEffects.stage_section`). The key is left out for any other
+    run and when the section cannot be made (a look that fails is logged, not a failed stage).
 
     When this server was given the shared token by its environment (`KATAE_TOKEN`), `env` also blanks it for the
     run (§10.8 의 4): the employee's shell would otherwise read the owner's token there. The key is not added
@@ -608,9 +654,28 @@ def guard_stage(run_id: str, stage: str = "", *, run_dir: Path, cwd: Path, setti
     env = {"STUDIO_URL": _cfg.server_url, "STUDIO_ACTOR_TOKEN": token}
     if "KATAE_TOKEN" in os.environ:
         env["KATAE_TOKEN"] = ""
-    return {"allowed_tools": guard.profile(head["mode"]),
-            "settings_path": guard.write_settings(Path(run_dir), ctx_path, settings),
-            "env": env, "claude_only": True, "skills": head["mode"] == "work"}
+    work = head["mode"] == "work"
+    out = {"allowed_tools": list(dict.fromkeys(FULL_TOOLS + guard.profile("work"))) if work else guard.profile(head["mode"]),
+           "settings_path": guard.write_settings(Path(run_dir), ctx_path, settings),
+           "env": env, "claude_only": True, "skills": True, "system_mode": "append"}
+    if work:
+        out["tools"] = list(FULL_TOOLS)
+    else:  # a chat · read turn: tools that write nothing, and the harness folders readable (--add-dir)
+        out["tools"] = list(claude_tools.READ_TOOLS)
+        out["allowed_tools"] = list(dict.fromkeys(claude_tools.READ_TOOLS + guard.profile(head["mode"])))
+        dirs = claude_tools.read_dirs()
+        if dirs:
+            out["add_dirs"] = dirs
+    fn = getattr(_effects, "stage_section", None) if head["mode"] == "work" and head.get("project_id") else None
+    if fn is not None:
+        try:
+            section = fn(store, head["project_id"])
+        except Exception:  # noqa: BLE001 - no section is a stage without it, not a failed stage
+            log.exception("studio: 빌드·검증 절을 만들지 못했다 (런 %s)", run_id)
+            section = None
+        if section:
+            out["prompt_append"] = section
+    return out
 
 
 def run_workdir(run_id: str) -> Path | None:
@@ -1211,6 +1276,36 @@ def archive_department(id: str, store: StudioStore = Depends(get_store)) -> dict
 def list_models() -> list[dict]:
     checks = employees.context(_config())
     return work.models((_models or checks.providers.catalog)(), checks)
+
+
+# The MCP servers a studio run can have, by where they come from: this server's registry, the user's
+# (~/.claude.json), the plugins', the claude.ai connectors (one entry: no file names them) and each project's own
+# (`프로젝트 <이름>`). `last` is the result of the last connection check of that name (null = never checked;
+# kept in memory, gone at a restart). Not under `/mcp/`: that prefix is the employees' (actor) paths, which refuse
+# the owner's token. No docstring: the saved contract (openapi.json) would carry it.
+@router.get("/mcp-servers")
+def list_mcp_servers(store: StudioStore = Depends(get_store)) -> list[dict]:
+    last = mcpcheck.last()
+    items: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+
+    def add(name: str, source: str) -> None:
+        if (name, source) not in seen:
+            seen.add((name, source))
+            items.append({"name": name, "source": source, "last": last.get(name)})
+
+    for name in sorted(employees.context(_config()).mcp_names):
+        add(name, "registry")
+    for found in projctx.mcp_sources(None, {}):
+        add(found["name"], found["source"])
+    for project in store.list_projects():
+        try:
+            names = projctx.folder_mcp(Path(project["path"]), Path.home())
+        except OSError:
+            continue
+        for name in names:
+            add(name, f"프로젝트 {project['name']}")
+    return items
 
 
 @router.get("/employees")
@@ -1818,7 +1913,8 @@ def create_task(body: NewTask, machine: TaskMachine = Depends(get_machine)) -> d
 @router.get("/tasks/{id}")
 def get_task(id: str, machine: TaskMachine = Depends(get_machine)) -> dict:
     """The row and what a task screen shows next to it. `queue_position` counts from 1 in the server's whole
-    line (provisional); `run` is `{id, status, changes_status}` of the task's run, null when it has none."""
+    line (provisional); `run` is `{id, status, changes_status}` of the task's run, null when it has none. `capabilities` is what the run's last stage got
+    (`{stage, tools, allowed_tools, mcp, skills, at}`, from its `stage_capabilities` event), null when there is none."""
     store = machine.store
     row = _need(store.get_task(id), "작업", id)
     rooms = store.list_rooms(kind="task", task_id=id, include_archived=True)
@@ -1833,6 +1929,7 @@ def get_task(id: str, machine: TaskMachine = Depends(get_machine)) -> dict:
         "pending_inbox_id": pending[0]["id"] if pending else None,
         "queue_position": line.index(id) + 1 if id in line else None,
         "run": _run_view(row["run_id"]) if _run_view is not None and row["run_id"] else None,
+        "capabilities": _capabilities(row["run_id"]) if _capabilities is not None and row["run_id"] else None,
     }
 
 
@@ -1980,6 +2077,13 @@ def use_effects(effects: Effects | None, *, models: Callable[[], list[dict]] | N
     _effects, _models = effects, models
 
 
+def use_pusher(pusher: Any) -> None:
+    """Set the sender `POST /studio/devices/<id>/test_push` asks (studio/push.py `Pusher.test`): `push.attach`
+    calls it. Without one the answer of a test push is `off` for `not_attached`."""
+    global _pusher
+    _pusher = pusher
+
+
 def use_queue(queue: Any) -> None:
     """Set the line `stop` asks (studio/queue.py `TaskQueue`), after install(): server.py builds it on its
     engine. `start` needs none — the effects reach the queue themselves (`WorkEffects.kick`)."""
@@ -1999,10 +2103,11 @@ def use_engine(engine: Callable[[], Any] | None, *, tokens: Callable[[str], dict
     `package` of a final review and the alias of a run's patch. A function, not the object — the server's
     engine is a module variable (a test puts another one there), so it is asked for at every read. `tokens`
     is the server's own `GET /runs/{run_id}/tokens`, which the alias here answers with."""
-    global _engine, _tokens, _run_view, _run_cost
+    global _engine, _tokens, _run_view, _run_cost, _capabilities
     _engine, _tokens = engine, tokens
     _run_view = (lambda run_id: review.run_view(engine(), run_id)) if engine is not None else None
     _run_cost = (lambda run_id: review.run_cost(engine(), run_id)) if engine is not None else None
+    _capabilities = (lambda run_id: review.capabilities(engine(), run_id)) if engine is not None else None
 
 
 def use_jobs(*, reload: Callable[[], Any], local_file: Path | str, run: Callable[..., int] | None = None,
@@ -2961,6 +3066,10 @@ class McpTaskProgress(BaseModel):
     percent: float | None = None        # 0–100
 
 
+class McpEditorBuild(BaseModel):
+    model_config = ConfigDict(extra="forbid")   # no arguments: the project is the task's
+
+
 class McpTaskRequestReview(BaseModel):
     """The shapes are §5.4: checklist `{criterion, status, note}`, evidence `{kind, ref, caption}`,
     judgment_calls `{text, why}`."""
@@ -2974,7 +3083,8 @@ class McpTaskRequestReview(BaseModel):
 
 class McpAskOwner(BaseModel):
     """`kind` is question · choice · approval (§1.5). question: body, options `{id, label}`. choice: body,
-    options `{id, label, detail, figure}` (two or more), recommended, fix_points. approval: what, why, if_not,
+    options `{id, label, detail, figure}` (one or more), recommended, fix_points, attachments `{id, name}` (T4:
+    the structure document posted to the room). approval: what, why, if_not,
     policy_ref."""
     model_config = ConfigDict(extra="forbid")
 
@@ -2988,6 +3098,7 @@ class McpAskOwner(BaseModel):
     why: str = ""
     if_not: str = ""
     policy_ref: str = ""
+    attachments: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class McpRoomPost(BaseModel):
@@ -3177,6 +3288,14 @@ def mcp_task_progress(body: McpTaskProgress, caller: tools.Caller = Depends(get_
                       machine: TaskMachine = Depends(get_machine), inbox: Inbox = Depends(get_inbox)) -> dict:
     """Leave a `progress` event on the task of this turn. `{event_id}`."""
     return _tool("task_progress", body, caller, machine, inbox)
+
+
+@router.post("/mcp/editor_build")
+def mcp_editor_build(body: McpEditorBuild, caller: tools.Caller = Depends(get_caller),
+                     machine: TaskMachine = Depends(get_machine), inbox: Inbox = Depends(get_inbox)) -> dict:
+    """Build the project's C++ (the editor is closed and started again; takes minutes).
+    `{built, seconds, errors[], editor_up, editor_note, was_running}`."""
+    return _tool("editor_build", body, caller, machine, inbox)
 
 
 @router.post("/mcp/task_request_review")
@@ -3569,3 +3688,16 @@ def revoke_device(id: str, store: StudioStore = Depends(get_store)) -> dict:
         except Exception:  # the revoke is committed either way; a listener must not turn it into a 500
             log.exception("기기 폐기를 알리지 못했습니다: %s", id)
     return devices.public(row)
+
+
+# 시험 알림: that device gets one push now and the answer of FCM comes back — `result` is `sent` · `dead` (the token
+# is cleared) · `failed` (`reason` is what FCM said) · `off` (the push is off: `reason` is `no_key` · `unreadable`
+# · `not_attached`, `detail` says which in a line) · `no_token`. Always 200 for a device that is paired; a device
+# that is not, or was revoked, is 404 like the other device paths.
+@router.post("/devices/{id}/test_push")
+def test_push(id: str, store: StudioStore = Depends(get_store)) -> dict:
+    row = store.get_device(id)
+    row = _need(row if row is not None and row["revoked_at"] is None else None, "기기", id)
+    if _pusher is None:
+        return {"device_id": id, "result": "off", "reason": "not_attached", "detail": "푸시가 연결되지 않았습니다"}
+    return {"device_id": id, **_pusher.test(row)}

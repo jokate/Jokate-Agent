@@ -75,7 +75,7 @@ CASES = [
     ("mcp_unknown", {**BASE, "mcp": ["nope"]}), ("mcp_unknown", {**BASE, "mcp": ["studio"]}),
     ("mcp_unknown", {**BASE, "mcp": "unreal"}),
     ("chat_mcp_not_subset", {**BASE, "mcp": ["docs_read"], "chat_mcp": ["unreal"]}),
-    ("chat_mcp_not_subset", {**BASE, "chat_mcp": ["docs_read"]}),  # no `mcp`: the part's ["unreal"] is the set
+    ("chat_mcp_not_subset", {**BASE, "mcp": ["unreal"], "chat_mcp": ["docs_read"]}),
     ("chat_mcp_not_subset", {**BASE, "chat_mcp": "unreal"}),
     ("provider_unguarded", {**BASE, "chat": {"provider": "codex"}}),
     ("provider_unguarded", {**BASE, "work": {"build": {"provider": "nobody"}}}),
@@ -115,7 +115,8 @@ def test_what_may_be_written_passes(checks):
                  {**BASE, "cap": {"model": "opus", "effort": "xhigh"}, "chat": {"model": "opus", "effort": "xhigh"}},
                  {**BASE, "relay": None, "mcp": None, "chat_mcp": None, "chat": None, "work": None, "cap": None}):
         assert codes(good, checks) == [], good
-    assert codes({**BASE, "chat_mcp": ["unreal"]}, checks, department=None) == ["chat_mcp_not_subset"]  # no part
+    # no `mcp` (= every server): `chat_mcp` is within it, whatever the part says or whether there is one
+    assert codes({**BASE, "chat_mcp": ["unreal"]}, checks, department=None) == []
     assert [p["code"] for p in employees.memory_problems("가" * 1366)] == ["memory_too_large"]  # 4098 bytes
     assert employees.memory_problems("가" * 1365) == []
 
@@ -132,7 +133,7 @@ def test_the_context_of_a_server_config():
 def test_a_missing_key_takes_the_parts_value_and_nothing_is_written_back(tmp_path):
     folder = put(tmp_path, "version: 1\ndepartment: hr\n")  # the part by hand: the DB's stands (§9.6)
     got = employees.read_settings(tmp_path, EMP, PART, {"model": "opus", "effort": "low"})
-    assert got == {"department": "program", "relay": "auto", "mcp": ["unreal"], "chat_mcp": [],
+    assert got == {"department": "program", "relay": "auto", "mcp": [], "chat_mcp": [],  # the part's default_mcp is not used
                    "chat": {"model": "sonnet", "effort": "low"}, "work": {"*": {"model": "sonnet"}},
                    "cap": {"model": "opus", "effort": "high"}}  # cap: the part's effort, the config's model
     assert (folder / "employee.yaml").read_bytes() == b"version: 1\ndepartment: hr\n"
@@ -174,13 +175,16 @@ def test_a_chat_turn_takes_the_chat_slot_under_the_cap_and_chat_mcp_plus_studio(
     settings = {"chat": {"model": "opus", "effort": "xhigh"}, "chat_mcp": ["unreal"],
                 "cap": {"model": "sonnet", "effort": "medium"}}
     assert employees.chat_values(settings, checks) == {
-        "slot": {"model": "sonnet", "effort": "medium"}, "mcp": ["unreal", "studio"], "model_cap": "sonnet",
-        "effort_cap": "medium", "failed": []}
+        "slot": {"model": "sonnet", "effort": "medium"}, "mcp": ["unreal", "studio"], "mcp_scope": "only",
+        "model_cap": "sonnet", "effort_cap": "medium", "failed": []}
     assert settings["chat"] == {"model": "opus", "effort": "xhigh"}  # the settings are not changed
     low = employees.chat_values({**settings, "cap": {"model": "haiku", "effort": None}}, checks)
     assert low["slot"] == {"model": "haiku"} and low["effort_cap"] is None  # lowered to haiku: no effort
     free = employees.chat_values({"chat": {}, "chat_mcp": [], "cap": {"model": None, "effort": None}}, checks)
-    assert free == {"slot": {}, "mcp": ["studio"], "model_cap": None, "effort_cap": None, "failed": []}
+    assert free == {"slot": {}, "mcp": ["studio"], "mcp_scope": "all", "model_cap": None, "effort_cap": None,
+                    "failed": []}
+    assert employees.chat_values({**settings, "chat_mcp": [], "mcp": ["docs_read"]}, checks)["mcp"] == [
+        "docs_read", "studio"]  # no chat_mcp: the employee's mcp narrows the chat too
     other = employees.chat_values({**settings, "chat": {"provider": "codex", "model": "gpt-5"}}, checks)
     assert other["failed"] == ["provider_unguarded"] and other["slot"]["model"] == "gpt-5"  # not a Claude tier
 

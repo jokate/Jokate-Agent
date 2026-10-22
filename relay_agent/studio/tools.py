@@ -44,6 +44,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import drafts, employees, files, handover, staffing
+from . import editor as editor_control, editor_build as editor_build_mod
 from .inbox import (AMEND_FILES, DRAFT_KEYS, DRAFT_REQUIRED, PLAN, PLAN_MAX_STEPS, RECOMMEND, Inbox, InboxError,
                     validate_payload)
 from .tasks import (FORBIDDEN_WHY, STATES, SYSTEM, TASK_TYPES, TEXT_FIELDS, Actor, Outcome, TaskMachine,
@@ -69,8 +70,9 @@ DEFAULT_LIMIT, MAX_LIMIT = 50, 200
 RECENT_EVENTS = 10
 ASK_HINT = {
     "question": "question 은 body 가 필수이고 options 는 각 {id, label} 이다",
-    "structure_choice": "choice 는 body 와 options(2개 이상, 각 {id, label, detail, figure})가 필수이고 "
-                        "recommended 는 options 의 id 중 하나, figure 는 \"\" 또는 {mermaid} 다",
+    "structure_choice": "choice 는 body 와 options(1개 이상, 각 {id, label, detail, figure})가 필수이고 "
+                        "recommended 는 options 의 id 중 하나, figure 는 \"\" 또는 {mermaid} 이며 "
+                        "attachments 는 각 {id, name} (room_post 가 돌려준 첨부) 이다",
     "pre_approval": "approval 은 what · why · if_not 이 모두 필수다",
 }
 
@@ -408,6 +410,33 @@ def _ask_payload(kind: str, args: dict) -> dict:
     return payload
 
 
+def _refs_ok(refs: Any) -> bool:
+    return isinstance(refs, list) and all(
+        isinstance(ref, dict) and (isinstance(ref.get("id"), int) and not isinstance(ref.get("id"), bool)
+                                   or not _blank(ref.get("id"))) and not _blank(ref.get("name")) for ref in refs)
+
+
+def _posted_files(store: StudioStore, room_id: str, refs: list[dict]) -> list[dict]:
+    """T4: the `{id, name}` of a structure document the employee posted to the task room (`room_post` gave them) as
+    the `{id, name, size}` of `payload.attachments`. `id` is the message's id — the folder of
+    `GET /studio/attachments/{id}/{name}` —; the size is the server's, read from that message. A file that is not
+    in a message of this room is refused: the owner must be able to open what the item names."""
+    out, missing = [], []
+    for ref in refs:
+        raw, name = str(ref["id"]).strip(), ref["name"].strip()
+        message = store.get_message(int(raw)) if raw.isdigit() else None
+        found = next((a for a in (message or {}).get("attachments") or [] if a.get("name") == name), None)
+        if message is None or message["room_id"] != room_id or found is None:
+            missing.append(f"{raw}/{name}")
+        else:
+            out.append({"id": raw, "name": name, "size": int(found.get("size") or 0)})
+    if missing:
+        raise Refusal("precondition_failed", "이 작업방 글의 첨부가 아니다: " + ", ".join(missing)
+                      + ". room_post 로 문서를 올린 뒤 그 답의 attachments 의 id · name 을 넣는다",
+                      failed=["attachment_not_found"])
+    return out
+
+
 def ask_owner(caller: Caller, args: dict, machine: TaskMachine, inbox: Inbox) -> dict:
     """T4 by a member of the task room — the assignee in its task run, or another member in a read turn
     (§5.7: the item's run is the task run either way; the machine writes that)."""
@@ -430,8 +459,12 @@ def ask_owner(caller: Caller, args: dict, machine: TaskMachine, inbox: Inbox) ->
     bad += [names.get(key, key) for key in validate_payload(kind, payload)]
     if kind == "structure_choice" and "options" not in bad and not all(map(_figure_ok, payload["options"])):
         bad.append("options")
+    if kind == "structure_choice" and args.get("attachments") is not None and not _refs_ok(args["attachments"]):
+        bad.append("attachments")
     if bad:
         raise Refusal("missing_fields", f"비어 있거나 틀린 인자: {', '.join(bad)}. {ASK_HINT[kind]}", fields=bad)
+    if kind == "structure_choice" and args.get("attachments"):
+        payload["attachments"] = _posted_files(store, rooms[0]["id"], args["attachments"])
     item_id, folder = _file_args(caller, store, inbox, "ask_owner", kind, args, payload)
     item = _file_filed(folder, lambda: inbox.create(kind, caller.actor, title=args["title"], payload=payload,
                                                     task_id=task["id"], item_id=item_id))
@@ -654,7 +687,7 @@ def room_post(caller: Caller, args: dict, machine: TaskMachine, inbox: Inbox) ->
     if room["kind"] in GROUP_KINDS:
         return _group_posted(room, message, mentions, inbox)
     if task is None:
-        return ok("방에 글을 남겼다. 하던 일을 계속한다", message_id=message["id"], queued=[])
+        return ok("방에 글을 남겼다. 하던 일을 계속한다", message_id=message["id"], queued=[], **_posted(message))
     queued = _mention_turns(caller, task, room, message, mentions, machine, inbox)
     missed = [m for m in mentions if m not in queued]
     note = "방에 글을 남겼다."
@@ -663,7 +696,13 @@ def room_post(caller: Caller, args: dict, machine: TaskMachine, inbox: Inbox) ->
     if missed:
         note += (f" 턴이 들어가지 않은 직원: {', '.join(missed)} — 턴을 만들지 못했거나(이유는 방의 시스템 글에 있다) "
                  "담당인데 작업이 진행 중이 아니다. 글은 방에 남아 있다.")
-    return ok(f"{note} 하던 일을 계속한다", message_id=message["id"], queued=queued)
+    return ok(f"{note} 하던 일을 계속한다", message_id=message["id"], queued=queued, **_posted(message))
+
+
+def _posted(message: dict) -> dict:
+    """T4: `attachments=[{id, name, size}]` of a posted message — what `ask_owner` takes as `attachments` — only when it has files."""
+    files_ = message.get("attachments") or []
+    return {"attachments": [{"id": str(message["id"]), "name": a["name"], "size": a["size"]} for a in files_]} if files_ else {}
 
 
 # --- employee_list (read) ---------------------------------------------------------------------------------
@@ -909,6 +948,29 @@ def staff_request(caller: Caller, args: dict, machine: TaskMachine, inbox: Inbox
 PLAN_STEP_TEXT = ("title", "reason", "spec", "done_criteria", "type", "assignee_id")
 
 
+# --- editor_build -----------------------------------------------------------------------------------------
+def editor_build(caller: Caller, args: dict, machine: TaskMachine, inbox: Inbox) -> dict:
+    """Build the C++ of this task's project: the editor is saved and closed, `Build.bat` runs, the editor is
+    started again (studio/editor_build.py; the save command is provisional, and after a failed build only the
+    editor that was running is started again). The assignee, in this task's run. It blocks until the build is over
+    — minutes —, so the MCP process gives this tool a long time limit."""
+    task = _own_task(caller, machine, "빌드할")
+    project = machine.store.get_project(task["project_id"]) if task.get("project_id") else None
+    if project is None:
+        raise Refusal("precondition_failed", "이 작업에는 프로젝트가 없어 빌드할 수 없다", failed=[])
+    try:
+        result = editor_build_mod.build(project, machine.store.list_projects())
+    except editor_control.Refused as e:
+        raise Refusal(e.code, e.message, failed=e.failed) from e
+    if not result["built"]:
+        note = f"빌드하지 못했다. {result['editor_note']}"
+    elif result["editor_up"]:
+        note = f"빌드했다 ({result['seconds']:g}초). 에디터가 다시 떠서 MCP 가 답한다."
+    else:
+        note = f"{result['editor_note']} ({result['seconds']:g}초)"
+    return ok(note, **result)
+
+
 def plan_propose(caller: Caller, args: dict, machine: TaskMachine, inbox: Inbox) -> dict:
     """An employee lays a whole plan before the owner (§5.3 계획 결재) -> an inbox item `plan_proposal`. Nothing is
     made until the owner approves: then the server makes the campaign and one task per step (`depends_on` = the
@@ -959,6 +1021,7 @@ TOOLS: dict[str, Callable[[Caller, dict, TaskMachine, Inbox], dict]] = {
     "ask_owner": ask_owner, "room_post": room_post, "employee_list": employee_list,
     "employee_draft": employee_draft, "employee_submit": employee_submit, "policy_draft": policy_draft,
     "hire_recommend": hire_recommend, "staff_request": staff_request, "plan_propose": plan_propose,
+    "editor_build": editor_build,
 }
 
 

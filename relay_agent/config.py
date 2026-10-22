@@ -64,6 +64,18 @@ class Config(BaseModel):
     # Katae Studio: seconds the editor check of a task run waits for the project's editor to answer `health_check`
     # before the system asks the owner (`editor_unresponsive`) — ARCHITECTURE.md §4.3 T3. Read at every check.
     studio_editor_wait: float = 300.0
+    # Katae Studio: the multiplier a task run of a game project (`projctx.game_root`: .uproject / Unity) starts with
+    # in `run.stage_budget_boost` — every stage's `max_budget_usd` is multiplied by it from the first stage on, so
+    # a build + PIE measurement is not stopped for the budget at once. The approval a stage over it asks (doubling)
+    # is unchanged. 1.0 or less: no boost. Read when a run is made (ARCHITECTURE.md §11.2).
+    studio_game_budget_boost: float = 2.5
+    # Katae Studio: a task run · chat turn is not stopped by the run or stage budget. Its room is told ('이 작업이
+    # 지금까지 $N 을 썼습니다') when the budget is first reached and at every this many dollars more. 0 = only the first.
+    studio_spend_notice_step_usd: float = 5.0
+    # Katae Studio: how many times the server starts a task run over by itself when it ended in `run_failed` (the
+    # changes stay, a new conversation, the last summary carried — the `restart` path). The room is only told. The
+    # failure after that is asked to the owner as before. 0 = ask at the first failure. Read at every failure.
+    studio_auto_restarts: int = 1
     # Katae Studio: the turns employees may put in for each other in one task (`room_post` mentions) before the
     # system asks the owner — 왕복 한도 (ARCHITECTURE.md §4.6). Read at every mention; T5 of that item counts anew.
     studio_max_exchanges: int = 20

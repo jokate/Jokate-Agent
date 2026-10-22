@@ -205,3 +205,55 @@ def discover(path: Path, home: Path | None = None, mcp_from: list[str] | None = 
         if name not in ctx.mcp and name not in ctx.optional_mcp:
             ctx.optional_mcp[name] = {"scope": "전역(사용자)", "config": config}
     return ctx
+
+
+CONNECTOR = "claude.ai 커넥터"  # the connectors of the user's Claude account: Claude Code loads them, no file names them
+
+
+def plugin_mcp(home: Path) -> dict[str, dict]:
+    """MCP servers of the installed Claude Code plugins, named as Claude Code names their tools:
+    `plugin_<plugin>_<server>` -> config. What cannot be read is left out."""
+    found: dict[str, dict] = {}
+    plugins = _json(home / ".claude" / "plugins" / "installed_plugins.json").get("plugins")
+    for key, installs in (plugins if isinstance(plugins, dict) else {}).items():
+        plugin = str(key).split("@")[0]
+        for item in installs if isinstance(installs, list) else []:
+            root = item.get("installPath") if isinstance(item, dict) else None
+            if not isinstance(root, str) or not root:
+                continue
+            file = _json(Path(root) / ".mcp.json")
+            servers = file.get("mcpServers") if isinstance(file.get("mcpServers"), dict) else file
+            inline = _json(Path(root) / ".claude-plugin" / "plugin.json").get("mcpServers")
+            if isinstance(inline, dict):
+                servers = {**servers, **inline}
+            for server, config in servers.items():
+                if isinstance(config, dict) and {"command", "url", "type"} & set(config):
+                    found[f"plugin_{plugin}_{server}"] = config
+            break
+    return found
+
+
+def mcp_sources(ctx: ProjectContext | None, registry: dict[str, dict], home: Path | None = None) -> list[dict]:
+    """Every MCP server a run can have, once per name: `[{name, source, config}]`. `source` is `project` (the
+    folder's .mcp.json and its ~/.claude.json entry), `registry` (this server's own list), `user`
+    (~/.claude.json mcpServers), `plugin`, or `connector` (one entry, `config` None: no file names them)."""
+    home = (home or Path.home()).resolve()
+    out: list[dict] = []
+    seen: set[str] = set()
+
+    def add(name: str, source: str, config: dict | None) -> None:
+        if name not in seen:
+            seen.add(name)
+            out.append({"name": name, "source": source, "config": config})
+
+    for name, config in (ctx.mcp if ctx is not None else {}).items():
+        add(name, "project", config)
+    for name, config in registry.items():
+        add(name, "registry", config)
+    user = _json(home / ".claude.json").get("mcpServers")
+    for name, config in (user if isinstance(user, dict) else {}).items():
+        add(name, "user", config if isinstance(config, dict) else None)
+    for name, config in plugin_mcp(home).items():
+        add(name, "plugin", config)
+    add(CONNECTOR, "connector", None)
+    return out

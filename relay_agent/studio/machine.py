@@ -42,7 +42,7 @@ EDITOR_QUERY = ("[Console]::OutputEncoding = [Text.Encoding]::UTF8; "
                 "Select-Object ProcessId, Name, CommandLine | ConvertTo-Json -Compress")
 QUERY_TIMEOUT = 8.0  # seconds PowerShell has to answer
 PORT_TIMEOUT = 0.3   # seconds a connection to an editor's MCP port may take
-HEALTH_COMMAND = "health_check"    # the MCP command an editor is asked (provisional: the plugin's source was not read)
+HEALTH_COMMAND = "health_check"    # the MCP command an editor is asked (the plugin answers it: read 2026-10-20)
 HEALTH_TIMEOUT = 3.0               # seconds an editor has to answer it
 MCP_MAX_BYTES = 8 * 1024 * 1024    # an answer longer than this is not read on
 
@@ -159,34 +159,59 @@ def port_open(port: Any, host: str = "127.0.0.1", timeout: float = PORT_TIMEOUT)
         return False
 
 
+def _chunk(conn: socket.socket, most: int, deadline: float, port: Any, timeout: float) -> bytes:
+    """One `recv` of at most `most` bytes; b"" when the editor closed. TimeoutError past `deadline`."""
+    left = deadline - time.monotonic()
+    if left <= 0:
+        raise TimeoutError(f"MCP 포트 {port} 가 {timeout:g}초 안에 답하지 않았다")
+    conn.settimeout(left)
+    return conn.recv(most)
+
+
+def _recv(conn: socket.socket, size: int, deadline: float, port: Any, timeout: float) -> bytes:
+    """Exactly `size` bytes, or fewer when the editor closed first. TimeoutError past `deadline`."""
+    got = b""
+    while len(got) < size:
+        chunk = _chunk(conn, min(65536, size - len(got)), deadline, port, timeout)
+        if not chunk:
+            break
+        got += chunk
+    return got
+
+
 def mcp_send(port: Any, command: str, params: dict | None = None, *, timeout: float,
              host: str = "127.0.0.1") -> dict:
-    """One command to the editor plugin that listens on `port`, and its answer (M-7). Provisional — the form of
-    the public unreal-mcp, not read from the plugin's source: `{"type": command, "params": {…}}` goes out once as
-    UTF-8 JSON (no newline, the sending side is not shut down), and the answer is read until the bytes are one
-    JSON object or the editor closes. `timeout` is for the whole exchange. OSError: nobody listens, or no answer
-    in time. ValueError: what came is not a JSON object."""
-    request = json.dumps({"type": command, "params": dict(params or {})}, ensure_ascii=False).encode("utf-8")
+    """One command to the editor plugin that listens on `port`, and its answer (M-7). The plugin (MNYS's
+    `Plugins/Unreal-MCP-main`, `MCPServerRunnable.cpp`) frames every message both ways with a 4-byte big-endian
+    length before the UTF-8 JSON `{"type": command, "params": {…}}`. Read from its source on 2026-10-20: the
+    first, unframed form of this function never got an answer, so every editor looked unresponsive and work runs
+    stopped at "에디터가 300초 안에 응답하지 않았습니다". An answer that starts with `{` instead of a header is read
+    as unframed JSON (the public unreal-mcp's form) until it parses or the editor closes. `timeout` is for the
+    whole exchange. OSError: nobody listens, or no answer in time. ValueError: what came is not a JSON object."""
+    body = json.dumps({"type": command, "params": dict(params or {})}, ensure_ascii=False).encode("utf-8")
     deadline = time.monotonic() + timeout
-    got = b""
     with socket.create_connection((host, int(port)), timeout=timeout) as conn:
-        conn.sendall(request)
-        while len(got) <= MCP_MAX_BYTES:
-            left = deadline - time.monotonic()
-            if left <= 0:
-                raise TimeoutError(f"MCP 포트 {port} 가 {timeout:g}초 안에 답하지 않았다")
-            conn.settimeout(left)
-            chunk = conn.recv(65536)
-            if not chunk:
-                break  # the editor closed: what came is the whole answer
-            got += chunk
-            try:
-                answer = json.loads(got.decode("utf-8"))
-            except ValueError:  # not whole yet (a cut multi-byte character is one too)
-                continue
-            if isinstance(answer, dict):
-                return answer
-    answer = json.loads(got.decode("utf-8"))  # ValueError when it is empty, cut or too long
+        conn.sendall(len(body).to_bytes(4, "big") + body)
+        got = _recv(conn, 4, deadline, port, timeout)
+        if got[:1] == b"{":  # unframed: read on until the bytes are one JSON object or the editor closes
+            while len(got) <= MCP_MAX_BYTES:
+                try:
+                    answer = json.loads(got.decode("utf-8"))
+                except ValueError:  # not whole yet (a cut multi-byte character is one too)
+                    more = _chunk(conn, 65536, deadline, port, timeout)
+                    if not more:
+                        break  # the editor closed: what came is the whole answer
+                    got += more
+                    continue
+                if isinstance(answer, dict):
+                    return answer
+                break
+        elif len(got) == 4:
+            size = int.from_bytes(got, "big")
+            if size > MCP_MAX_BYTES:
+                raise ValueError(f"MCP 포트 {port} 의 응답이 너무 크다 ({size} 바이트)")
+            got = _recv(conn, size, deadline, port, timeout)
+    answer = json.loads(got.decode("utf-8"))  # ValueError when it is empty, cut, too long or not JSON
     if not isinstance(answer, dict):
         raise ValueError(f"MCP 포트 {port} 의 응답이 JSON 객체가 아니다")
     return answer

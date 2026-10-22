@@ -231,9 +231,8 @@ def check(text: object, *, department_id: str | None, department: dict | None, c
     chat_mcp = data.get("chat_mcp")
     if chat_mcp is not None and not _names(chat_mcp):  # 7
         flag("chat_mcp_not_subset", "chat_mcp 는 MCP 서버 이름의 목록이어야 한다")
-    elif chat_mcp:
-        within = _mapping(department).get("default_mcp") if mcp is None else mcp
-        outside = [name for name in chat_mcp if name not in (within if _names(within) else [])]
+    elif chat_mcp and mcp:  # an empty `mcp` is every server: `chat_mcp` is within it whatever it names
+        outside = [name for name in chat_mcp if name not in mcp]
         if outside:
             flag("chat_mcp_not_subset", f"chat_mcp 가 mcp 밖의 이름을 가졌다: {', '.join(outside)}")
     cap, limit = data.get("cap"), {"model": None, "effort": None}
@@ -321,19 +320,20 @@ def resolve(data: dict, employee: dict, department: dict | None, config_cap: dic
     """The settings of an employee: `{department, relay, mcp, chat_mcp, chat, work, cap}`.
 
     `department` is the DB's, whatever the file says (§9.6). A key the file does not have takes the part's:
-    `default_relay` · `default_mcp` · `default_models` (chat · work · cap); `chat_mcp` is [] and never wider
-    than `mcp`. `cap` is `{model, effort}`, each looked for on its own: the file -> the part -> `config_cap`
+    `default_relay` · `default_models` (chat · work · cap). `mcp` and `chat_mcp` are only what the file writes
+    ([] = every server: the part's `default_mcp` does not set the scope); `chat_mcp` is within `mcp` when that has names.
+    `cap` is `{model, effort}`, each looked for on its own: the file -> the part -> `config_cap`
     -> None (no cap). Nothing is written back. A value of the wrong type counts as not written — the checks
     refuse it when the file is written, and a file changed by hand must not stop the reading."""
     part = _mapping(department)
     models = _mapping(part.get("default_models"))
     relay = data.get("relay") if isinstance(data.get("relay"), str) and data["relay"] else part.get("default_relay")
-    mcp = _name_list(data["mcp"] if _names(data.get("mcp")) else part.get("default_mcp"))
+    mcp = _name_list(data["mcp"] if _names(data.get("mcp")) else None)  # empty = every server; the part does not narrow it
     work = data["work"] if isinstance(data.get("work"), dict) else models.get("work")
     caps = (_mapping(data.get("cap")), _mapping(models.get("cap")), _mapping(config_cap))
     return {
         "department": employee["department_id"], "relay": relay, "mcp": mcp,
-        "chat_mcp": [name for name in _name_list(data.get("chat_mcp")) if name in mcp],
+        "chat_mcp": [name for name in _name_list(data.get("chat_mcp")) if not mcp or name in mcp],
         "chat": _slot(data["chat"] if isinstance(data.get("chat"), dict) else models.get("chat")),
         "work": {stage: _slot(slot) for stage, slot in _mapping(work).items() if isinstance(stage, str)},
         "cap": {key: next((c[key] for c in caps if isinstance(c.get(key), str) and c[key] in order), None)
@@ -374,14 +374,16 @@ def lower(slot: dict, cap: dict) -> dict:
 
 
 def chat_values(settings: dict, checks: Checks) -> dict:
-    """What a chat or read turn is made with (§9.5): `{slot, mcp, model_cap, effort_cap, failed}`.
+    """What a chat or read turn is made with (§9.5): `{slot, mcp, mcp_scope, model_cap, effort_cap, failed}`.
 
-    `slot` is `chat` under the cap, `mcp` is `chat_mcp` + `studio`, the two caps go to the engine as well.
+    `slot` is `chat` under the cap, `mcp` is `chat_mcp` (else `mcp`) + `studio`, `mcp_scope` is 'only' when the
+    employee names servers and 'all' when it names none, the two caps go to the engine as well.
     `failed` is `["provider_unguarded"]` when the slot names a provider that is no Claude Code runner — the
     turn is not made then. The provider the relay's stage names is looked at where the turn is made."""
     slot, cap = lower(settings["chat"], settings["cap"]), settings["cap"]
-    return {"slot": slot, "mcp": [*settings["chat_mcp"], STUDIO_MCP], "model_cap": cap["model"],
-            "effort_cap": cap["effort"], "failed": [] if checks.guarded(slot.get("provider")) else ["provider_unguarded"]}
+    names = settings["chat_mcp"] or settings.get("mcp") or []  # both empty = every server (scope 'all'), else only these
+    return {"slot": slot, "mcp": [*names, STUDIO_MCP], "mcp_scope": "only" if names else "all",
+            "model_cap": cap["model"], "effort_cap": cap["effort"], "failed": [] if checks.guarded(slot.get("provider")) else ["provider_unguarded"]}
 
 
 # --- the prompt (§9.1) --------------------------------------------------------------------------------------
@@ -887,6 +889,66 @@ def add_harness_lines(store: StudioStore, studio_dir: Path | str, *,
             done.append(row["id"])
         except Exception:  # noqa: BLE001 - one employee's file or git must not stop the others
             log.exception("studio: %s 의 GUIDE.md 에 하네스 줄을 덧붙이지 못했다", row["id"])
+    return done
+
+
+STRUCTURE_DOC_MARK = "구조 문서 결재"
+STRUCTURE_DOC_HEAD = "## " + STRUCTURE_DOC_MARK
+STRUCTURE_DOC_AUTO_MESSAGE = "guide: 구조 문서 결재 (자동)"
+
+
+def structure_doc_block(original: str) -> str:
+    """T4: the `## 구조 문서 결재` section of a part's template (up to the next `## ` heading), '' when it has none."""
+    lines = original.splitlines()
+    at = next((i for i, line in enumerate(lines) if line.strip() == STRUCTURE_DOC_HEAD), None)
+    if at is None:
+        return ""
+    end = next((i for i in range(at + 1, len(lines)) if lines[i].startswith("## ")), len(lines))
+    return "\n".join(lines[at:end]).strip()
+
+
+def with_structure_doc(guide: str, original: str) -> str:
+    """T4: `guide` with the `## 구조 문서 결재` section of `original` (the program part's template), only when `guide`
+    has a value and has no such words yet. It goes before the first `## 결재 기준` line, else at the end; the rest of
+    `guide` is not changed. Idempotent, like `with_harness_lines`: the caller checks the history for a deleted one."""
+    if not guide.strip() or STRUCTURE_DOC_MARK in guide:
+        return guide
+    block = structure_doc_block(original)
+    if not block:
+        return guide
+    guide_lines = guide.splitlines(keepends=True)
+    at = next((i for i, line in enumerate(guide_lines) if line.startswith(HARNESS_BEFORE)), None)
+    if at is None:
+        return guide.rstrip() + "\n\n" + block + "\n"
+    return "".join(guide_lines[:at]).rstrip() + "\n\n" + block + "\n\n" + "".join(guide_lines[at:])
+
+
+def add_structure_doc(store: StudioStore, studio_dir: Path | str, *,
+                      write: Callable[[Path, str], None] | None = None,
+                      already: Callable[[Path], bool] | None = None) -> list[str]:
+    """T4: `with_structure_doc` on the GUIDE.md of every program-part employee in service. `already(folder)` true =
+    the automatic commit is in the folder's history (the owner has had the section and may have deleted it): skipped.
+    Each employee is tried apart. Returns the ids changed. `write(folder, text)` writes the file — the caller commits."""
+    original = part_defaults()["program"]["guide_template"]
+    done = []
+    for row in store.list_employees():
+        if row["department_id"] != "program":
+            continue
+        try:
+            target = folder(studio_dir, row["id"]) / "GUIDE.md"
+            text = _read(target)
+            if text is None:
+                continue
+            fresh = with_structure_doc(text, original)
+            if fresh == text or (already is not None and already(target.parent)):
+                continue
+            if write is not None:
+                write(target.parent, fresh)
+            else:
+                target.write_text(fresh, encoding="utf-8", newline="")
+            done.append(row["id"])
+        except Exception:  # noqa: BLE001 - one employee's file or git must not stop the others
+            log.exception("studio: %s 의 GUIDE.md 에 구조 문서 결재 절을 덧붙이지 못했다", row["id"])
     return done
 
 

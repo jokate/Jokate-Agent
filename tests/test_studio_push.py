@@ -495,8 +495,10 @@ def test_attach_puts_the_sender_beside_the_toast(studio, http, monkeypatch):
     heard = []
     engine = SimpleNamespace(notifier=lambda run_id, kind, title, detail: heard.append((run_id, kind)))
     monkeypatch.setattr(api, "_commit_listeners", [])
+    monkeypatch.setattr(api, "_pusher", None)  # attach gives the REST layer its pusher: put back at the end
     pusher = push.attach(engine, studio.pusher.inbox_factory, lambda: studio.key_path)
     try:
+        assert api._pusher is pusher  # the test push of a device asks it
         assert isinstance(engine.notifier, notify.Fanout) and engine.notifier.receivers[1] is pusher
         assert api._commit_listeners == [pusher.committed]
         studio.device(1, "fcm-1")
@@ -511,6 +513,7 @@ def test_attach_puts_the_sender_beside_the_toast(studio, http, monkeypatch):
 def test_attach_leaves_the_failure_of_a_tracked_turn_to_the_notice_of_its_room(studio, http, monkeypatch):
     engine = SimpleNamespace(notifier=None)
     monkeypatch.setattr(api, "_commit_listeners", [])
+    monkeypatch.setattr(api, "_pusher", None)
     pusher = push.attach(engine, studio.pusher.inbox_factory, lambda: studio.key_path)
     api.track_run("run_c", mode="chat", employee_id="emp_1", room_id="room_1")  # as chat.py does around `advance`
     try:
@@ -850,11 +853,12 @@ def test_the_server_looks_at_the_waiting_items_from_its_start_to_its_stop(server
     assert server.start_push_reminders in server.app.router.on_startup
     assert server.stop_push_reminders in server.app.router.on_shutdown
     calls = []
+    monkeypatch.setattr(server.pusher, "announce_off", lambda *args: calls.append("announce_off"))
     monkeypatch.setattr(server.pusher, "watch", lambda: calls.append("watch"))
     monkeypatch.setattr(server.pusher, "unwatch", lambda: calls.append("unwatch"))
     server.start_push_reminders()
     server.stop_push_reminders()
-    assert calls == ["watch", "unwatch"]
+    assert calls == ["announce_off", "watch", "unwatch"]  # why the push is off is told before the looks begin
 
 
 def test_a_room_is_muted_over_rest_and_its_employees_words_are_not_pushed(server, key_file, http, monkeypatch):
@@ -937,3 +941,93 @@ def test_an_employees_words_are_pushed_with_a_reply_and_the_room_and_nothing_els
     studio.say("room_system", "오늘 한 일", author_id=minsu["id"], meta={"event": "daily_report"})
     assert http.messages()[-1]["data"] == {"grade": "digest", "type": "room", "id": "room_system"}
     assert len(http.sent()) == 3
+
+
+# --- 시험 알림 (T5): Pusher.test · announce_off ---------------------------------------------------------------
+def test_a_test_push_that_goes_out_is_sent(studio, http):
+    device = studio.device(1, "fcm-1")
+    assert studio.pusher.test(studio.store.get_device(device["id"])) == {"result": "sent", "reason": "", "detail": ""}
+    assert http.messages() == [fcm("fcm-1", push.TEST_TITLE, push.TEST_LINE)]  # urgent, a title and a line
+    assert studio.token(device) == "fcm-1"
+
+
+def test_a_test_push_that_fcm_calls_dead_clears_the_token(studio, http):
+    device = studio.device(1, "fcm-1")
+    http.sends["fcm-1"] = [fcm_error(404, "UNREGISTERED", "NOT_FOUND")]
+    answer = studio.pusher.test(studio.store.get_device(device["id"]))
+    assert (answer["result"], answer["reason"]) == ("dead", "UNREGISTERED")
+    assert studio.token(device) is None
+    assert studio.store.get_device(device["id"])["revoked_at"] is None  # the device is not revoked
+
+
+def test_a_test_push_that_fails_says_what_fcm_said(studio, http):
+    device = studio.device(1, "fcm-1")
+    http.sends["fcm-1"] = [fcm_error(400, None, "INVALID_ARGUMENT")]
+    answer = studio.pusher.test(studio.store.get_device(device["id"]))
+    assert answer["result"] == "failed" and "HTTP 400" in answer["reason"]
+    assert studio.token(device) == "fcm-1"
+
+
+def test_a_test_push_of_a_device_without_a_token_is_no_token(studio, http):
+    device = studio.device(1, None)
+    assert studio.pusher.test(studio.store.get_device(device["id"]))["result"] == "no_token"
+    assert http.calls == []
+
+
+def test_a_test_push_with_no_key_path_says_the_push_is_off(studio, http):
+    device = studio.device(1, "fcm-1")
+    studio.key_path = ""
+    answer = studio.pusher.test(studio.store.get_device(device["id"]))
+    assert (answer["result"], answer["reason"]) == ("off", "no_key") and answer["detail"]
+    assert http.calls == []
+
+
+def test_a_test_push_with_a_key_that_cannot_be_read_says_so_and_not_where(studio, http, tmp_path):
+    device = studio.device(1, "fcm-1")
+    broken = tmp_path / "secret-folder-name.json"
+    broken.write_text("{", encoding="utf-8")
+    studio.key_path = str(broken)
+    answer = studio.pusher.test(studio.store.get_device(device["id"]))
+    assert (answer["result"], answer["reason"]) == ("off", "unreadable")
+    assert answer["detail"] and "secret-folder-name" not in answer["detail"] and str(tmp_path) not in answer["detail"]
+    assert studio.pusher.status() == {"on": False, "reason": "unreadable", "detail": answer["detail"]}
+    other = tmp_path / "other.json"  # a field that is missing is named, not the file
+    other.write_text(json.dumps({"project_id": "x"}), encoding="utf-8")
+    studio.key_path = str(other)
+    detail = studio.pusher.status()["detail"]
+    assert "client_email" in detail and "private_key" in detail and "other.json" not in detail
+    assert http.calls == []
+
+
+def system_lines(studio):
+    return [m for m in studio.store.list_messages("room_system", limit=200) if m["meta"].get("event") == "push_off"]
+
+
+def test_the_start_says_once_why_the_push_is_off(studio, tmp_path):
+    studio.key_path = ""
+    first = studio.pusher.announce_off()
+    assert first is not None and first["author_kind"] == "system" and first["body"].startswith("푸시가 꺼져 있습니다")
+    assert first["meta"]["reason"] == "no_key"
+    assert studio.pusher.announce_off() is None and len(system_lines(studio)) == 1  # the same reason: once
+
+    broken = tmp_path / "keys" / "broken.json"
+    broken.parent.mkdir()
+    broken.write_text("{", encoding="utf-8")
+    studio.key_path = str(broken)  # another reason: another line, and no path in it
+    second = studio.pusher.announce_off()
+    assert second is not None and second["meta"]["reason"] == "unreadable" and len(system_lines(studio)) == 2
+    assert str(tmp_path) not in second["body"] and "broken.json" not in second["body"]
+    assert "keys" not in json.dumps(second["meta"], ensure_ascii=False)
+
+
+def test_the_start_says_nothing_while_the_push_is_on(studio, http):
+    assert studio.pusher.announce_off() is None and system_lines(studio) == []
+
+
+def test_the_server_tells_why_the_push_is_off_at_its_start(server, monkeypatch):
+    monkeypatch.setattr(server.pusher, "watch", lambda: None)
+    server.start_push_reminders()
+    server.start_push_reminders()
+    lines = [m for m in api.get_store().list_messages("room_system", limit=50) if m["meta"].get("event") == "push_off"]
+    assert len(lines) == 1 and lines[0]["meta"]["reason"] == "no_key"
+    assert api._pusher is server.pusher  # push.attach gave it to the REST layer

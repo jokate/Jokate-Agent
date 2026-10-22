@@ -236,7 +236,7 @@ def test_stop_takes_a_task_out_of_the_line_and_a_run_at_work_to_blocked(line):
     [item] = line.lab.pending()
     assert (item["kind"], item["task_id"], item["requester_kind"]) == ("question", first["id"], "system")
     assert item["payload"]["reason"] == "run_cancelled"
-    assert [option["id"] for option in item["payload"]["options"]] == ["retry", "wrap_up"]
+    assert [option["id"] for option in item["payload"]["options"]] == ["retry", "wrap_up", "restart"]
     assert line.row(second)["run_id"] is None  # the slot is free, and the task that left the line is not started
     refused(line.stop(first), 409, "precondition_failed")  # blocked: nothing to stop
 

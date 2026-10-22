@@ -29,7 +29,7 @@ PATHS = {  # state -> the steps from a task the owner registered: (to, who, argu
     "review": [("working", "system", {}), ("review", "employee", REVIEW)],
     "done": [("working", "system", {}), ("review", "employee", REVIEW), ("done", "owner", {})],
 }
-ADDED = {"room_id", "depends_on", "dependents", "deps_met", "pending_inbox_id", "queue_position", "run"}
+ADDED = {"room_id", "depends_on", "dependents", "deps_met", "pending_inbox_id", "queue_position", "run", "capabilities"}
 
 
 class Fx(Effects):

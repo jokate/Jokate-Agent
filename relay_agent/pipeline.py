@@ -21,6 +21,7 @@ import subprocess
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -33,15 +34,33 @@ from .baton import Baton, StopNote
 from .history import HistoryStore
 from .providers import LEGACY_RUNNER, ProviderRegistry
 from .notify import NOTIFY_KINDS
-from .projctx import ProjectContext, discover, game_root, index_allowed
+from . import mcpcheck
+from .projctx import ProjectContext, discover, game_root, index_allowed, mcp_sources, plugin_mcp
 from .runners import LiveChannel, pid_alive, Runner, RunnerError, StageCall, Usage, make_runner
 from .usage import UsageStore
 from .repos import RepoRegistry, RepoSpec
 from .journal import JournalWorkspace
 from .workspace import DEFAULT_EXCLUDES, Workspace, WorkspaceError, _remove, check_shadow, dir_size, gc_shadow, shadow_dir_for
 
+BUILD_HEAD = "===== 빌드·검증 ====="  # the head of the section a guard appends to a studio task run's prompt (prompt_append)
 WRITE_TOOLS = {"Edit", "Write", "Bash", "NotebookEdit"}
 READ_ONLY_MCP = {"docs_read", "handoff", "digest", "studio"}  # every other MCP server may change the real project
+# The live editor server of the user's · plugins' servers a scope 'all' run has: it changes the real project, so
+# such a run is not made in a copy. Must be the same as `studio.plugins.DEFAULT_SERVER` (a test ties them).
+NATIVE_LIVE_MCP = {"unreal"}
+
+
+def native_live_mcp(ctx: "ProjectContext | None") -> list[str]:
+    """Names of the user's (~/.claude.json) and plugins' servers that are the live editor: named as NATIVE_LIVE_MCP,
+    or a plugin's server whose name ends in `_unreal`. Those are the ones Claude Code loads itself on a scope 'all' run."""
+    return [s["name"] for s in mcp_sources(ctx, {})
+            if (s["source"] == "user" and s["name"] in NATIVE_LIVE_MCP)
+            or (s["source"] == "plugin" and (s["name"] in NATIVE_LIVE_MCP or s["name"].endswith("_unreal")))]
+def is_unreal_mcp(name: str) -> bool:
+    """Is that MCP server name the live editor's (same names as `native_live_mcp`: unreal, or `*_unreal`)?"""
+    return name in NATIVE_LIVE_MCP or name.endswith("_unreal")
+
+
 # Words in an MCP tool name that mean it changes the project/editor (create_blueprint, set_actor_property,
 # SpawnActor …). Read tools (get/list/find/search/describe) have none of them. A heuristic: unknown names pass.
 MCP_CHANGE_WORDS = {
@@ -207,6 +226,8 @@ class RunState(BaseModel):
     stage_budget_boost: dict[str, float] = {}  # stage -> multiplier on max_budget_usd, doubled per approval
     done_sessions: dict[str, str] = {}  # stage -> conversation of its last finished attempt (a redo continues it)
     auto_extends: int = 0  # auto mode: how many times a budget was extended without asking
+    spend_noticed_usd: float = 0.0  # studio run: the cost at the last spend notice (0 = none told yet)
+    studio_mode: str | None = None  # 'work' | 'chat' once studio took the run: survives a server restart
     pending_budget_stage: str | None = None  # stage paused because it hit its own budget
     repo: str | None = None  # registered repository name, if the run targets one
     auto_apply: bool = False
@@ -218,6 +239,10 @@ class RunState(BaseModel):
     approval: Literal["auto", "ai", "always", "never"] = "ai"
     mcp: list[str] | None = None  # extra MCP servers picked for this run (None = the repo's `mcp` list)
     mcp_only: list[str] | None = None  # of `mcp` and the project's own servers, keep these only (None = all of them)
+    # None = as before (the repo's list + the project's servers, nothing else). 'all' (studio: the employee did not
+    # narrow it) = Claude Code loads the user's · project's · plugins' · connectors' servers itself, `mcp` adds the
+    # registry's. 'only' = narrowed to `mcp_only`, `--strict-mcp-config` stays.
+    mcp_scope: Literal["all", "only"] | None = None
     model_cap: str | None = None  # strongest Claude tier any stage may use (haiku|sonnet|opus|fable), None = relay's
     effort_cap: str | None = None  # highest effort (low|medium|high|xhigh|max), None = relay's
     owner_pid: int | None = None
@@ -320,6 +345,14 @@ class RelayEngine:
         # ({allowed_tools, settings_path, env, claude_only}), or None = this run's call stays as it is. None
         # unless a layer registers one (studio: design/studio/ARCHITECTURE.md §11.4). If it raises, the stage fails.
         self.guard_stage: Callable[..., dict | None] | None = None
+        # (run id) -> 'work' | 'chat' for a run studio started, None for any other run. A studio run is not stopped
+        # by the run · stage budget or by a human gate: `run_notice` (run id, kind, detail) tells its room instead,
+        # about the spending at the first budget and then at every `spend_notice_step_usd` more (studio/notice.py).
+        self.studio_mode: Callable[[str], str | None] | None = None
+        self.run_notice: Callable[[str, str, dict], None] | None = None
+        self.spend_notice_step_usd: float = 5.0
+        self.studio_auto_restarts: int = 1  # task runs the studio starts over by itself after a failure (studio/work.py)
+        self.studio_auto_review: bool = True  # a studio run that ends without a review request has it filed by the server
         self.notifier = notifier
         self.handoff_writer = handoff_writer  # lightweight model that writes the stop hand-over
         self.router = router  # (prompt, model) -> (answer, usage): picks the relay for an `auto` run
@@ -480,17 +513,24 @@ class RelayEngine:
 
     @staticmethod
     def _run_mcp_names(workdir: Path, repo: RepoSpec | None, picked: list[str] | None,
-                       only: list[str] | None = None) -> list[str]:
+                       only: list[str] | None = None, mcp_scope: str | None = None) -> list[str]:
         """Servers a run in this folder will attach besides the stages' own: the run's pick (or the repo's
         default) and the project's own servers. Used before the run exists to decide copy vs in place.
-        `only` (create's `mcp_only`): the names that are kept, the others are dropped — as `_attached_mcp` does."""
+        `only` (create's `mcp_only`): the names that are kept, the others are dropped — as `_attached_mcp` does.
+        `mcp_scope` 'all': the user's · plugins' live editor server (`native_live_mcp`) counts too."""
         names = list(picked if picked is not None else (repo.mcp if repo else []))
+        ctx = None
         if repo is None or repo.project_context:
             try:
                 ctx = discover(Path(workdir), mcp_from=repo.mcp_from if repo else None)
             except OSError:
                 ctx = None
             names += list(ctx.mcp) if ctx else []
+        # of the user's or the plugins' servers a scope 'all' run also gets, only the editor is counted: which of the
+        # others a run uses is not known here, and counting them would keep every copy of a studio task from being
+        # made (decision of 2026-10-22)
+        if mcp_scope == "all":
+            names += [n for n in native_live_mcp(ctx) if n not in names]
         return names if only is None else [name for name in names if name in only]
 
     def _attached_mcp(self, run: RunState, ctx: ProjectContext | None, repo: RepoSpec | None) -> dict[str, dict]:
@@ -500,19 +540,49 @@ class RelayEngine:
         same; the project's and the user's own are not looked for, so a pick of those is an `mcp_missing`."""
         if ctx is None and not any(name in self.mcp_env for name in run.mcp or []):
             return {}  # a run that picked no such server (dashboard · CLI · campaign): no MCP, as it was
+        if run.mcp_scope == "all":
+            # Claude Code loads the user's · project's · plugins' servers itself (`_native_mcp`): only the registry's
+            # that the run picked go into the config file
+            native = self._native_mcp(run, ctx)
+            attached = {}
+            for name in run.mcp or []:
+                if name in self.mcp_registry:
+                    attached[name] = self.mcp_registry[name]
+                elif name not in native:
+                    self._event(run, "-", "mcp_missing", server=name)
+            return attached
         attached = dict(ctx.mcp) if ctx is not None else {}
         optional = ctx.optional_mcp if ctx is not None else {}
+        plugins = plugin_mcp(Path.home().resolve()) if run.mcp_scope == "only" else {}
         for name in (run.mcp if run.mcp is not None else (repo.mcp if repo else [])):
             if name in attached or name in self.mcp_registry:
                 if name in self.mcp_registry and name not in attached:
                     attached[name] = self.mcp_registry[name]
             elif name in optional:
                 attached[name] = optional[name]["config"]
+            elif name in plugins:
+                attached[name] = plugins[name]
             else:
                 self._event(run, "-", "mcp_missing", server=name)
         if run.mcp_only is not None:  # the same narrowing as _run_mcp_names; a stage's own `mcp:` is not narrowed
             attached = {name: config for name, config in attached.items() if name in run.mcp_only}
         return attached
+
+    def _native_mcp(self, run: RunState, ctx: ProjectContext | None) -> dict[str, dict | None]:
+        """name -> config of the servers Claude Code loads by itself in a run of scope 'all': the project's
+        (.mcp.json), the user's (~/.claude.json) and the plugins'. {} for any other run. The connectors of the
+        user's account are not here: no file names them (see `_mcp_plan`)."""
+        if run.mcp_scope != "all":
+            return {}
+        return {s["name"]: s["config"] for s in mcp_sources(ctx, {}) if s["source"] in ("project", "user", "plugin")}
+
+    def _mcp_plan(self, run: RunState, ctx: ProjectContext | None, attached: dict, native: dict,
+                  failed: dict[str, str]) -> None:
+        """Record the servers this run really gets — [{name, source}] — as the `mcp_plan` event."""
+        wanted = {*attached, *native, *(name for name in self.mcp_env if name in self.mcp_registry)}
+        servers = [{"name": s["name"], "source": s["source"]} for s in mcp_sources(ctx, self.mcp_registry)
+                   if (s["name"] in wanted and s["name"] not in failed) or (s["source"] == "connector" and run.mcp_scope == "all")]
+        self._event(run, "-", "mcp_plan", scope=run.mcp_scope, servers=servers, failed=sorted(failed))
 
     # --- lifecycle ---------------------------------------------------------
     DEFAULT_APPROVAL = "auto"
@@ -521,23 +591,29 @@ class RelayEngine:
     AUTO_MAX_EXTENDS = 4        # stage-budget doublings + run-budget extensions, per run
     AUTO_RUN_COST_FACTOR = 4.0  # x relay max_run_cost_usd
     AUTO_MIN_RETRIES = 3
+    STUDIO_BOOST_MAX = 8.0      # studio run: a stage budget is doubled up to this multiple, then kept (told, not stopped)
 
     def create(self, relay_path: Path, goal: str, workdir: Path | None = None, session_id: str | None = None,
                workspace: str | None = None, repo: str | None = None, auto_apply: bool | None = None,
                stage_models: dict[str, dict] | None = None, attachments: list[Path] | None = None,
                approval: str | None = None, mcp: list[str] | None = None,
                model_cap: str | None = None, effort_cap: str | None = None,
-               needs_writes: bool = False, mcp_only: list[str] | None = None,
+               needs_writes: bool = False, mcp_only: list[str] | None = None, mcp_scope: str | None = None,
                pin_copy: bool = False, routed: dict | None = None) -> RunState:
         """Start a run as a new turn. Without session_id a new session is opened.
         With a registered repo, its path, default workspace mode, verify commands and notes apply.
         model_cap / effort_cap: ceilings for every stage (e.g. never Fable, never above high).
         needs_writes: the work must change the target, so an `auto` relay never routes to a read-only relay.
         mcp_only: of `mcp` and the project's own MCP servers, only these are attached (None = all, as before).
+        mcp_scope: None = as before; 'all' = Claude Code loads the user's · project's · plugins' · connectors' servers
+        itself (no `--strict-mcp-config`) and `mcp` adds the registry's; 'only' = narrowed to `mcp_only` (needs it).
+        A scope also means a server that does not answer is left out and told, not a reason to fail the run.
         pin_copy: the run must not write in the folder itself — it is refused (ValueError) instead of made when
         it would work in place: `inplace`, `none` with a stage that writes, or `copy` that a live MCP would switch.
         routed: what `route()` returned for an `auto` relay, given with `relay_path` the relay it picked — the
         choice is recorded (`relay_routed`, the router's usage) as if it had been made here."""
+        if mcp_scope not in (None, "all", "only") or (mcp_scope == "only" and mcp_only is None):
+            raise ValueError(f"mcp_scope 는 all · only 중 하나이고 only 는 mcp_only 와 함께 (받음: {mcp_scope})")
         if model_cap and model_cap not in MODEL_ORDER:
             raise ValueError(f"model_cap 은 {', '.join(MODEL_ORDER)} 중 하나 (받음: {model_cap})")
         if effort_cap and effort_cap not in EFFORT_ORDER:
@@ -611,7 +687,7 @@ class RelayEngine:
             chosen[stage_name] = {"provider": provider, "model": choice.get("model") or None}
             if effort:
                 chosen[stage_name]["effort"] = effort
-        live_mcp = sorted((set(m for s in spec.stages for m in s.mcp) | set(self._run_mcp_names(workdir, repo_spec, mcp, mcp_only)))
+        live_mcp = sorted((set(m for s in spec.stages for m in s.mcp) | set(self._run_mcp_names(workdir, repo_spec, mcp, mcp_only, mcp_scope=mcp_scope)))
                           - READ_ONLY_MCP)
         if pin_copy:
             # the folder itself must stay as it is (studio: a project that holds this server's code): a run that
@@ -640,7 +716,7 @@ class RelayEngine:
             auto_apply=bool(auto_apply),
             stage_models=chosen,
             approval=approval if approval in ("auto", "ai", "always", "never") else self.DEFAULT_APPROVAL,
-            mcp=mcp, mcp_only=mcp_only,
+            mcp=mcp, mcp_only=mcp_only, mcp_scope=mcp_scope,
             model_cap=model_cap or None,
             effort_cap=effort_cap or None,
         )
@@ -1113,15 +1189,20 @@ class RelayEngine:
         return recovered
 
     def _check_mcp_ready(self, run: RunState, stages: list[StageSpec], attached: dict[str, dict], repo,
-                         ctx: ProjectContext | None) -> str | None:
+                         ctx: ProjectContext | None, native: dict[str, dict | None] | None = None,
+                         failed_out: dict[str, str] | None = None) -> str | None:
         """Before any stage runs: the MCP servers the remaining stages will use must answer (mcp_probe), and a
-        stage that edits through an editor MCP needs one attached. Returns why the run can't start, or None."""
+        stage that edits through an editor MCP needs one attached. Returns why the run can't start, or None.
+        A run with an `mcp_scope` (studio) is not stopped by a server that does not answer: those are put in
+        `failed_out` (name -> why) for the caller to leave out and tell. `native`: the servers Claude Code loads
+        itself, checked as well when their config is known. Every answer is kept (`mcpcheck.record`)."""
+        native = native or {}
         live: dict[str, dict] = {}
         for st in stages:
             if not self._stage_tools(st, repo, ctx):
                 continue  # a stage without tools gets no MCP
-            for name in [*attached, *st.mcp]:
-                config = attached.get(name) or self.mcp_registry.get(name)
+            for name in [*attached, *st.mcp, *native]:
+                config = attached.get(name) or native.get(name) or self.mcp_registry.get(name)
                 if name not in READ_ONLY_MCP and name not in live and config:
                     live[name] = config
         if any(st.edits_via_mcp for st in stages) and not live:
@@ -1130,15 +1211,24 @@ class RelayEngine:
         if self.mcp_probe is None or not live:
             return None
         failed = {}
-        for name, config in live.items():
+
+        def check(name: str) -> tuple[str, str | None]:
             try:
-                why = self.mcp_probe(config)
+                return name, self.mcp_probe(live[name])
             except Exception as e:  # noqa: BLE001 - a broken probe must not block the run
-                why = None
                 self._event(run, "-", "mcp_check_error", server=name, error=str(e)[:200])
-            if why:
-                failed[name] = why
+                return name, None
+
+        with ThreadPoolExecutor(max_workers=min(8, len(live))) as pool:  # a slow server must not add up
+            for name, why in pool.map(check, list(live)):
+                mcpcheck.record(name, why or None)
+                if why:
+                    failed[name] = why
         self._event(run, "-", "mcp_check", ok=[n for n in live if n not in failed], failed=failed)
+        if failed and run.mcp_scope is not None:
+            if failed_out is not None:
+                failed_out.update(failed)
+            return None
         if failed:
             return ("MCP 연결 안 됨 — " + "; ".join(f"{n}: {w}" for n, w in failed.items())
                     + " · 서버(에디터)를 켠 뒤 재개하세요. 단계는 시작하지 않았습니다(비용 없음)")
@@ -1628,6 +1718,35 @@ class RelayEngine:
                 pass
             self._let_go(run_id, lock)  # frees the run, then after_advance — both at the end of the class
 
+    def _studio_mode_of(self, run_id: str) -> str | None:
+        if self.studio_mode is None:
+            return None
+        try:
+            return self.studio_mode(run_id)
+        except Exception:  # noqa: BLE001 - not knowing is "not a studio run": the old stops stay
+            return None
+
+    def _tell(self, run_id: str, kind: str, detail: dict) -> None:
+        if self.run_notice is None:
+            return
+        try:
+            self.run_notice(run_id, kind, detail)
+        except Exception:  # noqa: BLE001 - a notice must not break a run
+            pass
+
+    def _spend_check(self, run: RunState, stage: str, budget_hit: bool) -> None:
+        """Studio run: tell once when the budget is first reached, then at every `spend_notice_step_usd` more."""
+        step, cost = self.spend_notice_step_usd, run.cost_usd
+        if run.spend_noticed_usd <= 0:
+            due = budget_hit
+        else:
+            due = step > 0 and cost >= run.spend_noticed_usd + step
+        if not due:
+            return
+        run.spend_noticed_usd = max(cost, 1e-9)
+        self._event(run, stage, "spend_notice", spent_usd=round(cost, 4))
+        self._tell(run.id, "spend", {"spent_usd": round(cost, 4), "stage": stage})
+
     def _advance(self, run_id: str, cancel: threading.Event, resume: bool) -> RunState:
         run = self.load(run_id)
         if run.status not in (RESUMABLE if resume else ("pending",)):
@@ -1681,40 +1800,69 @@ class RelayEngine:
         ctx = self.project_context(run)
         game = game_root(Path(run.workdir)) is not None  # a game project: harness skills and index commands (§10.1)
         attached = self._attached_mcp(run, ctx, repo)
+        native = self._native_mcp(run, ctx)
         if ctx is not None:
             self._event(run, "-", "project_context", root=ctx.root.as_posix(),
                         instructions=[p.relative_to(ctx.root).as_posix() for p in ctx.instructions],
-                        skills=ctx.skills, mcp=list(attached), commands=ctx.commands)
-            repo_lines += "\n".join(ctx.prompt_lines(cwd, list(attached))) + "\n"
-        problem = self._check_mcp_ready(run, spec.stages[run.index:], attached, repo, ctx)
+                        skills=ctx.skills, mcp=[*attached, *native], commands=ctx.commands)
+        failed_mcp: dict[str, str] = {}
+        problem = self._check_mcp_ready(run, spec.stages[run.index:], attached, repo, ctx, native, failed_mcp)
         if problem:
             return self._fail(run, "-", problem)
+        unreal_told = game and run.mcp_scope != "only"  # a game project not narrowed to names: the editor's server has its own notice
+        if unreal_told:  # the editor's server is missing, or set up but not answering
+            if not any(is_unreal_mcp(n) for n in (*attached, *native, *failed_mcp)):
+                self._tell(run.id, "unreal", {"state": "missing"})
+            else:
+                for name, why in failed_mcp.items():
+                    if is_unreal_mcp(name):
+                        self._tell(run.id, "unreal", {"state": "down", "name": name, "why": why})
+        if failed_mcp:  # a run with a scope goes on without the servers that did not answer, and says so
+            attached = {name: config for name, config in attached.items() if name not in failed_mcp}
+            other = {name: why for name, why in failed_mcp.items() if not (unreal_told and is_unreal_mcp(name))}
+            if other:  # the editor's server was told of on its own (above)
+                self._tell(run.id, "mcp", {"failed": other})
+        denied_mcp = [name for name in failed_mcp if name in native]  # Claude Code loads these itself: say no to them
+        native = {name: config for name, config in native.items() if name not in failed_mcp}
+        if ctx is not None:  # the servers the AI is told it has: the ones that answered
+            repo_lines += "\n".join(ctx.prompt_lines(cwd, [*attached, *native])) + "\n"
+        if run.mcp_scope is not None:
+            self._mcp_plan(run, ctx, attached, native, failed_mcp)
         mcp_overrides = {}
         if repo and repo.docs_root and "docs_read" in self.mcp_registry:
             entry = dict(self.mcp_registry["docs_read"])
             entry["args"] = list(entry.get("args", []))[:-1] + [str(repo.docs_root)]
             mcp_overrides["docs_read"] = entry  # this repo's docs, not the global docs_root
 
+        mode = self._studio_mode_of(run.id) or run.studio_mode  # 'work' | 'chat' | None: a studio run is told, not stopped
+        if mode and run.studio_mode != mode:
+            run.studio_mode = mode  # kept: a run resumed after a restart is still studio's
+            self.save(run)
         while run.index < len(spec.stages):
             stage = spec.stages[run.index]
             if cancel.is_set():  # a cancel that arrived between stages
                 return self._fail(run, stage.name, "사용자가 취소함", status="cancelled")
             limit = spec.max_run_cost_usd
-            if (limit and run.cost_usd >= limit + run.budget_extra_usd and run.approval == "auto"
-                    and run.cost_usd < limit * self.AUTO_RUN_COST_FACTOR):
-                run.budget_extra_usd = run.cost_usd  # as an approval would: one more full budget from here
-                self._event(run, stage.name, "budget_auto_extended", scope="run", spent_usd=round(run.cost_usd, 4),
-                            limit_usd=round(limit + run.budget_extra_usd, 4),
-                            ceiling_usd=round(limit * self.AUTO_RUN_COST_FACTOR, 2))
-            if limit and run.cost_usd >= limit + run.budget_extra_usd:
-                run.status = "awaiting_approval"
-                self._event(run, stage.name, "budget_exceeded", spent_usd=round(run.cost_usd, 4),
-                            limit_usd=limit + run.budget_extra_usd, next=stage.name)
-                self._write_stop(run, "budget", stage.name,
-                                 f"실행 비용 ${run.cost_usd:.2f} 가 한도 ${limit + run.budget_extra_usd:.2f} 에 도달")
-                self._settle_workspace(run)
-                self.save(run)
-                return run
+            if mode:  # no stop and no approval: the room is told (limit 0 = no limit: told from the first step)
+                step = self.spend_notice_step_usd
+                hit = (run.cost_usd >= limit + run.budget_extra_usd) if limit else (step > 0 and run.cost_usd >= step)
+                self._spend_check(run, stage.name, hit)
+            else:
+                if (limit and run.cost_usd >= limit + run.budget_extra_usd and run.approval == "auto"
+                        and run.cost_usd < limit * self.AUTO_RUN_COST_FACTOR):
+                    run.budget_extra_usd = run.cost_usd  # as an approval would: one more full budget from here
+                    self._event(run, stage.name, "budget_auto_extended", scope="run", spent_usd=round(run.cost_usd, 4),
+                                limit_usd=round(limit + run.budget_extra_usd, 4),
+                                ceiling_usd=round(limit * self.AUTO_RUN_COST_FACTOR, 2))
+                if limit and run.cost_usd >= limit + run.budget_extra_usd:
+                    run.status = "awaiting_approval"
+                    self._event(run, stage.name, "budget_exceeded", spent_usd=round(run.cost_usd, 4),
+                                limit_usd=limit + run.budget_extra_usd, next=stage.name)
+                    self._write_stop(run, "budget", stage.name,
+                                     f"실행 비용 ${run.cost_usd:.2f} 가 한도 ${limit + run.budget_extra_usd:.2f} 에 도달")
+                    self._settle_workspace(run)
+                    self.save(run)
+                    return run
 
             new_notes = self._merge_notes(run)
             if new_notes:
@@ -1757,10 +1905,12 @@ class RelayEngine:
                         effort=effort, reads=stage.reads_outputs, system_mode=stage.system_mode,
                         escalated=escalate and bool(stage.retry_model or stage.retry_effort))
             fresh_prompt = None
+            prompt_append = ""  # a guard's addition to this stage's prompt (below)
             tools = self._stage_tools(stage, repo, ctx, game)
             if resume_sid:
                 self._event(run, stage.name, "stage_resumed", session=resume_sid)
-            stage_mcp = stage.mcp + ([m for m in attached if m not in stage.mcp] if tools else [])
+            stage_mcp = [m for m in stage.mcp if m not in failed_mcp] + (
+                [m for m in attached if m not in stage.mcp] if tools else [])
             stage_overrides = {**attached, **self._stage_mcp(mcp_overrides, run, stage.name, cwd)}
             if self.mcp_env:  # nothing registered: both stay as they are
                 given, withheld = self._env_mcp(stage_overrides, run, stage.name)
@@ -1811,6 +1961,7 @@ class RelayEngine:
                 session_id=None if resume_sid else session_id,
                 resume_session=resume_sid,
             )
+            guard = None
             if self.guard_stage is not None:  # nothing registered (CLI, tests): the call stays as it was
                 try:
                     guard = self.guard_stage(run.id, stage.name, run_dir=self._dir(run.id), cwd=Path(cwd),
@@ -1818,22 +1969,47 @@ class RelayEngine:
                 except Exception as e:  # noqa: BLE001 - closed side: a guarded run does not go on without its guard
                     return self._fail(run, stage.name, f"가드를 걸지 못했습니다 — {type(e).__name__}: {e}"[:300])
                 if guard:  # pre-approvals, the hook's settings file, where the hook asks, Claude Code only
-                    # a repo without a verification command lost Bash to Grep/Glob (_stage_tools). A guarded run
-                    # whose profile approves Bash keeps the Bash its relay's stage lists: the hook judges each
-                    # command (owner's decision of 2026-10-14, §10.1)
-                    kept = (call.tools + ["Bash"] if call.tools and "Bash" not in call.tools
-                            and "Bash" in (stage.tools or []) and "Bash" in (guard.get("allowed_tools") or [])
-                            else call.tools)
-                    # a studio task run (guard 'skills'): the user's harness skills, so the skill-disabling flags go
-                    work = bool(guard.get("skills")) and bool(kept)
+                    prompt_append = str(guard.get("prompt_append") or "").strip()
+                    if guard.get("tools"):
+                        # a studio task run: every stage gets all of Claude Code's tools (a chat · read turn: the read-only
+                        # ones), whatever `tools` its relay stage lists (owner's decision of 2026-10-22). The hook still
+                        # judges each call.
+                        call = replace(
+                            call, tools=list(guard["tools"]), isolate=False,
+                            allowed_tools=list(dict.fromkeys(list(guard.get("allowed_tools") or []) + call.allowed_tools)))
+                    else:
+                        # a repo without a verification command lost Bash to Grep/Glob (_stage_tools). A guarded run
+                        # whose profile approves Bash keeps the Bash its relay's stage lists: the hook judges each
+                        # command (owner's decision of 2026-10-14, §10.1)
+                        kept = (call.tools + ["Bash"] if call.tools and "Bash" not in call.tools
+                                and "Bash" in (stage.tools or []) and "Bash" in (guard.get("allowed_tools") or [])
+                                else call.tools)
+                        # a studio task run (guard 'skills'): the user's harness skills, so the skill-disabling flags go
+                        work = bool(guard.get("skills")) and bool(kept)
+                        call = replace(
+                            call, tools=kept + ["Skill"] if work and "Skill" not in kept else kept,
+                            isolate=call.isolate and not work,
+                            allowed_tools=call.allowed_tools + [t for t in (guard.get("allowed_tools") or []) + (["Skill"] if work else [])
+                                                                if t not in call.allowed_tools])
                     call = replace(
-                        call, claude_only=bool(guard.get("claude_only")),
-                        tools=kept + ["Skill"] if work and "Skill" not in kept else kept,
-                        isolate=call.isolate and not work,
-                        allowed_tools=call.allowed_tools + [t for t in (guard.get("allowed_tools") or []) + (["Skill"] if work else [])
-                                                            if t not in call.allowed_tools],
+                        call, add_dirs=call.add_dirs + [d for d in guard.get("add_dirs") or [] if d not in call.add_dirs],
+                        claude_only=bool(guard.get("claude_only")),
+                        system_mode=guard.get("system_mode") or call.system_mode,
                         env={**call.env, **(guard.get("env") or {})},
                         settings_path=guard.get("settings_path") or call.settings_path)
+            if run.mcp_scope == "all" and call.tools:
+                # not strict: Claude Code loads the user's · project's · plugins' servers itself; they are only
+                # pre-approved here, and the ones that did not answer are refused
+                call = replace(call, native_mcp=list(native), denied_mcp=denied_mcp)
+            if guard:  # a studio run: what this stage really got — tools, servers (where from, connected or not), skills
+                sources = {s["name"]: s["source"] for s in mcp_sources(ctx, self.mcp_registry)}
+                servers = [{"name": n, "source": sources.get(n, "registry"), "status": "connected", "error": ""}
+                           for n in dict.fromkeys([*call.mcp_servers, *(call.native_mcp or [])])] + [
+                    {"name": n, "source": sources.get(n, "registry"), "status": "failed", "error": str(why)[:300]}
+                    for n, why in failed_mcp.items()]
+                self._event(run, stage.name, "stage_capabilities", tools=list(call.tools or []),
+                            allowed_tools=list(call.allowed_tools), mcp=servers,
+                            skills=list(ctx.skills) if ctx is not None else [])
             if resume_sid:
                 # continue the same conversation: only what changed, not the whole baton again
                 fresh_prompt = call.prompt
@@ -1856,6 +2032,12 @@ class RelayEngine:
                     "'남은 일'만 마친 뒤 결과 JSON 을 낸다."
                         + (f"\n\n# HANDOFF\n{handoff}" if handoff else "")
                         + (f"\n그사이 사용자 추가 지시:\n{notes}" if notes else "")))
+            if prompt_append:  # after the resume branch, which replaces the prompt: a studio task run's section of now
+                call = replace(
+                    call,
+                    prompt=call.prompt if BUILD_HEAD in call.prompt else f"{call.prompt}\n\n{prompt_append}",
+                    fresh_prompt=(call.fresh_prompt if call.fresh_prompt is None or BUILD_HEAD in call.fresh_prompt
+                                  else f"{call.fresh_prompt}\n\n{prompt_append}"))
             self._event(run, stage.name, "prompt_breakdown", **prompt_breakdown(call.system, call.prompt))
             stage_t0_ns = time.time_ns()
             try:
@@ -1871,6 +2053,14 @@ class RelayEngine:
                         run.history.append(StageRecord(stage=stage.name, at=_now(), verdict="retry", runner=stage.primary,
                                                        model=call.model or "?", total_input=0, output_tokens=0,
                                                        cost_usd=spent))  # money spent counts toward the run budget
+                    if mode:  # studio: no approval for a stage budget — twice the budget, same stage and conversation
+                        boost = min(run.stage_budget_boost.get(stage.name, 1.0) * 2, self.STUDIO_BOOST_MAX)
+                        run.stage_budget_boost[stage.name] = boost
+                        self._event(run, stage.name, "budget_auto_extended", scope="stage", studio=True, spent_usd=spent,
+                                    limit_usd=(stage.max_budget_usd or 0) * boost, capped=boost >= self.STUDIO_BOOST_MAX)
+                        self._spend_check(run, stage.name, True)
+                        self.save(run)
+                        continue
                     run_cap = (spec.max_run_cost_usd or 0) * self.AUTO_RUN_COST_FACTOR
                     if (run.approval == "auto" and run.auto_extends < self.AUTO_MAX_EXTENDS
                             and (not run_cap or run.cost_usd < run_cap)):
@@ -1914,6 +2104,8 @@ class RelayEngine:
                         provider=usage.runner, model=usage.model, estimated=usage.estimated,
                         input_tokens=usage.total_input, output_tokens=usage.output_tokens,
                         cost_usd=usage.cost_usd, duration_ms=usage.duration_ms)
+            if mode:
+                self._spend_check(run, stage.name, False)  # every `spend_notice_step_usd` after the first notice
 
             auto_redo = (result.verdict == "fail" and run.approval == "auto" and stage.on_retry
                          and run.retries.get(stage.name, 0) < max(stage.max_retries, self.AUTO_MIN_RETRIES))
@@ -1934,9 +2126,16 @@ class RelayEngine:
             run.index += 1
             pause = stage.gate == "human" and run.index < len(spec.stages) and (
                 run.approval == "always" or (run.approval == "ai" and result.needs_approval))
+            studio_gate = mode == "work" and stage.gate == "human" and run.index < len(spec.stages)
+            if studio_gate:
+                pause = False  # a studio task run does not wait at a design gate: it goes on and says so
             if stage.gate == "human" and run.index < len(spec.stages) and not pause:
                 self._event(run, stage.name, "gate_skipped", next=spec.stages[run.index].name, mode=run.approval,
-                            reason={"ai": "AI 판단: 사람이 정할 것 없음", "auto": "자동 진행 모드"}.get(run.approval, "승인 생략 설정"))
+                            reason="스튜디오 작업: 설계 승인 넘김" if studio_gate else
+                            {"ai": "AI 판단: 사람이 정할 것 없음", "auto": "자동 진행 모드"}.get(run.approval, "승인 생략 설정"))
+                if studio_gate:
+                    self._tell(run.id, "gate", {"stage": stage.name, "next": spec.stages[run.index].name,
+                                                "summary": result.summary})
             elif pause:
                 run.status = "awaiting_approval"
                 why = result.approval_reason.strip() if result.needs_approval else ""

@@ -108,7 +108,7 @@ def test_an_owners_message_in_a_dm_room_is_answered_there(desk):
     assert (run.status, Path(run.relay).name, run.workspace_mode, run.approval) == (
         "done", "employee-chat.yaml", "none", "ai")
     assert run.repo == "game" and Path(run.workdir) == (desk.lab.tmp / "project").resolve()  # §9.5: the project
-    assert run.mcp == ["studio"] and run.mcp_only == ["studio"]  # chat_mcp is [] by default: unreal is off
+    assert run.mcp == ["studio"] and run.mcp_only is None and run.mcp_scope == "all"  # no mcp named: every server
 
     [call] = desk.calls
     assert (call.stage, call.model, call.effort) == ("chat", "opus", "low")  # the `chat` slot of employee.yaml
@@ -256,6 +256,7 @@ def test_an_employee_placed_nowhere_works_in_its_own_folder_under_its_cap(desk):
     [run] = desk.runs(dm, hr)
     assert run.repo is None and Path(run.workdir) == folder.resolve()
     assert run.mcp == ["unreal", "studio"] and run.mcp_only == ["unreal", "studio"]  # chat_mcp + studio
+    assert run.mcp_scope == "only"
     assert (run.model_cap, run.effort_cap) == ("sonnet", "medium")
     [call] = desk.calls
     assert (call.model, call.effort, Path(call.cwd)) == ("sonnet", "medium", folder.resolve())  # lowered to the cap
